@@ -1,0 +1,138 @@
+{
+  "purpose": "Driver-only wire behavior probe against a deliberately synthetic local server. No Firebird execution.",
+  "backend_parameter_status": {
+    "server_version": "16.0 (Firebird pgwire prototype)",
+    "server_encoding": "UTF8",
+    "client_encoding": "UTF8",
+    "DateStyle": "ISO, MDY",
+    "standard_conforming_strings": "on"
+  },
+  "backend_key_data_sent": false,
+  "psycopg2_version": "2.9.11 (dt dec pq3 ext lo64)",
+  "libpq_build_version": 170006,
+  "libpq_runtime_version": 170006,
+  "cases": [
+    {
+      "case": "autocommit_true",
+      "result": {
+        "row": [
+          42
+        ],
+        "server_version": 160000,
+        "backend_pid": 0,
+        "adapted_examples": {
+          "integer": "SELECT 42 FROM RDB$DATABASE",
+          "text": "SELECT 'O''Reilly \\ путь' FROM RDB$DATABASE",
+          "null": "SELECT NULL FROM RDB$DATABASE",
+          "bool": "SELECT true FROM RDB$DATABASE",
+          "decimal": "SELECT 12.34 FROM RDB$DATABASE",
+          "date": "SELECT '2026-10-06'::date FROM RDB$DATABASE",
+          "bytes": "SELECT '\\x00ff'::bytea FROM RDB$DATABASE"
+        }
+      },
+      "wire_events": [
+        {
+          "startup_protocol": 196608,
+          "parameters": {
+            "user": "PGWIRE_TEST",
+            "database": "pgwire_test",
+            "application_name": "pgwire-research",
+            "client_encoding": "UTF8"
+          }
+        },
+        {
+          "authentication_response_tag": "p"
+        },
+        {
+          "frontend": "Query",
+          "sql": "SELECT CAST(42 AS INTEGER) AS answer FROM RDB$DATABASE"
+        },
+        {
+          "frontend": "Terminate"
+        }
+      ]
+    },
+    {
+      "case": "default_transactions",
+      "result": {
+        "transaction_status_after_commit": 0
+      },
+      "wire_events": [
+        {
+          "startup_protocol": 196608,
+          "parameters": {
+            "user": "PGWIRE_TEST",
+            "database": "pgwire_test",
+            "application_name": "pgwire-research",
+            "client_encoding": "UTF8"
+          }
+        },
+        {
+          "authentication_response_tag": "p"
+        },
+        {
+          "frontend": "Query",
+          "sql": "BEGIN"
+        },
+        {
+          "frontend": "Query",
+          "sql": "SELECT CAST(42 AS INTEGER) AS answer FROM RDB$DATABASE"
+        },
+        {
+          "frontend": "Query",
+          "sql": "ROLLBACK"
+        },
+        {
+          "frontend": "Query",
+          "sql": "BEGIN"
+        },
+        {
+          "frontend": "Query",
+          "sql": "SELECT CAST(42 AS INTEGER) AS answer FROM RDB$DATABASE"
+        },
+        {
+          "frontend": "Query",
+          "sql": "COMMIT"
+        },
+        {
+          "frontend": "Terminate"
+        }
+      ]
+    },
+    {
+      "case": "connection_context_on_autocommit",
+      "result": {
+        "transaction_status_after_context": 0
+      },
+      "wire_events": [
+        {
+          "startup_protocol": 196608,
+          "parameters": {
+            "user": "PGWIRE_TEST",
+            "database": "pgwire_test",
+            "application_name": "pgwire-research",
+            "client_encoding": "UTF8"
+          }
+        },
+        {
+          "authentication_response_tag": "p"
+        },
+        {
+          "frontend": "Query",
+          "sql": "BEGIN"
+        },
+        {
+          "frontend": "Query",
+          "sql": "SELECT CAST(42 AS INTEGER) AS answer FROM RDB$DATABASE"
+        },
+        {
+          "frontend": "Query",
+          "sql": "COMMIT"
+        },
+        {
+          "frontend": "Terminate"
+        }
+      ]
+    }
+  ]
+}
