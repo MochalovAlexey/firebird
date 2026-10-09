@@ -69,6 +69,8 @@ CommandComplete и transaction transitions формируются по резу�
 
 В P0 закрепить partial I/O/EOF/error contract, thread affinity, разрешённые конкурентные stop/cancel calls, владение каждым возвращённым интерфейсом, lifetime callbacks и запрет передачи секретов в diagnostics. Один последовательный worker исполняет одну session; frame sizes, количество сессий и buffers ограничены. Async cancellation получает отдельное синхронизированное владение attachment.
 
+Одна активная application transaction на PostgreSQL session — правило PgWire, соответствующее его transaction model. Общий plugin ABI не ограничивает любой будущий протокол одной транзакцией или одним attachment. Host отслеживает все выданные ресурсы для cancellation/shutdown; ограничения конкретного протокола и серверные resource limits задаются отдельно.
+
 Authentication bridge размещается в общем серверном коде. `ValidatePassword.cpp` служит образцом in-memory обмена auth plugins; первоначальный host helper может быть реализован без изменения EDS. Если общая часть выделяется из EDS, сохранить его guards и проверить регрессию. Плагин передаёт credentials по внутреннему интерфейсу; host проверяет policy, формирует auth block и remote metadata и создаёт attachment через локальный engine provider. Плагин не получает способ выбирать `Remote`/`Loopback` fallback или передавать client-controlled trusted DPB.
 
 ## Конфигурация endpoints
@@ -102,20 +104,69 @@ WireProtocolPlugins = PgWire, MySqlWire
 WireProtocolPorts = 15432, 13306
 ```
 
-`MySqlWire` в этом примере не является реализуемым компонентом текущего проекта. Для проверки нескольких endpoints использовать отдельный минимальный тестовый плагин. Расширяемость host проверяется без реализации второго СУБД-протокола.
+`MySqlWire` в этом примере не является реализуемым компонентом текущего проекта. Для проверки нескольких endpoints достаточно одного минимального тестового модуля: одна factory создаёт два экземпляра под разными configured names, а их Config задаёт различимые ответы. Второй production-протокол и вторая тестовая библиотека не нужны. При необходимости тот же модуль может зарегистрировать две factories для отдельной проверки RegisterName.
+
+### Дополнительные настройки по имени endpoint
+
+Два позиционных параметра сохраняются согласно запросу пользователя. Bind address, TLS certificate/key/CA и protocol settings хранятся в именованном `Config` соответствующего alias; для них не добавляются новые параллельные списки. Порт имеет единственный источник — `WireProtocolPorts`. Дублирующий `Port` в endpoint Config диагностируется, а не переопределяет значение из списка.
+
+Два endpoint одного протокола могут использовать одну библиотеку и одну зарегистрированную factory:
+
+```ini
+# firebird.conf
+WireProtocolPlugins = PgLocal, PgRemote
+WireProtocolPorts = 15432, 15433
+```
+
+```ini
+# plugins.conf
+Plugin = PgLocal {
+    Module = $(dir_plugins)/PgWire
+    RegisterName = PgWire
+    Config = PgLocalConfig
+}
+
+Plugin = PgRemote {
+    Module = $(dir_plugins)/PgWire
+    RegisterName = PgWire
+    Config = PgRemoteConfig
+}
+
+Config = PgLocalConfig {
+    BindAddress = 127.0.0.1
+}
+
+Config = PgRemoteConfig {
+    BindAddress = 192.0.2.10
+    # TLS settings добавляются после определения их контракта.
+}
+```
+
+`BindAddress` в примере — проектируемая host setting. PgRemote иллюстрирует будущий удалённый профиль; до реализации TLS и remote policy его запуск отвергается, без перехода на иной адрес. Module/RegisterName совпадают, но aliases получают отдельные configurations и instances; library остаётся общей до завершения обоих endpoints.
+
+Host может получить конфигурацию до загрузки библиотеки и вызова factory через существующий `IMaster::getConfigManager()->getPluginConfig(configuredName)`. Метод возвращает `IConfig`; экземпляр plugin ему не нужен. `IPluginConfig::getDefaultConfig()` отдельно предоставляет конфигурацию factory. Для named Config blocks оба пути используют `findPluginConfig()`.
+
+Перед bind требуется строгая проверка конфигурации:
+
+- Явно заданный `Config = Name` должен ссылаться на существующий block. Текущий `findPluginConfig()` допускает fallback к module `.conf` при отсутствии block; host должен исключить такой fallback для ошибочной явной ссылки.
+- `getPluginConfig()` возвращает NULL при перехваченном исключении; NULL означает ошибку endpoint, а не разрешение применить менее строгие Bind/TLS defaults. Отсутствующие необязательные параметры в корректном config получают только документированные defaults.
+- Нельзя предполагать одинаковое поведение `ConfigFile` в обоих путях: `ConfiguredPlugin` учитывает override в constructor, а `ConfigManager::getPluginConfig()` использует default `plugConfigFile`. Первая реализация host settings опирается на named Config blocks; поддержку ConfigFile объявлять только после согласования разрешения и отдельной проверки.
+- Host валидирует свои transport settings и передаёт plugin его configuration; factory не открывает listener и не меняет сопоставление alias/port.
+
+Эти проверки выполняются через существующие config interfaces/resolver с явным учётом missing references; новый config accessor в wire ABI не требуется.
 
 ### Проверка списков и политика ошибок
 
 1. До загрузки библиотек разобрать оба списка и сохранить исходные позиции. Разделитель — запятая; пробелы вокруг элемента допустимы. Пустые позиции, включая trailing comma, ошибочны; их нельзя удалять или объединять с соседними.
 2. Оба пустых списка отключают дополнительные endpoints. Единственный пустой список или разное число элементов — ошибка всей дополнительной конфигурации.
-3. Порт должен быть десятичным целым в диапазоне 1–65535 без переполнения. Дубликаты listeners и конфликт с настроенным родным TCP endpoint диагностируются до загрузки; фактический конфликт адреса также проверяется при bind.
+3. Порт должен быть десятичным целым в диапазоне 1–65535 без переполнения. Повтор точного configured name отклоняется: разные endpoints одного module/factory получают разные aliases. В начальном loopback profile дубликаты портов также отклоняются. Получить и проверить config каждого alias, затем проверить конфликт с настроенным родным TCP endpoint до загрузки; фактический конфликт адреса также проверяется при bind.
 4. После успешной общей проверки загрузить каждый `(plugin, port)` отдельно. Не получать целиком список через iterator `getPlugins()` и затем присваивать порты успешным загрузкам: существующий manager способен пропускать отсутствующие optional modules.
-5. Отсутствующая библиотека, неверный тип/factory, ошибка создания instance или bind отключает конкретный endpoint с явным сообщением в log. Оставшиеся endpoints сохраняют исходные порты. Не применять резервные порты и не пропускать ошибку молча.
+5. Ошибка config конкретного alias, отсутствующая библиотека, неверный тип/factory, ошибка создания instance или bind отключает этот endpoint с явным сообщением в log. Оставшиеся endpoints сохраняют исходные порты. Не применять резервные порты и не пропускать ошибку молча.
 6. Некорректное общее сопоставление отключает всю дополнительную конфигурацию. Ошибка дополнительного endpoint или неподдержанный server mode не запускает shutdown родного frontend.
 
 Native запускается независимо от списка и не освобождает свой listener ради дополнительного endpoint. Host не заменяет родную startup policy. В первой версии конфигурация применяется при запуске; hot reload и runtime unload не входят в профиль.
 
-Плагин может иметь дополнительные protocol settings в своей конфигурации. Endpoint creation и transport limits остаются под управлением host. Remote bind и TLS должны получить согласованный configuration contract до M3; не распространять native `WireCrypt` на PostgreSQL transport.
+Endpoint creation и transport limits остаются под управлением host. Полный набор и типы Bind/TLS settings в named Config закрепляются до их реализации; не распространять native `WireCrypt` на PostgreSQL transport.
 
 ## Жизненный цикл и выгрузка
 
@@ -161,7 +212,7 @@ TLS реализуется поверх byte transport дополнительн�
 | Plugin ABI | `src/include/firebird/FirebirdInterface.idl`: PluginBase, PluginConfig, PluginFactory, PluginManager |
 | Загрузка | `src/yvalve/PluginManager.cpp`: PluginLoadInfo, PluginSet::next, loadModule, releasePlugin |
 | Plugin helpers | `src/common/classes/ImplementHelper.h`: StdPlugin, SimpleFactory, UnloadDetectorHelper |
-| Конфигурация | `src/common/config/config.h`: ConfigKey, entries; `config.cpp`: Config::getPlugins |
+| Конфигурация | `src/common/config/config.h`: ConfigKey, entries; `config.cpp`: Config::getPlugins; `src/yvalve/PluginManager.cpp`: ConfigManager::getPluginConfig, findPluginConfig, ConfiguredPlugin |
 | Module mapping | `builds/install/misc/plugins.conf` |
 | POSIX startup | `src/remote/server/os/posix/inet_server.cpp`: registerAuthPlugins, Super initialization, SRVR_multi_thread |
 | Windows startup | `src/remote/server/os/win32/srvr_w32.cpp`: start_connections_thread |

@@ -1,6 +1,6 @@
 # Первичные источники и карта исходников
 
-Пакет обновлён 8 октября 2026 года. База — `master` Firebird 6, рабочая ветка `pg_wire_protocol`; SHA и состояние checkout описаны в [BASELINE.md](BASELINE.md). Исследованный upstream [bf94598f8deefeb7cc4a8217ee43b3040d5d6650](https://github.com/FirebirdSQL/firebird/tree/bf94598f8deefeb7cc4a8217ee43b3040d5d6650) задаёт development version 6.0.0.2199. Локальные ссылки ниже ведут в этот workspace; номера строк — навигация по исходному snapshot, symbols остаются основным ориентиром.
+Пакет обновлён 9 октября 2026 года. База — `master` Firebird 6, рабочая ветка `pg_wire_protocol`; SHA и состояние checkout описаны в [BASELINE.md](BASELINE.md). Исследованный upstream [bf94598f8deefeb7cc4a8217ee43b3040d5d6650](https://github.com/FirebirdSQL/firebird/tree/bf94598f8deefeb7cc4a8217ee43b3040d5d6650) задаёт development version 6.0.0.2199. Локальные ссылки ниже ведут в этот workspace; номера строк — навигация по исходному snapshot, symbols остаются основным ориентиром.
 
 Документ перечисляет доказательства и точки расширения, а не задаёт конкурирующий контракт: архитектура находится в [ARCHITECTURE.md](ARCHITECTURE.md), выводы — в [RESEARCH.md](RESEARCH.md). Новый общий wire host использует PluginManager/CLOOP, PG implementation собирается отдельной shared library. SQL разбирает Firebird parser; wire SQL classification/rewriting исключены требованием пользователя.
 
@@ -138,6 +138,8 @@ SQL fixtures учитывают требования parser и native DDL semant
 
 Обычный `RefPtr` добавляет ссылку, adopt-вариант принимает уже выданную; successful commit/rollback/detach/free/close могут потреблять interface ownership. Эти interfaces используются штатным native server, но сами по себе не гарантируют local engine route.
 
+Ограничение одной активной application transaction относится к PgWire state machine. Native API передаёт конкретный `ITransaction` в prepare/execute и допускает несколько transaction handles у attachment; общий host не должен превращать ограничение одного протокола в правило движка.
+
 ### F2 — официальные примеры OO API
 
 - [02.update.cpp](../examples/interfaces/02.update.cpp), [03.select.cpp](../examples/interfaces/03.select.cpp), [04.print_table.cpp](../examples/interfaces/04.print_table.cpp), [05.user_metadata.cpp](../examples/interfaces/05.user_metadata.cpp).
@@ -159,8 +161,15 @@ Native server обращается к dispatcher с configured providers. Host �
 - [btyacc_fb.ske](../src/dsql/btyacc_fb.ske): generated parser skeleton и EOF.
 - [dsql.cpp](../src/dsql/dsql.cpp): `isc_info_sql_stmt_flags`/`isc_info_sql_stmt_type`, около строк 848–925.
 - [StmtNodes.cpp](../src/dsql/StmtNodes.cpp), [DsqlStatements.h](../src/dsql/DsqlStatements.h): semantic statement types, RETURNING, MERGE и UPDATE OR INSERT.
+- [dsql.cpp](../src/dsql/dsql.cpp): `prepareStatement`, около строк 532–561, legacy empty input error и удаление завершающего `;` при отсутствии `PREPARE_REQUIRE_SEMICOLON`.
+- [Parser.cpp](../src/dsql/Parser.cpp): `yyerror_detailed`/`yyerrorIncompleteCmd`, около строк 1243–1277; `isc_command_end_err2` не различает EMPTY и незавершённую непустую команду.
+- [jrd.cpp](../src/jrd/jrd.cpp): `JAttachment::prepare`, около строки 5759; отдельное использование nested `isc_command_end_err2` при `PREPARE_REQUIRE_SEMICOLON` подтверждает необходимость сохранять этот legacy contract.
 
 Parser получает целый SQL без модификаций. Структура native API сводит RETURNING к SELECT/EXEC_PROCEDURE, MERGE/UPDATE OR INSERT к INSERT, session management к DDL, retaining и non-retaining commit к одному публичному kind. Поэтому command semantics/transaction effects требуют расширения нейтральной metadata движка. Поиск первого слова, SQL allowlist, split по `;` и wire-замена `$n` не являются решением. Будущие `BEGIN`/`$n` относятся к parser/parameter metadata.
+
+Первый этап публикации metadata — минимальный дополнительный info item через существующий `IStatement::getInfo`, различающий исходный SELECT, DML RETURNING и SELECT_BLOCK. Полный operation/DDL/session/transaction contract появляется в P4/P5. M0 не требует нового публичного pre-prepare analysis API. В E допускается обычный prepare с последующим metadata guard перед execute; только известные semantic errors преобразуются в 25P02, syntax остаётся 42601, приоритетные fatal/cancel/timeout/invalid handle/resource/I/O и неизвестные diagnostics сохраняются по CODEX_CONTEXT.
+
+EMPTY требует отдельного parser-specific nested diagnostic либо opt-in prepare flag. Нельзя выводить пустоту из `isc_command_end_err2` или глобально заменять прежний prepare error успехом. Существующая внутренняя auto-terminator обработка DSQL сохраняется; bytes не переписываются именно на wire/host boundary.
 
 ### F5 — типы, CHAR и полный status vector
 
@@ -221,10 +230,13 @@ EDS wrapper нельзя вызывать до attachment. Общий host auth 
 
 - [FirebirdInterface.idl](../src/include/firebird/FirebirdInterface.idl): PluginBase/PluginFactory/PluginModule/PluginManager, около строк 150–280; существующие TYPE_* и TYPE_COUNT. Wire protocol type пока отсутствует; TYPE_WIRE_CRYPT решает другую задачу.
 - [PluginManager.cpp](../src/yvalve/PluginManager.cpp): `PluginLoadInfo`, около строки 775, разрешает logical name через plugins.conf `Module`/`RegisterName`; `loadModule` около строки 958 исправляет platform extension и вызывает entry point; `releasePlugin` и `waitForType` определяют lifetime.
+- [PluginManager.cpp](../src/yvalve/PluginManager.cpp): `findPluginConfig`, около строки 251, читает `Config` из alias section и находит соответствующую секцию; [plugins.conf](../builds/install/misc/plugins.conf) содержит штатный пример такой связи.
 - [GetPlugins.h](../src/common/classes/GetPlugins.h): existing typed access to plugin sets.
 - [Makefile.in](../builds/posix/Makefile.in): `FirebirdInterface.idl`/`IdlFbInterfaces.h`, CLOOP build/generation.
 
 `WireProtocolPlugins`/`WireProtocolPorts` и wire interfaces — проектируемые расширения, а не готовые upstream возможности. Добавляются новый plugin type, versioned interfaces, config validation и host lifecycle. Логические имена сохраняют штатное сопоставление с `.so`/`.dll`; не требуется второй самостоятельный loader. Детали контракта определены в ARCHITECTURE.
+
+Два aliases с одинаковыми `Module`/`RegisterName` и разными `Config` используют один модуль и разные endpoint settings. Bind/TLS конфигурация относится к alias, не к ещё одному позиционному списку. Проверки создают два экземпляра одного минимального тестового модуля и подтверждают раздельные settings, ошибку одного endpoint без смещения другого, удержание модуля до завершения обеих sessions.
 
 ### F11 — ключи шифрования базы
 

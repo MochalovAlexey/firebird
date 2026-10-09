@@ -2,13 +2,13 @@
 
 База — `master` Firebird 6, SHA из [BASELINE.md](BASELINE.md). Архитектура и SQL boundary определены в [ARCHITECTURE.md](ARCHITECTURE.md), transaction contract — в [CODEX_CONTEXT.md](CODEX_CONTEXT.md), заявляемые возможности — в [COMPATIBILITY.md](COMPATIBILITY.md).
 
-Сейчас есть исходный Python scaffold: 20 тестовых функций / 56 параметризованных случаев. Он требует миграции под новые требования. C/C++/raw-wire/plugin/lifecycle suites предстоит реализовать; перечисление проверки в этом документе не означает, что она выполнена. Driver-only probe на синтетическом сервере и pytest collection не являются приёмкой Firebird.
+Исходный Python scaffold содержит 20 тестовых функций / 56 параметризованных случаев и требует миграции. Реализация начата с конфигурационных unit tests в `src/common/tests/WireProtocolConfigTest.cpp` и изолированного native baseline harness `tools/native_baseline.py`. Полные C/C++/raw-wire/plugin/lifecycle suites ещё предстоит реализовать; перечисление проверки в этом документе не означает, что она выполнена. Фактические результаты записаны в VALIDATION.md. Driver-only probe на синтетическом сервере и pytest collection не являются приёмкой Firebird.
 
 ## Этапы и обязательный минимум M0
 
 | Этап | Принимаемый результат |
 |---|---|
-| M0 | Динамический PgWire внутри `firebird`, реальная authentication, вычисляемый SELECT, ошибка/recovery, native coexistence и завершение ресурсов |
+| M0 | Динамический PgWire внутри `firebird`, реальная authentication, вычисляемый SELECT и минимальный дополнительный engine kind, ошибка/recovery, native coexistence и завершение ресурсов |
 | M1 | Simple Query с совместимым SQL, metadata-driven execution, базовые codecs, native transaction controls, server/auth/lifecycle приёмка |
 | M2 | Extended Query transport, prepared statements/portals и Bind с совместимыми native placeholders; расширенные codecs |
 | M3 | TLS/удалённый TCP/cancellation и подтверждённый профиль конкретного приложения с явно указанными SQL dependencies |
@@ -26,8 +26,11 @@
 | M0-05 | Ошибочный SQL получает engine-derived error; следующий SELECT на том же connection работает; `BEGIN` не получает фиктивного успеха |
 | M0-06 | Отсутствующий PgWire/занятый дополнительный порт дают диагностику, native connect продолжает работать |
 | M0-07 | EOF, незавершённый startup и остановка сервера освобождают sessions/workers; код библиотеки не выгружается до завершения её вызовов |
+| M0-08 | Минимальный дополнительный getInfo item отличает обычный SELECT от cursor-producing DML RETURNING и SELECT_BLOCK. Последние пока получают 0A000 до execution, native observer подтверждает отсутствие изменений. Legacy getType/flags сохраняются; весь descriptor P4/P5 для M0 не требуется |
 
 Пример M0 SQL: `SELECT CAST(6 * 7 AS INTEGER) AS "answer" FROM RDB$DATABASE`. Второе выражение с другим результатом либо запрос к тестовой таблице исключает hardcoded answer.
+
+Полная DML/DDL/control metadata, E-state и EMPTY относятся к P4/P5 и M1. Фильтр только `getType == SELECT` плюс `FLAG_HAS_CURSOR` не проходит M0-08: RETURNING/SELECT_BLOCK могут иметь те же признаки. Ограниченный M0 не превращается в постоянный SQL allowlist M1.
 
 ## Fixtures и свидетельства
 
@@ -47,16 +50,17 @@
 |---|---|---|
 | A01 | Сборка/установка/загрузка | Generic host входит в server target; PostgreSQL-specific objects находятся в отдельной plugin library, а не в daemon или Remote_Common; экспортирован штатный entrypoint |
 | A02 | Пустые default lists | Ни additional listener, ни его workers/attachments не появляются; native regression проходит |
-| A03 | Два тестовых protocol plugins с разными ответами | Позиция plugins точно соответствует позиции ports; raw clients получают ответ правильного plugin; второго СУБД-протокола для теста не требуется |
-| A04 | `StubA, MissingPlugin, StubB` и три порта | Средний endpoint диагностирован как недоступный; StubB остаётся на третьем порту; первая и родная службы работают |
+| A03 | Один тестовый module/factory, два configured aliases `StubA`, `StubB` с разными Config/ответами | Созданы отдельные instances; alias точно соответствует своему positional port/config, mutable state изолирован. Две библиотеки и второй СУБД-протокол не требуются |
+| A04 | `StubA, MissingPlugin, StubB` и три порта; StubA/StubB используют один module/factory | Средний endpoint диагностирован как недоступный; StubB остаётся на третьем порту со своей Config. Первая и родная службы работают; manager не сдвигает позиции и не переиспользует ошибочную instance |
 | A05 | Разная длина/один пустой список/пустая позиция/trailing comma | Вся некорректная дополнительная конфигурация отклонена до загрузки модулей; native работает |
 | A06 | Порт 0, отрицательный, нечисловой, overflow, >65535, дубликат/конфликт native | Предсказуемый отказ без автоматической подмены порта; native listener не закрывается |
 | A07 | Missing/bad module, wrong factory/type, exception в factory, bind failure | Ошибка содержит plugin/port/reason без секретов; частичные resources освобождены; другие корректные endpoints доступны |
 | A08 | `plugins.conf` Module/RegisterName | Файл с отличающимся именем загружается по логическому имени; неверный RegisterName даёт явный отказ |
-| A09 | Startup integration | Один endpoint на server process; нет второго `SRVR_multi_thread()`, native PACKET/XDR или startup в client library |
+| A09 | Startup integration | Один listener для каждой настроенной пары alias/port в server process, без повторного bind на других startup paths; нет второго `SRVR_multi_thread()`, native PACKET/XDR или startup в client library |
 | A10 | Provider/network route | Review actual call path и наблюдение исходящих server `connect()` при auth/SQL: engine-only, без Remote/Loopback/native TCP/Unix backend |
 | A11 | Super, SuperClassic, Classic | Super тестируется явно; SuperClassic не считается автоматически покрытым Super. Неподдержанные modes диагностируются и сохраняют native |
 | A12 | Другие build paths | CLOOP bindings согласованы; CMake/Windows имеют отдельные build results. Проектный переносимый ABI не выдаётся за проверенную DLL |
+| A13 | Разные bind/TLS/protocol settings через Config двух aliases | Каждый instance получает свою секцию Config. Сохраняются только два positional списка plugins/ports; host проверяет bind/TLS policy. До M3 remote/TLS настройки не включают необъявленную capability; с M3 проверяются разные сертификаты/policies без переноса настроек между endpoints |
 
 Strict positional validation проверяется отдельно от PluginManager iterator: optional module skipping не должен менять mapping. Конфигурационные ошибки не проверяют изоляцию от segfault в доверенном плагине: весь код работает в одном процессе.
 
@@ -85,15 +89,16 @@ Startup SQLSTATE проверять raw ErrorResponse field `C`: `psycopg2.conne
 | W05 | Независимые golden bytes результатов/errors | OID, lengths, NULL=-1, empty=0, required ErrorResponse fields, ReadyForQuery и tags; не только собственный encode→decode |
 | W06 | Native keepalive/crypt/compression и parallel sessions | PG stream не получает native bytes; framing/auth/SQL state разных sessions независимы |
 | W07 | Байты SQL на входе и в parser | Instrumented boundary сверяет bytes/length для comments, quotes, semicolons, whitespace и UTF8; wire frontend не нормализует и не переписывает SQL |
-| W08 | Пустой, whitespace/comment-only и незавершённый SQL | EMPTY устанавливается parser metadata; незавершённый SELECT, строка/комментарий дают syntax error, а не EmptyQueryResponse |
+| W08 | Пустой текст, whitespace/comment-only, незавершённые SELECT/строка/block comment | С P4 отдельный engine diagnostic означает только чистый EOF без SQL tokens; EmptyQueryResponse сохраняет прежнее I/T/E. Незаконченная строка/комментарий не становится EMPTY даже без предшествующих tokens. Общий isc_command_end_err2 не означает EmptyQueryResponse; parser/lexer errors сохраняются |
 | W09 | `BEGIN`, `$1`, `::date` и похожие tokens внутри literals/comments | Пока parser их не поддерживает в соответствующих позициях — engine syntax errors; внутри literals/comments смысл определяет parser; frontend replacement отсутствует |
 | W10 | Несколько statements в одном Query/Parse | Parser отвергает неподдержанный batch без частичного исполнения; `;` внутри совместимого SQL не разделяется frontend |
+| W11 | EMPTY diagnostic и legacy native callers, включая isql -autoterm | Прежний isc_command_end_err2/continuation/trace contract сохраняется через совместимый marker или opt-in flag. Незаконченный SQL просит продолжение как прежде; пустые/комментированные input не меняют legacy behavior; PG получает EMPTY только по новому явному признаку |
 
 W07 требует и code review, и наблюдаемой границы передачи текста. Одни удачные строки со словом BEGIN не доказывают отсутствие второго lexer. Unsupported wire messages получают реальный protocol/capability error; точные ожидания меняются после реализации Extended/TLS/cancel.
 
 ## Q/T. DSQL metadata, выполнение и транзакции
 
-До автоматического принятия всех совместимых форм P0/P3 должны закрепить полный semantic descriptor. `getType()`/cursor flag недостаточно для отличения SELECT от DML RETURNING или разных DDL/control forms.
+P3/M0 добавляет только минимальный дополнительный kind из M0-08. Полный semantic descriptor реализуется в P4/P5 перед приёмкой M1; `getType()`/cursor flag недостаточно для разных DML/DDL/control forms. Для E используется обычный prepare с текущей native transaction; отдельный pre-prepare analysis API не является gate.
 
 | ID | Сценарий | Критерий |
 |---|---|---|
@@ -106,7 +111,7 @@ W07 требует и code review, и наблюдаемой границы пе
 | Q07 | Prepare/fetch/execute/commit errors | Нет ложного CommandComplete; исходная ошибка не затёрта cleanup; uncertain transaction state завершает connection |
 | T01 | Обычный implicit Query | Настоящий commit после успешного исполнения, rollback после ошибки, state I; retaining не подменяет завершение |
 | T02 | Native SET TRANSACTION из I, native COMMIT/ROLLBACK | Реальная transaction, T/I, isolation/read-only и cross-session visibility. Повторный SET TRANSACTION при active handle — 25001/E с сохранением transaction |
-| T03 | Ошибка в explicit transaction | Native handle сохраняется, state E; обычный SQL/SAVEPOINT/RELEASE/COMMIT RETAIN получают 25P02, без незаметного открытия новой transaction |
+| T03 | Ошибка в explicit transaction | Native handle сохраняется, state E; успешно подготовленные обычный SQL/SAVEPOINT/RELEASE/COMMIT RETAIN получают 25P02 без execution и открытия новой transaction. Ошибки самого prepare имеют precedence из T11 |
 | T04 | Полный COMMIT/ROLLBACK из E | COMMIT выполняет rollback и возвращает ROLLBACK/I; ROLLBACK также завершает transaction; ещё незафиксированные изменения не сохранены; native AUTO COMMIT проверяется отдельно T09 |
 | T05 | Native RETAINING в T/E/I | В T реальная retaining operation остаётся T; E + ROLLBACK RETAIN возвращает T после rollback retaining; E + COMMIT RETAIN даёт 25P02/E; в I RETAIN — 25000/I |
 | T06 | SAVEPOINT → изменение → ошибка → ROLLBACK TO → продолжение | Успешный rollback-to возвращает T и сохраняет изменения до savepoint; неверный savepoint даёт error/E; нельзя незаметно откатить весь transaction |
@@ -114,8 +119,12 @@ W07 требует и code review, и наблюдаемой границы пе
 | T08 | Disconnect с незавершённой transaction | Rollback и освобождение lock; native observer подтверждает отсутствие uncommitted changes |
 | T09 | Native AUTO COMMIT / NO AUTO UNDO | Metadata сохраняет выбранные характеристики; visibility/error/savepoints соответствуют native API. Уже совершённые AUTO COMMIT commits сохраняются после последующего rollback; ложной атомарности PG block нет |
 | T10 | ALTER SESSION RESET в I/T/E, включая ошибку reset | Engine-derived effect учитывает смену transaction при том же interface pointer; portals/savepoints/session metadata обновлены. В T новая transaction остаётся T, в I остаётся I, в E отказ 25P02. Если reset закрыл attachment — FATAL/close, без ложного recovery |
+| T11 | Обычный prepare в E: syntax, semantic, cancel/timeout, shutdown, invalid handle, resource/I/O | Lexer/parser error возвращает 42601/E; известный ordinary semantic failure переводится в 25P02/E по таблице. Отмена/timeout сохраняет свою причину; fatal/invalid-handle/shutdown и resource/I/O не маскируются 25P02, выполняется необходимый cleanup/close. Неизвестный error сохраняет диагностику; отвергнутый statement не выполняет DML/DDL |
+| T12 | Число current application transactions в PgWire session | В I/T/E и после control errors session управляет максимум одним handle; нет скрытой второй application transaction. Engine system/security/autonomous transactions отделяются при подсчёте; native protocol и другие host plugins этим правилом не ограничиваются |
 
 Transaction characteristics и session operations, которые объявлены поддержанными, меняют реальное состояние. Unsupported capabilities получают metadata-based refusal до side effects. Native controls не отклоняются целиком только из-за отсутствия frontend recognizer. Проверки statement classification выполняются также для legacy `getType()` и existing callers: новая metadata не должна менять их семантику.
+
+T11 не утверждает, что prepare лишён compile/cache/lock/trace/external-initialization effects: проверяется отсутствие исполнения подготовленного SQL и освобождение ресурсов. Редкие resource/I/O failures воспроизводятся контролируемой инъекцией ошибок, без фактического исчерпания ресурсов рабочего сервера.
 
 ## D. Типы, строки и диагностика
 
@@ -151,8 +160,11 @@ Transaction characteristics и session operations, которые объявле
 | E08 | PQsendQueryParams/PQsendQueryPrepared/PQgetResult | Async/nonblocking API без pipeline, правильный конец результатов и errors |
 | E09 | Limits, EOF/shutdown с prepared objects и suspended portal | Ограниченная память, освобождение всех objects, module lifetime сохраняется |
 | E10 | Обычный Psycopg 3 с параметрами `%s` → `$n` | Пока parser не расширен, зафиксированный syntax failure; не объявлять такую библиотеку параметризованно совместимой |
+| E11 | Несколько Parse/Describe/statements/portals перед ALTER SESSION RESET | Prepare использует текущую application transaction либо NULL/system prepare; собственных transactions у prepared objects нет. RESET не получает ошибку из-за скрытой prepare-transaction, корректно заменяет текущую transaction, инвалидирует portals/savepoints; следующий запрос работает |
 
 После отдельной поддержки `$n` в parser добавить repeated/reordered indices, gaps/overflow, references в literals/comments и обычный Psycopg 3 Cursor с переходом к named preparation. Эти проверки обязательны для будущего заявления о таком клиенте. ClientCursor и клиентская подстановка не заменяют Extended Query. Pipeline и COPY требуют самостоятельных матриц, если входят в профиль приложения.
+
+В E11 проверить оба входа: несколько Parse/Describe из I без собственной transaction на statement и те же операции при уже открытой explicit transaction. Создание implicit cycle допускает только один общий current handle. Сравнить ownership counters и native monitoring, учитывая внутренние engine transactions отдельно; одинаковый interface pointer после RESET не доказывает прежнюю underlying transaction.
 
 ## L. Resource ownership и остановка
 

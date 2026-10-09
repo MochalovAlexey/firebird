@@ -188,6 +188,8 @@ enum ConfigKey
 	KEY_MAX_PARALLEL_WORKERS,
 	KEY_OPTIMIZE_FOR_FIRST_ROWS,
 	KEY_ALLOW_UPDATE_OVERWRITE,
+	KEY_WIRE_PROTOCOL_PLUGINS,
+	KEY_WIRE_PROTOCOL_PORTS,
 	MAX_CONFIG_KEY		// keep it last
 };
 
@@ -302,7 +304,9 @@ inline constexpr ConfigEntry entries[MAX_CONFIG_KEY] =
 	{TYPE_INTEGER,	"ParallelWorkers",			true,	1},
 	{TYPE_INTEGER,	"MaxParallelWorkers",		true,	1},
 	{TYPE_BOOLEAN,	"OptimizeForFirstRows",		false,	false},
-	{TYPE_BOOLEAN,	"AllowUpdateOverwrite",		false,	true}
+	{TYPE_BOOLEAN,	"AllowUpdateOverwrite",		false,	true},
+	{TYPE_STRING,	"WireProtocolPlugins",		true,	""},
+	{TYPE_STRING,	"WireProtocolPorts",		true,	""}
 };
 
 
@@ -575,6 +579,8 @@ public:
 	CONFIG_GET_GLOBAL_KEY(FB_UINT64, getMaxUserTraceLogSize, KEY_MAX_TRACELOG_SIZE, getInt);
 
 	static int getServerMode();
+	CONFIG_GET_GLOBAL_STR(getWireProtocolPlugins, KEY_WIRE_PROTOCOL_PLUGINS);
+	CONFIG_GET_GLOBAL_STR(getWireProtocolPorts, KEY_WIRE_PROTOCOL_PORTS);
 
 	const char* getPlugins(unsigned int type) const;
 

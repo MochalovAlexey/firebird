@@ -16,7 +16,8 @@ Wire plugin разбирает сообщения протокола и пере
 | Native listener при пустом списке и при включённых plugins | Да | Да | Да | Да |
 | Firebird credentials, local engine, реальные privileges | Да | Да | Да | Да |
 | Simple Query с неизменённым Firebird SQL | SELECT и error recovery | CRUD, совместимый DDL/session SQL, RETURNING | Сохранить, общие codecs | Сохранить |
-| Engine-derived operation/control/EMPTY metadata | Минимум для smoke | Полный контракт, без frontend lexer | Общий для обоих paths | Общий |
+| Engine-derived operation/control metadata | Один getInfo item: SELECT отличается от RETURNING/SELECT_BLOCK | Полный descriptor P4/P5, без frontend lexer | Общий для обоих paths | Общий |
+| EMPTY / whitespace/comment-only SQL | Поддержка ещё не заявляется | Чистый EOF: отдельный engine diagnostic с legacy-compatible status | Общий для обоих paths | Общий |
 | Прямой C libpq | Connect/PQexec | PQexec, metadata, state/error checks | PQexecParams, PQprepare/PQexecPrepared, Describe, async send/get | Прикладные сценарии |
 | psycopg2 2.9.11 | Autocommit smoke без connection context | Autocommit и явный native transaction SQL, без автоматического BEGIN | Регрессия допустимого профиля | Если соответствует выбранной трассе |
 | Parse/Bind/Describe/Execute/Close/Flush/Sync | Явный отказ | Явный отказ | Да | Да |
@@ -34,6 +35,8 @@ Wire plugin разбирает сообщения протокола и пере
 | BackendKeyData / CancelRequest | Нет | Нет | Общий lifecycle подготовлен | Да |
 
 Общий host использует позиционные `WireProtocolPlugins` / `WireProtocolPorts`; пустая конфигурация отключает дополнительные endpoints. PG plugin загружается штатным PluginManager из `.so`/`.dll` по правилам ARCHITECTURE.md. Ошибка дополнительного plugin не должна делать native protocol зависимым от него. Один PG plugin — первая реализация общего extension point; реализация MySQL/MSSQL plugins в этот план не входит.
+
+Одна библиотека/factory допускает несколько configured aliases с отдельными endpoint instances и секциями `Config`. Bind/TLS/protocol settings относятся к alias; единственными позиционными списками остаются plugins и ports. Независимость instances проверяется одним тестовым модулем с двумя aliases, а не требует двух СУБД-протоколов или двух библиотек.
 
 ## Синтаксис и клиентские режимы
 
@@ -60,11 +63,15 @@ Psycopg 3, pgjdbc, Npgsql, pgx и другие клиенты не объявл�
 
 Команда не отклоняется только из-за отсутствия её первого слова в списке. Совместимый DDL включает проверяемые CREATE/ALTER/DROP, index и privilege операции. Session statements выполняются движком реально. Корректный command tag требует metadata исходной операции: coarse `getType` не различает MERGE, UPDATE OR INSERT, DML RETURNING, session management и некоторые controls.
 
-M1 state policy сохраняет native transaction при ошибке explicit block и ставит E. Обычный SQL блокируется с 25P02. Полный COMMIT из E откатывает работу; ROLLBACK завершает её; успешный ROLLBACK TO восстанавливает T и сохраняет изменения до savepoint. Retaining actions учитывают сохранение handle: ROLLBACK RETAIN может очистить failed block, COMMIT RETAIN в E не может сохранить его изменения. Полная таблица и edge cases заданы в CODEX_CONTEXT.md. Факт I/T/E не обещает совпадения isolation, locks или DDL semantics с PostgreSQL.
+M0 использует минимальный дополнительный engine kind для SELECT-профиля: существующих `getType` и cursor flag недостаточно, чтобы исключить DML RETURNING/SELECT_BLOCK. Не реализованные в M0 категории получают metadata-based 0A000 до исполнения. Полные operation/control metadata и выполнение совместимых форм добавляются в P4/P5; весь descriptor не блокирует первый SELECT.
+
+M1 state policy сохраняет native transaction при ошибке explicit block и ставит E. Обычный prepare выполняется на этом handle; metadata определяет разрешённый recovery, остальные успешно подготовленные команды блокируются с 25P02 без execution. Lexer/parser error остаётся 42601. Только известные обычные semantic prepare errors переводятся в 25P02; fatal/shutdown, cancel/timeout, invalid handle, resource/I/O и неизвестные ошибки не маскируются. Отдельный pre-prepare analysis API не требуется. Полный COMMIT из E откатывает текущую работу; ROLLBACK завершает её; успешный ROLLBACK TO восстанавливает T и сохраняет изменения до savepoint. Retaining actions учитывают сохранение handle: ROLLBACK RETAIN может очистить failed block, COMMIT RETAIN в E не может сохранить его изменения. Полная таблица и edge cases заданы в CODEX_CONTEXT.md. Факт I/T/E не обещает совпадения isolation, locks или DDL semantics с PostgreSQL.
+
+PgWire session управляет максимум одной текущей application transaction на своём attachment. Parse/Describe/statements/portals используют её либо prepare с NULL, без отдельных скрытых transactions. Внутренние engine system/security/autonomous transactions исключены из этого счёта. Это ограничение PgWire, не ограничение native protocol или общего host для других plugins. RESET проверяется после нескольких Parse/Describe/portals, включая смену underlying transaction при неизменном interface pointer.
 
 Явные native transaction characteristics сохраняют семантику Firebird. В частности, `SET TRANSACTION AUTO COMMIT` может зафиксировать изменения до конца логического блока: последующий rollback не отменяет прежние commits. AUTO COMMIT / NO AUTO UNDO отражаются в metadata и имеют отдельные проверки; I/T/E не подменяет их поведение обещанием PostgreSQL atomicity.
 
-EMPTY определяется parser отдельно от незаконченного SELECT. CHAR сохраняет logical OID и характерную добивку, а transport conversion не выдаёт лишнюю UTF8 byte padding. Ошибки сопоставляются по полному status vector. Эти детали являются условиями корректности M1, а не поводом для SQL recognition в plugin.
+EMPTY определяется при чистом EOF без SQL tokens существующим engine lexer/parser. Незаконченный SELECT, строка и block comment остаются ошибками. Дополнительный diagnostic marker или opt-in prepare flag сохраняет legacy `isc_command_end_err2` и `isql -autoterm`; общий код incomplete command не означает EMPTY. CHAR сохраняет logical OID и характерную добивку, а transport conversion не выдаёт лишнюю UTF8 byte padding. Ошибки сопоставляются по полному status vector. Эти детали являются условиями корректности M1, а не поводом для SQL recognition в plugin.
 
 ## Отдельные расширения и ограничения
 

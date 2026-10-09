@@ -28,11 +28,15 @@ Wire-слой разбирает сетевые сообщения и перед
 | M3 | Удалённый TCP, TLS, cancellation и проверенный профиль приложения с совместимым SQL |
 | Будущее расширение движка | PostgreSQL `BEGIN`, `$n`, другие grammar/functions по отдельной задаче |
 
+M0 получает лишь минимальную metadata через существующий getInfo для различения SELECT, DML RETURNING и selectable EXECUTE BLOCK. Полные command/control metadata и EMPTY реализуются в P4/P5. Новый самостоятельный API анализа до prepare не является условием реализации.
+
+Правило одной текущей application transaction относится только к PgWire-сессии. Родные attachments и generic host сохраняют возможности Firebird; Parse/Describe и portals не создают отдельные application transactions. Последовательных транзакций на одном подключении может быть сколько угодно.
+
 Профиль приложения изучается в P0. Поддержка wire-протокола сама по себе не делает совместимыми SQL и обращения к каталогам, которые генерирует драйвер или ORM. Эти зависимости фиксируются явно. Linux/Super — первая платформа проверки; SuperClassic использует общий проект host, но проверяется отдельно. Windows ABI учитывается сразу, Windows build/runtime требует собственной приёмки.
 
 ## Документы и состояние
 
-База — `master` Firebird 6, рабочая ветка — `pg_wire_protocol`; точный SHA и исходники см. [BASELINE.md](BASELINE.md). Пакет пересмотрен 8 октября 2026 года с учётом замечаний review и прямых указаний пользователя. Описанные интерфейсы и параметры конфигурации пока проектные: серверный код не реализован, сборка и интеграционная приёмка не выполнены.
+База — `master` Firebird 6, рабочая ветка — `pg_wire_protocol`; точный SHA и исходники см. [BASELINE.md](BASELINE.md). Пакет дополнен 9 октября 2026 года с учётом замечаний review и уточнения границы транзакций. Реализация начата с P0 и конфигурационной части P1. Загрузка wire plugins, listener, auth bridge и SQL execution PgWire ещё не реализованы. Текущие решения — [IMPLEMENTATION_NOTES.md](IMPLEMENTATION_NOTES.md); фактически выполненные проверки — [VALIDATION.md](VALIDATION.md).
 
 | Файл | Назначение |
 |---|---|
@@ -42,6 +46,7 @@ Wire-слой разбирает сетевые сообщения и перед
 | [COMPATIBILITY.md](COMPATIBILITY.md) | Возможности и ограничения по этапам |
 | [PLAN.md](PLAN.md) | Порядок реализации и критерии завершения |
 | [TEST_PLAN.md](TEST_PLAN.md) | Проверки и миграция исходного test scaffold |
+| [IMPLEMENTATION_NOTES.md](IMPLEMENTATION_NOTES.md), [VALIDATION.md](VALIDATION.md) | Принятые решения и результаты реализации |
 | [RESEARCH.md](RESEARCH.md), [SOURCES.md](SOURCES.md) | Обоснование решений и первичные источники |
 | [CODEX_START_PROMPT.md](CODEX_START_PROMPT.md) | Краткое задание для реализации |
 | [tests/test_pgwire_acceptance.py](tests/test_pgwire_acceptance.py) | Исходный scaffold: 20 функций / 56 cases, подлежит миграции |

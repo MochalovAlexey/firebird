@@ -10,6 +10,8 @@ Native Firebird protocol использует `P_OP/PACKET/XDR`; `rem_port`, о�
 
 Firebird уже имеет PluginManager, загрузку `.so`/`.dll`, factories, владение модулем и cleanup. Для wire-протоколов требуется новый тип и версионированные CLOOP interfaces; существующий `IWireCryptPlugin` предназначен для шифрования native bytes и не заменяет их. Логическое имя разрешается в модуль через штатную plugin configuration [F10].
 
+Два позиционных списка сохраняются. Разные aliases могут указывать одинаковые `Module`/`RegisterName`, но разные `Config` sections в `plugins.conf`: это позволяет назначать endpoint-specific bind/TLS settings без новых параллельных списков. Проверка host использует один минимальный тестовый модуль с двумя экземплярами и разными конфигурациями; второй протокол СУБД для этого не нужен. Поддержка разных настроек одного модуля не должна зависеть от порядка загрузки aliases [F10].
+
 Сборочные списки не рекурсивны: `dirObjects(remote/server)` не подхватит произвольный новый подкаталог. Host objects включаются в server target явно; PG implementation получает отдельный plugin target и install rule. Линковка штатного `firebird` с `libfbclient` уже существует; отсутствие backend network hop доказывается provider route и runtime-наблюдением, а не именем runtime-библиотеки [F6, F9].
 
 ## SQL принадлежит парсеру и движку
@@ -19,6 +21,12 @@ SQL передаётся в Firebird неизменным, с явной дли�
 `JAttachment::prepare` передаёт запрос в DSQL. Текущее начальное правило grammar принимает один statement с необязательной завершающей `;`; несовместимый SQL получает ошибку этого parser. SQL whitelist только для CREATE/DROP TABLE не нужен. Ограничения wire codecs и API-возможностей должны быть явными, но не превращаться во второй SQL dialect [F4].
 
 Публичные statement kind/flags недостаточны для точного command tag: RETURNING может описываться как SELECT/EXEC_PROCEDURE, MERGE и UPDATE OR INSERT как INSERT, session management как DDL. COMMIT и COMMIT RETAINING также сводятся к одному публичному kind. Требуется нейтральная metadata от parser/engine о семантике команды и её влиянии на transaction/session; она расширяет engine API, а не создаёт PG-specific SQL parser [F4, F5].
+
+Это расширение вводится постепенно. M0 требует лишь минимальный новый info item через существующий `IStatement::getInfo`, различающий исходный SELECT, DML RETURNING и SELECT_BLOCK. Он сохраняет legacy `getType()` и позволяет ограничить первый исполняемый срез обычным SELECT без keyword checks. Полная metadata для DML/DDL/session/transaction controls появляется в P4/P5; её проектирование не означает реализации всей матрицы до первого запроса.
+
+Отдельный публичный pre-prepare analysis API не является условием M0 или обработки E. В failed explicit block допустим обычный prepare в сохраняемой native transaction: после успеха решение о возможности исполнения принимается по metadata. Только известные semantic prepare errors при такой проверке отображаются в 25P02; lexer/parser syntax errors сохраняют 42601. Fatal/shutdown/cancellation/timeout/invalid handle/resource/I/O failures и неизвестные ошибки не маскируются. Подготовка не исполняет statement, но может компилировать, загружать metadata/external routines, брать locks и вызывать trace; проверяются cleanup и отсутствие утечек. Точные E/recovery правила задаёт CODEX_CONTEXT.
+
+EMPTY/comment-only устанавливается штатным parser. Нынешний `isc_command_end_err2` встречается и для незавершённого `SELECT`, поэтому он не является признаком пустоты. Возможен отдельный вложенный диагностический code при сохранении legacy ошибки либо opt-in prepare flag для нового результата EMPTY. Глобальное превращение прежней ошибки в успешный prepare не допускается. Существующая обработка завершающего `;` внутри DSQL также сохраняется для legacy callers: требование неизменных bytes относится к передаче SQL через wire/host, а не к удалению штатной внутренней нормализации [F4].
 
 `BEGIN` и `$n` нельзя незаметно поддержать в wire layer: их будущая поддержка относится к grammar/parameter metadata. Пока соответствующего синтаксиса нет, запросы завершаются штатной ошибкой Firebird. Тесты используют native SQL, включая поддерживаемое управление транзакциями. Autocommit позволяет начать проверку libpq без автоматически добавляемого драйвером `BEGIN`.
 
@@ -45,6 +53,8 @@ Native attach передаёт `setDbCryptCallback`; PostgreSQL-клиент н�
 ## Extended Query, результаты и ошибки
 
 Prepared statement и portal имеют разный lifetime; portal связывает параметры и cursor с transaction context. Sync задаёт границу implicit transaction, Flush позволяет получить сообщения до Sync, а ошибка требует discard-until-Sync. RowDescription/ReadyForQuery нельзя копировать из Simple Query после каждого Execute [S1, S16].
+
+Одна активная application transaction на connection — ограничение PgWire и его PostgreSQL I/T/E модели. Host ABI и native Firebird attachments не получают такого глобального ограничения: их способность обслуживать несколько transactions сохраняется.
 
 OID выбирает decoder клиента. Кодек использует реальные type/subtype/scale, message offsets, NULL indicator и metadata lifetime. Расширение результата агрегата учитывается после prepare; binary wire layout не совпадает с native buffers. Неподдержанный тип даёт явную ошибку до выполнения, когда metadata уже доступна [F1, F5, S13, S14].
 
