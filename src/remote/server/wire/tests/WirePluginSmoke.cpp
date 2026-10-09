@@ -57,6 +57,7 @@ struct Observations
 	bool hostDestroyed = false;
 	bool connectionDestroyed = false;
 	unsigned shutdowns = 0;
+	bool readTimedOut = false;
 	std::atomic<bool> enteredRead{false};
 };
 
@@ -103,8 +104,8 @@ public:
 	{
 		std::unique_lock<std::mutex> guard(mutex);
 		observations.enteredRead = true;
-		if (blocked)
-			ready.wait_for(guard, 3s, [&] { return closed; });
+		if (blocked && !ready.wait_for(guard, 3s, [&] { return closed; }))
+			observations.readTimedOut = true;
 		if (closed || blocked)
 		{
 			fail(status);
@@ -274,9 +275,9 @@ void verifyErrors(IMaster* master)
 	}
 }
 
-void verifyStop(IMaster* master, bool beforeRun)
+void verifyStop(IMaster* master, const char* alias, bool beforeRun = false)
 {
-	auto plugin = ProtocolPlugin::load(master, {beforeRun ? "PreStopped" : "Blocked", 33001});
+	auto plugin = ProtocolPlugin::load(master, {alias, 33001});
 	Observations observations;
 	auto* host = new Host(observations);
 	auto* connection = new Connection(observations, true);
@@ -300,11 +301,15 @@ void verifyStop(IMaster* master, bool beforeRun)
 			std::this_thread::yield();
 		const bool entered = observations.enteredRead;
 		const auto stoppedAt = std::chrono::steady_clock::now();
+		// StopMutex holds a plugin mutex across read(). Calling its stop before
+		// transport shutdown blocks until the mock's 3s guard expires, failing the
+		// 1s check below without hanging this executable indefinitely.
 		session->stop();
 		session->stop();
 		worker.join();
 		require(entered, "worker did not enter read");
 		require(std::chrono::steady_clock::now() - stoppedAt < 1s, "stop failed to wake blocked I/O");
+		require(!observations.readTimedOut, "blocked read reached timeout instead of shutdown");
 		require(status->getState() & IStatus::STATE_ERRORS, "shutdown read did not report failure");
 	}
 	session.reset();
@@ -329,10 +334,14 @@ int main()
 	try
 	{
 		IMaster* master = fb_get_master_interface();
+		expectFailure([&] { ProtocolPlugin::load(master, {"First,Second", 31001}); },
+			"loader accepted multiple configured names as one endpoint");
+		mark("host.valid_load_begin");
 		verifyAliases(master);
 		verifyErrors(master);
-		verifyStop(master, false);
-		verifyStop(master, true);
+		verifyStop(master, "Blocked");
+		verifyStop(master, "PreStopped", true);
+		verifyStop(master, "StopMutex");
 		mark("host.before_shutdown");
 		require(fb_shutdown(5000, fb_shutrsn_app_stopped) == 0, "fb_shutdown failed");
 		mark("host.after_shutdown");

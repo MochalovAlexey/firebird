@@ -38,6 +38,16 @@ BOOST_AUTO_TEST_CASE(DatabaseCannotOverrideEndpoints)
 	BOOST_CHECK_EQUAL(database.getString(KEY_WIRE_PROTOCOL_PORTS), "15432, 15433");
 }
 
+BOOST_AUTO_TEST_CASE(ImplicitPluginIterationCannotDiscardEndpointPositions)
+{
+	ConfigFile file(ConfigFile::USE_TEXT,
+		"WireProtocolPlugins = First, Missing, Second\nWireProtocolPorts = 31001, 31002, 31003\n");
+	Config config(file);
+	BOOST_CHECK_THROW(config.getPlugins(IPluginManager::TYPE_WIRE_PROTOCOL), Firebird::Exception);
+	BOOST_CHECK_EQUAL(config.getString(KEY_WIRE_PROTOCOL_PLUGINS), "First, Missing, Second");
+	BOOST_CHECK_EQUAL(config.getString(KEY_WIRE_PROTOCOL_PORTS), "31001, 31002, 31003");
+}
+
 BOOST_AUTO_TEST_CASE(BlankListsDisableEndpoints)
 {
 	std::vector<EndpointConfig> endpoints = {{"Previous", 15432}};

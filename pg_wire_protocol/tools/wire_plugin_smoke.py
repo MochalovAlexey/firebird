@@ -45,6 +45,7 @@ def run(firebird_dir, work_dir):
         "OldSession": ("old_session", "session_old"),
         "Blocked": ("blocked", "echo"),
         "PreStopped": ("pre_stopped", "echo"),
+        "StopMutex": ("stop_mutex", "stop_mutex"),
     }
     sections = []
     for alias, (label, mode) in modes.items():
@@ -75,9 +76,11 @@ def run(firebird_dir, work_dir):
     if result.returncode:
         raise RuntimeError(f"smoke exited {result.returncode}: {result.stderr.strip()}\n"
                            + "\n".join(events))
-    for name in ("module.load", "module.cleanup", "module.unload"):
+    for name in ("host.valid_load_begin", "module.load", "module.cleanup", "module.unload"):
         if events.count(name) != 1:
             raise RuntimeError(f"expected one {name}, got events: {events}")
+    if events.index("host.valid_load_begin") >= events.index("module.load"):
+        raise RuntimeError("invalid endpoint loaded a module before being rejected")
     for alias, (label, mode) in modes.items():
         if mode.startswith("factory_"):
             continue
@@ -106,6 +109,7 @@ def run(firebird_dir, work_dir):
     summary = {"result": "passed", "transport": "mock byte stream (no TCP)",
                "plugin_manager": "real fbclient and dynamically loaded shared module",
                "same_module_aliases": ["First", "Second"], "missing_middle": "rejected",
+               "stop_fault_injection": "transport wakes read before plugin stop takes its mutex",
                "lifecycle": "sessions released before plugins, module cleaned and unloaded",
                "work_dir": str(work_dir)}
     (work_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")

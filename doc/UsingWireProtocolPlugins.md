@@ -74,6 +74,11 @@ unavailable names. The loader requests each configured name separately because
 the plugin manager may skip missing optional modules in a list; skipping an
 entry must not change the port assigned to a subsequent entry.
 
+`Config::getPlugins(TYPE_WIRE_PROTOCOL)` rejects implicit iteration. The host
+reads the two wire settings together, validates positional pairs, and passes
+one explicit configured name to the loading adapter. A direct adapter call
+also rejects list separators before invoking the plugin manager.
+
 The host must validate endpoint configuration before creating listeners. The
 current loading adapter validates its supplied name and port, but does not
 implement Bind/TLS settings or listener creation. Future transport settings
@@ -81,6 +86,12 @@ belong in named per-alias configuration blocks, without additional positional
 lists. The existing configuration manager can read a named plugin configuration
 before loading its module. Explicit missing Config references and the existing
 differences in ConfigFile resolution need validation by that host layer.
+
+The same startup layer must reject conflicts with the actual native TCP
+listener before loading wire modules. This gate is still pending along with
+listener integration. Comparing only with `RemoteServicePort` is insufficient:
+command-line port overrides, service-name resolution, disabled TCP, bind address
+and dual-stack behavior must be reflected in the native endpoint metadata.
 
 ## Interface responsibilities
 
@@ -158,8 +169,11 @@ worker, perform an engine call, wait for a mutex held by execution, or release
 the session or plugin. A session observes a stop request before starting further
 work. Reference counting and the stop flag must support these concurrent calls.
 
-The host adapter calls session `stop()` and connection `shutdown()`. Transport
-shutdown wakes blocked I/O independently of the plugin's stop implementation.
+The host adapter calls connection `shutdown()` before session `stop()`, so
+transport waits are interrupted before entering plugin code. This also avoids
+a lock cycle if a faulty stop callback waits for a mutex held across read().
+It does not relax the nonblocking stop contract or guarantee recovery from
+arbitrarily blocked plugin code.
 The caller must not hold a registry lock across callbacks, object destruction or
 plugin release. Copy or retain the necessary owners under the lock, then perform
 those operations after releasing it.

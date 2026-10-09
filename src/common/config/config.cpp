@@ -674,7 +674,11 @@ const char* Config::getPlugins(unsigned int type) const
 			break;
 		}
 		case IPluginManager::TYPE_WIRE_PROTOCOL:
-			return getWireProtocolPlugins();
+			// A positional endpoint list must not enter the generic plugin iterator,
+			// which skips missing modules. The wire host loads one explicit name.
+			(Arg::Gds(isc_random) <<
+				"Wire protocol plugins must be loaded by endpoint with an explicit configured name").raise();
+			return nullptr;
 		case IPluginManager::TYPE_TRACE:
 		{
 			DECLARE_PER_DB_KEY(KEY_PLUG_TRACE);

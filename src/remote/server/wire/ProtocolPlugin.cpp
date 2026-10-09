@@ -131,8 +131,10 @@ void ProtocolSession::run(CheckStatusWrapper* status)
 
 void ProtocolSession::stop() noexcept
 {
-	session->stop();
+	// Wake transport waits before entering plugin code, even if a faulty plugin
+	// tries to acquire a lock held by its blocked I/O callback in stop().
 	connection->shutdown();
+	session->stop();
 }
 
 } // namespace Firebird::WireProtocol

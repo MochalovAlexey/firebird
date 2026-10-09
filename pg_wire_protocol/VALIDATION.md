@@ -129,3 +129,18 @@ python3 pg_wire_protocol/tools/native_baseline.py \
 PASS: все 9 checks, Srp256/Super/TCPv4, SELECT, identity, commit/rollback, wrong password, reconnect и штатный shutdown exit 0. Временный port 41291; сервер/isql `LI-T6.0.0.2199-dev`. Запуск выполнен с разрешённым локальным TCP вне sandbox на отдельной копии runtime/security DB; сервер после проверки остановлен. Результат — `/tmp/firebird-pgwire-native-abi-20261009/summary.json`.
 
 ABI/loader/session ownership проверены для этого среза. Python AST, локальные ссылки документации и git diff --check — PASS. До завершения P1 остаются strict configuration на общем cached snapshot PluginManager, bind/listeners, resource limits, registry/workers и интеграция startup/shutdown. Auth/TLS/engine services пока отсутствуют; M0 не принят. Native smoke подтверждает прежний native путь при отключённых дополнительных endpoints, а не сосуществование с ещё отсутствующим TCP listener.
+
+## Исправления по review второго среза
+
+9 октября 2026 года, HEAD до изменений `0fd7261a53`. Transport shutdown перенесён перед plugin stop. Implicit `Config::getPlugins(TYPE_WIRE_PROTOCOL)` теперь отказывает: positional settings должны проверяться вместе, затем loader получает одно имя. Direct loader name с запятой отвергается до обращения к PluginManager.
+
+- Полная `make -j4` — PASS (`p1-review-build.log`).
+- Пересборка wire_tests/common_test — PASS (`p1-review-tests-build.log`, финальное уточнение fixture — `p1-review-tests-final-build.log`).
+- WireProtocolConfigTests — 12 cases / 171 assertions PASS; ConfigFileTests — 3 cases / 4 assertions PASS (`p1-review-config-tests.log`, `p1-review-config-regression.log`).
+- Real-plugin smoke — PASS; итоговые `summary.json` и `events.log` в `/tmp/firebird-pgwire-review-final-20261009`. Команда прежняя, с новым `--work-dir`.
+- StopMutex fixture намеренно берёт в stop mutex, удерживаемый вокруг read. Stop завершается менее чем за 1 секунду; отдельно проверяется, что mock read не вышел по своему страховочному timeout. Это защитная проверка порядка, а не разрешение блокирующего plugin stop в ABI.
+- Для имени `First,Second` отказ получен до module entrypoint. Marker `host.valid_load_begin` предшествует единственному module.load.
+- Проверка чувствительности тестов: отдельные копии loader под `/tmp` с прежним порядком stop и разрешённой запятой отклонены harness. Первая достигает страховочного timeout, вторая преждевременно загружает модуль. Рабочие исходники и binaries при этом не заменялись; итог — `/tmp/firebird-pgwire-review-mutants-20261009/summary.json`.
+- Native TCP smoke — PASS, все 9 checks, shutdown exit 0. Изолированная копия `/tmp/firebird-pgwire-native-review-20261009`, port 51649, Super/Srp256/TCPv4, версия `LI-T6.0.0.2199-dev`.
+
+Native-port conflict ещё не проверяется кодом: server startup/listeners остаются следующим срезом. ARCHITECTURE/PLAN/TEST_PLAN уточнены: до загрузки модулей нужны фактические native endpoints с учётом `-p`, service-name resolution, disabled TCP и bind/dual-stack. Эта часть A06 не принята.

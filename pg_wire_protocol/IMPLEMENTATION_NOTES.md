@@ -38,7 +38,7 @@ TLS transport и сертификаты принадлежат host, решен�
 
 HEAD до изменений — `e912b12560`. В CLOOP добавлены TYPE_WIRE_PROTOCOL=13 и четыре интерфейса: IWireProtocol, IWireSession, IWireConnection, IWireServerHost. Существующие номера типов и версии интерфейсов сохраняются; C++, Pascal и C bindings обновляются штатным `updateCloopInterfaces`. Точный контракт — [UsingWireProtocolPlugins.md](../doc/UsingWireProtocolPlugins.md).
 
-ProtocolPlugin в `src/remote/server/wire` загружает один configured name за вызов PluginManager. Отсутствующий optional module становится ошибкой данного endpoint, без перехода к следующему имени и без изменения port mapping. Код не открывает sockets. Config::getPlugins знает новый глобальный тип; host всё равно передаёт проверенные имена по одному.
+ProtocolPlugin в `src/remote/server/wire` загружает один configured name за вызов PluginManager. Отсутствующий optional module становится ошибкой данного endpoint, без перехода к следующему имени и без изменения port mapping. Код не открывает sockets. После review Config::getPlugins(TYPE_WIRE_PROTOCOL) явно запрещает implicit list lookup; host читает raw settings парой и передаёт проверенные имена по одному. Direct loader call также отвергает запятую до обращения к PluginManager.
 
 ProtocolSession удерживает plugin, host context и connection. Сначала освобождается возвращённый библиотекой session object, затем host-side references, затем plugin через releasePlugin. Это удерживает библиотеку при удалении endpoint, пока его session ещё работает. Raw session наружу не выдаётся. Создание sessions сериализовано на instance; run допускается один раз, stop может вызываться параллельно и будит transport через shutdown. Владелец wrapper обязан дождаться возврата run и всех stop перед его уничтожением.
 
@@ -49,3 +49,9 @@ Authentication и TLS upgrade пока отсутствуют в ABI и буду
 До подключения listeners нужно согласовать strict config resolution с кэшированным pluginsConf. Обычный getConfig перечитывает файл, а getPluginConfig и factory используют cached snapshot: отдельная свежая проверка не доказывает корректность фактически загружаемой конфигурации. Legacy fallback не меняется в этом срезе. Доступ к тому же snapshot, missing Config/NULL, ConfigFile и Port override остаются задачей следующей интеграции.
 
 Следующие части P1: strict host settings, listeners, bounded workers/queues, registry, server startup/shutdown и native coexistence с активным дополнительным endpoint. Затем P2 добавит PgWire framing, общий auth service и локальный attachment. BEGIN/$n остаются отдельной будущей работой parser/DSQL.
+
+## Уточнения после review второго среза
+
+ProtocolSession::stop сначала вызывает transport shutdown, затем plugin stop. Это устраняет зависимость пробуждения read от callback плагина, в том числе цикл с ошибочно удерживаемым mutex. Требование неблокирующего plugin stop сохраняется; fixture с mutex намеренно нарушает его, чтобы проверить защитный порядок. Произвольное зависание кода внутри доверенного модуля этим не изолируется.
+
+Native-port conflict остаётся обязательной проверкой следующего startup среза до загрузки модулей. Она должна использовать фактический native TCP endpoint с учётом `-p`, service-name resolution, отключённого TCP и bind/dual-stack. Сравнение только с сырым RemoteServicePort не добавляется в библиотечный loader, не имеющий startup context.

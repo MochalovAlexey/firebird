@@ -104,7 +104,13 @@ public:
 		char buffer[11];
 		while (!stopped.load())
 		{
-			const unsigned length = connection->read(status, sizeof(buffer), buffer, 0);
+			unsigned length;
+			{
+				std::unique_lock<std::mutex> guard(readMutex, std::defer_lock);
+				if (mode == "stop_mutex")
+					guard.lock();
+				length = connection->read(status, sizeof(buffer), buffer, 0);
+			}
 			if ((status->getState() & IStatus::STATE_ERRORS) || length == 0)
 				return;
 			unsigned position = 0;
@@ -121,6 +127,11 @@ public:
 
 	void stop() override
 	{
+		// Fault injection only: this mode deliberately violates the nonblocking
+		// stop contract. The host must wake transport before entering plugin code.
+		std::unique_lock<std::mutex> guard(readMutex, std::defer_lock);
+		if (mode == "stop_mutex")
+			guard.lock();
 		stopped = true;
 		// Deliberately does not wake I/O: the host wrapper must shut down transport.
 	}
@@ -139,6 +150,7 @@ private:
 
 	std::atomic<unsigned> refs{1};
 	std::atomic<bool> stopped{false};
+	std::mutex readMutex;
 	std::string label;
 	std::string mode;
 	IWireServerHost* host;

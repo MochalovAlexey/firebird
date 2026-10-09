@@ -26,7 +26,7 @@ Bind/TLS и другие endpoint settings хранить в именованн�
 
 Общий host разместить в `src/remote/server/wire`, plugin — в `src/plugins/wire/pg`. `dirObjects` не рекурсивен: явно включить host objects в server target, а PG objects — в отдельную shared library и install target. PG codec не линкуется в daemon как встроенный frontend.
 
-Host владеет listeners, transport, workers, registry и shutdown. ABI не передаёт `rem_port`, platform socket types или STL. Linux/Super проверяется первым; SuperClassic использует общий host с отдельной приёмкой. Windows wiring и Classic/inetd требуют явно определённого дальнейшего scope.
+Host владеет listeners, transport, workers, registry и shutdown. До загрузки модулей проверяет конфликт с фактическими native TCP endpoints с учётом `-p`, service-name resolution, отключённого TCP и bind/dual-stack; это обязательная часть следующей startup интеграции. ABI не передаёт `rem_port`, platform socket types или STL. Linux/Super проверяется первым; SuperClassic использует общий host с отдельной приёмкой. Windows wiring и Classic/inetd требуют явно определённого дальнейшего scope.
 
 **Готово:** loading/config tests, disabled/default, ошибки endpoint, bounded workers, stop/wakeup и удержание модуля до завершения callbacks. Native продолжает работать. Проверки выполняются на test plugins ещё до SQL.
 

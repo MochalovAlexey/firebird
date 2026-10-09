@@ -79,7 +79,7 @@ inline bool validConfiguredName(std::string_view name)
 	for (const unsigned char c : name)
 	{
 		// A configured name must remain one PluginManager token on every platform.
-		if (c <= ' ' || c == 127 || c == ';' || c == '/' || c == '\\' || c == ':')
+		if (c <= ' ' || c == 127 || c == ',' || c == ';' || c == '/' || c == '\\' || c == ':')
 			return false;
 	}
 
