@@ -673,6 +673,8 @@ const char* Config::getPlugins(unsigned int type) const
 			aKey = key;
 			break;
 		}
+		case IPluginManager::TYPE_WIRE_PROTOCOL:
+			return getWireProtocolPlugins();
 		case IPluginManager::TYPE_TRACE:
 		{
 			DECLARE_PER_DB_KEY(KEY_PLUG_TRACE);

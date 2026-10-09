@@ -148,6 +148,10 @@ namespace Firebird
 	class IProfilerStats;
 	class IPerformanceCounters;
 	class IPerformanceStats;
+	class IWireProtocol;
+	class IWireSession;
+	class IWireConnection;
+	class IWireServerHost;
 
 	// Interfaces declarations
 
@@ -881,7 +885,8 @@ namespace Firebird
 		static CLOOP_CONSTEXPR unsigned TYPE_KEY_HOLDER = 10;
 		static CLOOP_CONSTEXPR unsigned TYPE_REPLICATOR = 11;
 		static CLOOP_CONSTEXPR unsigned TYPE_PROFILER = 12;
-		static CLOOP_CONSTEXPR unsigned TYPE_COUNT = 13;
+		static CLOOP_CONSTEXPR unsigned TYPE_WIRE_PROTOCOL = 13;
+		static CLOOP_CONSTEXPR unsigned TYPE_COUNT = 14;
 
 		void registerPluginFactory(unsigned pluginType, const char* defaultName, IPluginFactory* factory)
 		{
@@ -7919,6 +7924,183 @@ namespace Firebird
 		{
 			IPerformanceCounters* ret = static_cast<VTable*>(this->cloopVTable)->getCounters(this, group);
 			return ret;
+		}
+	};
+
+#define FIREBIRD_IWIRE_PROTOCOL_VERSION 4u
+
+	class IWireProtocol : public IPluginBase
+	{
+	public:
+		struct VTable : public IPluginBase::VTable
+		{
+			IWireSession* (CLOOP_CARG *createSession)(IWireProtocol* self, IStatus* status, IWireServerHost* host, IWireConnection* connection) CLOOP_NOEXCEPT;
+		};
+
+	protected:
+		IWireProtocol(DoNotInherit)
+			: IPluginBase(DoNotInherit())
+		{
+		}
+
+		~IWireProtocol()
+		{
+		}
+
+	public:
+		static CLOOP_CONSTEXPR unsigned VERSION = FIREBIRD_IWIRE_PROTOCOL_VERSION;
+
+		template <typename StatusType> IWireSession* createSession(StatusType* status, IWireServerHost* host, IWireConnection* connection)
+		{
+			StatusType::clearException(status);
+			IWireSession* ret = static_cast<VTable*>(this->cloopVTable)->createSession(this, status, host, connection);
+			StatusType::checkException(status);
+			return ret;
+		}
+	};
+
+#define FIREBIRD_IWIRE_SESSION_VERSION 3u
+
+	class IWireSession : public IReferenceCounted
+	{
+	public:
+		struct VTable : public IReferenceCounted::VTable
+		{
+			void (CLOOP_CARG *run)(IWireSession* self, IStatus* status) CLOOP_NOEXCEPT;
+			void (CLOOP_CARG *stop)(IWireSession* self) CLOOP_NOEXCEPT;
+		};
+
+	protected:
+		IWireSession(DoNotInherit)
+			: IReferenceCounted(DoNotInherit())
+		{
+		}
+
+		~IWireSession()
+		{
+		}
+
+	public:
+		static CLOOP_CONSTEXPR unsigned VERSION = FIREBIRD_IWIRE_SESSION_VERSION;
+
+		template <typename StatusType> void run(StatusType* status)
+		{
+			StatusType::clearException(status);
+			static_cast<VTable*>(this->cloopVTable)->run(this, status);
+			StatusType::checkException(status);
+		}
+
+		void stop()
+		{
+			static_cast<VTable*>(this->cloopVTable)->stop(this);
+		}
+	};
+
+#define FIREBIRD_IWIRE_CONNECTION_VERSION 3u
+
+	class IWireConnection : public IReferenceCounted
+	{
+	public:
+		struct VTable : public IReferenceCounted::VTable
+		{
+			unsigned (CLOOP_CARG *read)(IWireConnection* self, IStatus* status, unsigned size, void* buffer, unsigned timeoutMs) CLOOP_NOEXCEPT;
+			unsigned (CLOOP_CARG *write)(IWireConnection* self, IStatus* status, unsigned size, const void* buffer, unsigned timeoutMs) CLOOP_NOEXCEPT;
+			void (CLOOP_CARG *shutdown)(IWireConnection* self) CLOOP_NOEXCEPT;
+			const char* (CLOOP_CARG *getPeerAddress)(IWireConnection* self) CLOOP_NOEXCEPT;
+			unsigned (CLOOP_CARG *getPeerPort)(IWireConnection* self) CLOOP_NOEXCEPT;
+			FB_BOOLEAN (CLOOP_CARG *isEncrypted)(IWireConnection* self) CLOOP_NOEXCEPT;
+		};
+
+	protected:
+		IWireConnection(DoNotInherit)
+			: IReferenceCounted(DoNotInherit())
+		{
+		}
+
+		~IWireConnection()
+		{
+		}
+
+	public:
+		static CLOOP_CONSTEXPR unsigned VERSION = FIREBIRD_IWIRE_CONNECTION_VERSION;
+
+		template <typename StatusType> unsigned read(StatusType* status, unsigned size, void* buffer, unsigned timeoutMs)
+		{
+			StatusType::clearException(status);
+			unsigned ret = static_cast<VTable*>(this->cloopVTable)->read(this, status, size, buffer, timeoutMs);
+			StatusType::checkException(status);
+			return ret;
+		}
+
+		template <typename StatusType> unsigned write(StatusType* status, unsigned size, const void* buffer, unsigned timeoutMs)
+		{
+			StatusType::clearException(status);
+			unsigned ret = static_cast<VTable*>(this->cloopVTable)->write(this, status, size, buffer, timeoutMs);
+			StatusType::checkException(status);
+			return ret;
+		}
+
+		void shutdown()
+		{
+			static_cast<VTable*>(this->cloopVTable)->shutdown(this);
+		}
+
+		const char* getPeerAddress()
+		{
+			const char* ret = static_cast<VTable*>(this->cloopVTable)->getPeerAddress(this);
+			return ret;
+		}
+
+		unsigned getPeerPort()
+		{
+			unsigned ret = static_cast<VTable*>(this->cloopVTable)->getPeerPort(this);
+			return ret;
+		}
+
+		FB_BOOLEAN isEncrypted()
+		{
+			FB_BOOLEAN ret = static_cast<VTable*>(this->cloopVTable)->isEncrypted(this);
+			return ret;
+		}
+	};
+
+#define FIREBIRD_IWIRE_SERVER_HOST_VERSION 3u
+
+	class IWireServerHost : public IReferenceCounted
+	{
+	public:
+		struct VTable : public IReferenceCounted::VTable
+		{
+			FB_BOOLEAN (CLOOP_CARG *isStopping)(IWireServerHost* self) CLOOP_NOEXCEPT;
+			void (CLOOP_CARG *log)(IWireServerHost* self, unsigned level, unsigned length, const char* message) CLOOP_NOEXCEPT;
+		};
+
+	protected:
+		IWireServerHost(DoNotInherit)
+			: IReferenceCounted(DoNotInherit())
+		{
+		}
+
+		~IWireServerHost()
+		{
+		}
+
+	public:
+		static CLOOP_CONSTEXPR unsigned VERSION = FIREBIRD_IWIRE_SERVER_HOST_VERSION;
+
+		static CLOOP_CONSTEXPR unsigned LOG_INFO = 1;
+		static CLOOP_CONSTEXPR unsigned LOG_WARNING = 2;
+		static CLOOP_CONSTEXPR unsigned LOG_ERROR = 3;
+
+		FB_BOOLEAN isStopping()
+		{
+			FB_BOOLEAN ret = static_cast<VTable*>(this->cloopVTable)->isStopping(this);
+			return ret;
+		}
+
+		void log(unsigned level, unsigned length, const char* message)
+		{
+			static_cast<VTable*>(this->cloopVTable)->log(this, level, length, message);
 		}
 	};
 
@@ -22698,6 +22880,450 @@ namespace Firebird
 		virtual ISC_UINT64 getElapsedTime() = 0;
 		virtual ISC_UINT64 getFetchedRecords() = 0;
 		virtual IPerformanceCounters* getCounters(unsigned group) = 0;
+	};
+
+	template <typename Name, typename StatusType, typename Base>
+	class IWireProtocolBaseImpl : public Base
+	{
+	public:
+		typedef IWireProtocol Declaration;
+
+		IWireProtocolBaseImpl(DoNotInherit = DoNotInherit())
+		{
+			static struct VTableImpl : Base::VTable
+			{
+				VTableImpl()
+				{
+					this->version = Base::VERSION;
+					this->addRef = &Name::cloopaddRefDispatcher;
+					this->release = &Name::cloopreleaseDispatcher;
+					this->setOwner = &Name::cloopsetOwnerDispatcher;
+					this->getOwner = &Name::cloopgetOwnerDispatcher;
+					this->createSession = &Name::cloopcreateSessionDispatcher;
+				}
+			} vTable;
+
+			this->cloopVTable = &vTable;
+		}
+
+		static IWireSession* CLOOP_CARG cloopcreateSessionDispatcher(IWireProtocol* self, IStatus* status, IWireServerHost* host, IWireConnection* connection) CLOOP_NOEXCEPT
+		{
+			StatusType status2(status);
+
+			try
+			{
+				return static_cast<Name*>(self)->Name::createSession(&status2, host, connection);
+			}
+			catch (...)
+			{
+				StatusType::catchException(&status2);
+				return static_cast<IWireSession*>(0);
+			}
+		}
+
+		static void CLOOP_CARG cloopsetOwnerDispatcher(IPluginBase* self, IReferenceCounted* r) CLOOP_NOEXCEPT
+		{
+			try
+			{
+				static_cast<Name*>(self)->Name::setOwner(r);
+			}
+			catch (...)
+			{
+				StatusType::catchException(0);
+			}
+		}
+
+		static IReferenceCounted* CLOOP_CARG cloopgetOwnerDispatcher(IPluginBase* self) CLOOP_NOEXCEPT
+		{
+			try
+			{
+				return static_cast<Name*>(self)->Name::getOwner();
+			}
+			catch (...)
+			{
+				StatusType::catchException(0);
+				return static_cast<IReferenceCounted*>(0);
+			}
+		}
+
+		static void CLOOP_CARG cloopaddRefDispatcher(IReferenceCounted* self) CLOOP_NOEXCEPT
+		{
+			try
+			{
+				static_cast<Name*>(self)->Name::addRef();
+			}
+			catch (...)
+			{
+				StatusType::catchException(0);
+			}
+		}
+
+		static int CLOOP_CARG cloopreleaseDispatcher(IReferenceCounted* self) CLOOP_NOEXCEPT
+		{
+			try
+			{
+				return static_cast<Name*>(self)->Name::release();
+			}
+			catch (...)
+			{
+				StatusType::catchException(0);
+				return static_cast<int>(0);
+			}
+		}
+	};
+
+	template <typename Name, typename StatusType, typename Base = IPluginBaseImpl<Name, StatusType, Inherit<IReferenceCountedImpl<Name, StatusType, Inherit<IVersionedImpl<Name, StatusType, Inherit<IWireProtocol> > > > > > >
+	class IWireProtocolImpl : public IWireProtocolBaseImpl<Name, StatusType, Base>
+	{
+	protected:
+		IWireProtocolImpl(DoNotInherit = DoNotInherit())
+		{
+		}
+
+	public:
+		virtual ~IWireProtocolImpl()
+		{
+		}
+
+		virtual IWireSession* createSession(StatusType* status, IWireServerHost* host, IWireConnection* connection) = 0;
+	};
+
+	template <typename Name, typename StatusType, typename Base>
+	class IWireSessionBaseImpl : public Base
+	{
+	public:
+		typedef IWireSession Declaration;
+
+		IWireSessionBaseImpl(DoNotInherit = DoNotInherit())
+		{
+			static struct VTableImpl : Base::VTable
+			{
+				VTableImpl()
+				{
+					this->version = Base::VERSION;
+					this->addRef = &Name::cloopaddRefDispatcher;
+					this->release = &Name::cloopreleaseDispatcher;
+					this->run = &Name::clooprunDispatcher;
+					this->stop = &Name::cloopstopDispatcher;
+				}
+			} vTable;
+
+			this->cloopVTable = &vTable;
+		}
+
+		static void CLOOP_CARG clooprunDispatcher(IWireSession* self, IStatus* status) CLOOP_NOEXCEPT
+		{
+			StatusType status2(status);
+
+			try
+			{
+				static_cast<Name*>(self)->Name::run(&status2);
+			}
+			catch (...)
+			{
+				StatusType::catchException(&status2);
+			}
+		}
+
+		static void CLOOP_CARG cloopstopDispatcher(IWireSession* self) CLOOP_NOEXCEPT
+		{
+			try
+			{
+				static_cast<Name*>(self)->Name::stop();
+			}
+			catch (...)
+			{
+				StatusType::catchException(0);
+			}
+		}
+
+		static void CLOOP_CARG cloopaddRefDispatcher(IReferenceCounted* self) CLOOP_NOEXCEPT
+		{
+			try
+			{
+				static_cast<Name*>(self)->Name::addRef();
+			}
+			catch (...)
+			{
+				StatusType::catchException(0);
+			}
+		}
+
+		static int CLOOP_CARG cloopreleaseDispatcher(IReferenceCounted* self) CLOOP_NOEXCEPT
+		{
+			try
+			{
+				return static_cast<Name*>(self)->Name::release();
+			}
+			catch (...)
+			{
+				StatusType::catchException(0);
+				return static_cast<int>(0);
+			}
+		}
+	};
+
+	template <typename Name, typename StatusType, typename Base = IReferenceCountedImpl<Name, StatusType, Inherit<IVersionedImpl<Name, StatusType, Inherit<IWireSession> > > > >
+	class IWireSessionImpl : public IWireSessionBaseImpl<Name, StatusType, Base>
+	{
+	protected:
+		IWireSessionImpl(DoNotInherit = DoNotInherit())
+		{
+		}
+
+	public:
+		virtual ~IWireSessionImpl()
+		{
+		}
+
+		virtual void run(StatusType* status) = 0;
+		virtual void stop() = 0;
+	};
+
+	template <typename Name, typename StatusType, typename Base>
+	class IWireConnectionBaseImpl : public Base
+	{
+	public:
+		typedef IWireConnection Declaration;
+
+		IWireConnectionBaseImpl(DoNotInherit = DoNotInherit())
+		{
+			static struct VTableImpl : Base::VTable
+			{
+				VTableImpl()
+				{
+					this->version = Base::VERSION;
+					this->addRef = &Name::cloopaddRefDispatcher;
+					this->release = &Name::cloopreleaseDispatcher;
+					this->read = &Name::cloopreadDispatcher;
+					this->write = &Name::cloopwriteDispatcher;
+					this->shutdown = &Name::cloopshutdownDispatcher;
+					this->getPeerAddress = &Name::cloopgetPeerAddressDispatcher;
+					this->getPeerPort = &Name::cloopgetPeerPortDispatcher;
+					this->isEncrypted = &Name::cloopisEncryptedDispatcher;
+				}
+			} vTable;
+
+			this->cloopVTable = &vTable;
+		}
+
+		static unsigned CLOOP_CARG cloopreadDispatcher(IWireConnection* self, IStatus* status, unsigned size, void* buffer, unsigned timeoutMs) CLOOP_NOEXCEPT
+		{
+			StatusType status2(status);
+
+			try
+			{
+				return static_cast<Name*>(self)->Name::read(&status2, size, buffer, timeoutMs);
+			}
+			catch (...)
+			{
+				StatusType::catchException(&status2);
+				return static_cast<unsigned>(0);
+			}
+		}
+
+		static unsigned CLOOP_CARG cloopwriteDispatcher(IWireConnection* self, IStatus* status, unsigned size, const void* buffer, unsigned timeoutMs) CLOOP_NOEXCEPT
+		{
+			StatusType status2(status);
+
+			try
+			{
+				return static_cast<Name*>(self)->Name::write(&status2, size, buffer, timeoutMs);
+			}
+			catch (...)
+			{
+				StatusType::catchException(&status2);
+				return static_cast<unsigned>(0);
+			}
+		}
+
+		static void CLOOP_CARG cloopshutdownDispatcher(IWireConnection* self) CLOOP_NOEXCEPT
+		{
+			try
+			{
+				static_cast<Name*>(self)->Name::shutdown();
+			}
+			catch (...)
+			{
+				StatusType::catchException(0);
+			}
+		}
+
+		static const char* CLOOP_CARG cloopgetPeerAddressDispatcher(IWireConnection* self) CLOOP_NOEXCEPT
+		{
+			try
+			{
+				return static_cast<Name*>(self)->Name::getPeerAddress();
+			}
+			catch (...)
+			{
+				StatusType::catchException(0);
+				return static_cast<const char*>(0);
+			}
+		}
+
+		static unsigned CLOOP_CARG cloopgetPeerPortDispatcher(IWireConnection* self) CLOOP_NOEXCEPT
+		{
+			try
+			{
+				return static_cast<Name*>(self)->Name::getPeerPort();
+			}
+			catch (...)
+			{
+				StatusType::catchException(0);
+				return static_cast<unsigned>(0);
+			}
+		}
+
+		static FB_BOOLEAN CLOOP_CARG cloopisEncryptedDispatcher(IWireConnection* self) CLOOP_NOEXCEPT
+		{
+			try
+			{
+				return static_cast<Name*>(self)->Name::isEncrypted();
+			}
+			catch (...)
+			{
+				StatusType::catchException(0);
+				return static_cast<FB_BOOLEAN>(0);
+			}
+		}
+
+		static void CLOOP_CARG cloopaddRefDispatcher(IReferenceCounted* self) CLOOP_NOEXCEPT
+		{
+			try
+			{
+				static_cast<Name*>(self)->Name::addRef();
+			}
+			catch (...)
+			{
+				StatusType::catchException(0);
+			}
+		}
+
+		static int CLOOP_CARG cloopreleaseDispatcher(IReferenceCounted* self) CLOOP_NOEXCEPT
+		{
+			try
+			{
+				return static_cast<Name*>(self)->Name::release();
+			}
+			catch (...)
+			{
+				StatusType::catchException(0);
+				return static_cast<int>(0);
+			}
+		}
+	};
+
+	template <typename Name, typename StatusType, typename Base = IReferenceCountedImpl<Name, StatusType, Inherit<IVersionedImpl<Name, StatusType, Inherit<IWireConnection> > > > >
+	class IWireConnectionImpl : public IWireConnectionBaseImpl<Name, StatusType, Base>
+	{
+	protected:
+		IWireConnectionImpl(DoNotInherit = DoNotInherit())
+		{
+		}
+
+	public:
+		virtual ~IWireConnectionImpl()
+		{
+		}
+
+		virtual unsigned read(StatusType* status, unsigned size, void* buffer, unsigned timeoutMs) = 0;
+		virtual unsigned write(StatusType* status, unsigned size, const void* buffer, unsigned timeoutMs) = 0;
+		virtual void shutdown() = 0;
+		virtual const char* getPeerAddress() = 0;
+		virtual unsigned getPeerPort() = 0;
+		virtual FB_BOOLEAN isEncrypted() = 0;
+	};
+
+	template <typename Name, typename StatusType, typename Base>
+	class IWireServerHostBaseImpl : public Base
+	{
+	public:
+		typedef IWireServerHost Declaration;
+
+		IWireServerHostBaseImpl(DoNotInherit = DoNotInherit())
+		{
+			static struct VTableImpl : Base::VTable
+			{
+				VTableImpl()
+				{
+					this->version = Base::VERSION;
+					this->addRef = &Name::cloopaddRefDispatcher;
+					this->release = &Name::cloopreleaseDispatcher;
+					this->isStopping = &Name::cloopisStoppingDispatcher;
+					this->log = &Name::clooplogDispatcher;
+				}
+			} vTable;
+
+			this->cloopVTable = &vTable;
+		}
+
+		static FB_BOOLEAN CLOOP_CARG cloopisStoppingDispatcher(IWireServerHost* self) CLOOP_NOEXCEPT
+		{
+			try
+			{
+				return static_cast<Name*>(self)->Name::isStopping();
+			}
+			catch (...)
+			{
+				StatusType::catchException(0);
+				return static_cast<FB_BOOLEAN>(0);
+			}
+		}
+
+		static void CLOOP_CARG clooplogDispatcher(IWireServerHost* self, unsigned level, unsigned length, const char* message) CLOOP_NOEXCEPT
+		{
+			try
+			{
+				static_cast<Name*>(self)->Name::log(level, length, message);
+			}
+			catch (...)
+			{
+				StatusType::catchException(0);
+			}
+		}
+
+		static void CLOOP_CARG cloopaddRefDispatcher(IReferenceCounted* self) CLOOP_NOEXCEPT
+		{
+			try
+			{
+				static_cast<Name*>(self)->Name::addRef();
+			}
+			catch (...)
+			{
+				StatusType::catchException(0);
+			}
+		}
+
+		static int CLOOP_CARG cloopreleaseDispatcher(IReferenceCounted* self) CLOOP_NOEXCEPT
+		{
+			try
+			{
+				return static_cast<Name*>(self)->Name::release();
+			}
+			catch (...)
+			{
+				StatusType::catchException(0);
+				return static_cast<int>(0);
+			}
+		}
+	};
+
+	template <typename Name, typename StatusType, typename Base = IReferenceCountedImpl<Name, StatusType, Inherit<IVersionedImpl<Name, StatusType, Inherit<IWireServerHost> > > > >
+	class IWireServerHostImpl : public IWireServerHostBaseImpl<Name, StatusType, Base>
+	{
+	protected:
+		IWireServerHostImpl(DoNotInherit = DoNotInherit())
+		{
+		}
+
+	public:
+		virtual ~IWireServerHostImpl()
+		{
+		}
+
+		virtual FB_BOOLEAN isStopping() = 0;
+		virtual void log(unsigned level, unsigned length, const char* message) = 0;
 	};
 };
 

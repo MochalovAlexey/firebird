@@ -4,7 +4,7 @@
 
 PostgreSQL grammar/functions отложены. Все этапы передают SQL существующему parser без wire-классификации и переписывания. Расширение нейтральных parser/DSQL metadata входит в реализацию протокола; принятие нового SQL-синтаксиса — отдельная будущая работа.
 
-Состояние на 9 октября 2026: штатная сборка и native TCP baseline проверены; реализована и проверена первая часть P1 — global parameters и parser позиционных списков. Подробные результаты — [VALIDATION.md](VALIDATION.md). P0/P1 целиком и M0 ещё не завершены; следующий кодовый шаг — CLOOP ABI и host загрузки/соединений.
+Состояние на 9 октября 2026: реализованы global parameters, parser позиционных списков, начальный CLOOP ABI и loader с удержанием plugin/session. Подробные результаты сборки и проверок — [VALIDATION.md](VALIDATION.md). P0/P1 целиком и M0 ещё не завершены; следующий кодовый шаг — строгая конфигурация из snapshot PluginManager, TCP listeners, bounded workers и интеграция startup/shutdown сервера.
 
 ## P0. База, зависимости и проектирование
 
@@ -22,7 +22,7 @@ PostgreSQL grammar/functions отложены. Все этапы передаю�
 
 Реализовать `WireProtocolPlugins` / `WireProtocolPorts` по ARCHITECTURE: позиционные comma-separated списки, пустой default, проверка до загрузки, отсутствие сдвига портов при недостающем модуле. Native не включается в список. Общая ошибка списков отключает дополнительную конфигурацию с диагностикой; ошибка модуля или bind — его endpoint. Проверить одну тестовую библиотеку с двумя aliases/instances, включая отсутствующее имя между ними.
 
-Bind/TLS и другие endpoint settings хранить в именованных `Config` блоках `plugins.conf`, без дополнительных позиционных списков. Host читает их через существующий `getPluginConfig(configuredName)` до load/bind. Порт имеет один источник — `WireProtocolPorts`; второй Port/override не допускается. Строго проверять missing Config/NULL и отдельно учитывать отличие пути ConfigFile от factory config resolution.
+Bind/TLS и другие endpoint settings хранить в именованных `Config` блоках `plugins.conf`, без дополнительных позиционных списков. До load/bind обеспечить строгую проверку того же cached snapshot, который использует PluginManager: одного `getPluginConfig(configuredName)` недостаточно для обнаружения missing named Config, а `getConfig()` перечитывает файл. Порт имеет один источник — `WireProtocolPorts`; второй Port/override не допускается. Строго проверять missing Config/NULL и отдельно учитывать отличие пути ConfigFile от factory config resolution.
 
 Общий host разместить в `src/remote/server/wire`, plugin — в `src/plugins/wire/pg`. `dirObjects` не рекурсивен: явно включить host objects в server target, а PG objects — в отдельную shared library и install target. PG codec не линкуется в daemon как встроенный frontend.
 

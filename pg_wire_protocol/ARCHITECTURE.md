@@ -2,7 +2,7 @@
 
 Дополнительные wire-протоколы реализуются динамическими плагинами внутри процесса `firebird`. Первый плагин — PostgreSQL. Общая серверная инфраструктура управляет TCP listeners, соединениями и workers; плагин реализует конкретный протокол и обращается к локальному движку через интерфейсы Firebird. Родной frontend сохраняет свой путь запуска, настройки, XDR и обработку запросов.
 
-Это проектный контракт. Перечисленные новые интерфейсы и параметры ещё не реализованы; окончательные ABI-сигнатуры определяются в P0 до добавления плагина. Требование пользователя об отсутствии SQL-разбора во frontend применяется ко всем этапам.
+Документ описывает целевую архитектуру и границы текущего среза. Уже добавлены глобальные параметры списков endpoints, их строгий разбор, wire plugin type и начальные CLOOP interfaces, загрузчик одного alias и владение protocol sessions. TCP listeners, authentication/attachment bridge, TLS и плагин PgWire ещё не реализованы. Требование пользователя об отсутствии SQL-разбора во frontend применяется ко всем этапам.
 
 ## Разделение ответственности
 
@@ -54,20 +54,24 @@ CommandComplete и transaction transitions формируются по резу�
 
 ## Загрузка через существующий PluginManager
 
-Предлагается добавить `IPluginManager::TYPE_WIRE_PROTOCOL = 13` и увеличить `TYPE_COUNT` до 14 в `FirebirdInterface.idl`, сохранив действующие значения. Использовать существующие `FB_PLUGIN_ENTRY_POINT`, `registerPluginFactory`, `IPluginConfig`, `IPluginModule`, `StdPlugin` и `SimpleFactory`.
+В `FirebirdInterface.idl` добавлен `IPluginManager::TYPE_WIRE_PROTOCOL = 13`, `TYPE_COUNT` увеличен до 14 с сохранением действующих значений. Загрузка использует существующие `FB_PLUGIN_ENTRY_POINT`, `registerPluginFactory`, `IPluginConfig`, `IPluginModule`, `StdPlugin` и `SimpleFactory`.
 
-Новые интерфейсы описываются в CLOOP IDL. C++, Pascal и C bindings обновляются штатным generator, без ручной правки сгенерированных vtables. ABI использует интерфейсы Firebird, явные размеры buffers и определённые integer types; STL, C++ exceptions, внутренние `rem_port`/`thread_db` и платформенные socket handles через границу модулей не передаются.
+Начальные интерфейсы описаны в CLOOP IDL. C++, Pascal и C bindings обновляются штатным generator, без ручной правки сгенерированных vtables. ABI использует интерфейсы Firebird, явные размеры buffers и определённые integer types; STL, C++ exceptions, внутренние `rem_port`/`thread_db` и платформенные socket handles через границу модулей не передаются.
 
-Предлагаемые роли интерфейсов, без окончательных сигнатур:
+Роли реализованного начального ABI:
 
 | Интерфейс | Роль и владение |
 |---|---|
-| `IWireProtocol : IPluginBase` | Создаёт protocol sessions для endpoint; получает plugin config; экземпляром владеет host |
-| `IWireSession : IReferenceCounted` | Обрабатывает одно соединение в выделенном host worker; сохраняет protocol state и ресурсы DSQL |
-| `IWireConnection : IReferenceCounted` | Предоставляемый host byte stream с read/write, metadata и прерыванием ожиданий; socket принадлежит host |
-| `IWireServerHost` | Доступ к проверенному локальному attachment, диагностике и состоянию остановки; точный базовый интерфейс и refcount contract определяются в P0 |
+| `IWireProtocol : IPluginBase` | `createSession(status, host, connection)` возвращает одну owned reference; вызовы для instance последовательны, без network I/O и engine calls. Config получает factory штатным путём |
+| `IWireSession : IReferenceCounted` | `run(status)` вызывается один раз в host worker; `stop()` — конкурентный, идемпотентный, неблокирующий запрос остановки, допустимый до `run()`, без join, engine calls и освобождения session/plugin |
+| `IWireConnection : IReferenceCounted` | Host byte stream: `read`/`write` с partial I/O и timeout, конкурентный `shutdown`, неизменные peer address/port, `isEncrypted`; socket принадлежит host |
+| `IWireServerHost : IReferenceCounted` | `isStopping()` и ограниченная host diagnostics через `log`; начальная версия не предоставляет authentication, attachment или TLS upgrade |
 
-В P0 закрепить partial I/O/EOF/error contract, thread affinity, разрешённые конкурентные stop/cancel calls, владение каждым возвращённым интерфейсом, lifetime callbacks и запрет передачи секретов в diagnostics. Один последовательный worker исполняет одну session; frame sizes, количество сессий и buffers ограничены. Async cancellation получает отдельное синхронизированное владение attachment.
+В начальном ABI закреплён partial I/O contract: успешный `read` с нулевым результатом при ненулевом buffer size означает EOF; успешный `write` без прогресса недопустим; нулевой size — успешный no-op. Ошибка возвращает status и нулевой результат, ранее выполненный успешный I/O сохраняет силу. Нулевой timeout выбирает конечный host default; положительный может только сократить его. Timeout не является EOF. Один worker последовательно выполняет I/O; `shutdown()` будит ожидания и запрещает дальнейший I/O. Host ограничивает и экранирует diagnostics, plugin не передаёт туда credentials, auth payloads или значения SQL parameters.
+
+`ProtocolPlugin` в `src/remote/server/wire/ProtocolPlugin.h` загружает ровно один configured name, проверяет имя, результат factory и версии интерфейсов. Создание sessions сериализовано. `ProtocolSession` удерживает plugin, host и connection до последнего release session; plugin освобождается через `IPluginManager::releasePlugin()`. Wrapper не отдаёт raw session вызывающему коду и запрещает повторный `run()`. Worker/registry обязаны завершить `run()` и все `stop()` до уничтожения wrapper. Эти классы пока не выполняют bind/listen и не интегрированы в server lifecycle.
+
+Frame sizes, количество сессий и buffers должны ограничиваться при реализации host и протокола. Authentication/attachment и TLS добавляются последующими версиями интерфейсов после согласования их policy и lifetime. Async cancellation получает отдельное синхронизированное владение attachment.
 
 Одна активная application transaction на PostgreSQL session — правило PgWire, соответствующее его transaction model. Общий plugin ABI не ограничивает любой будущий протокол одной транзакцией или одним attachment. Host отслеживает все выданные ресурсы для cancellation/shutdown; ограничения конкретного протокола и серверные resource limits задаются отдельно.
 
@@ -144,16 +148,19 @@ Config = PgRemoteConfig {
 
 `BindAddress` в примере — проектируемая host setting. PgRemote иллюстрирует будущий удалённый профиль; до реализации TLS и remote policy его запуск отвергается, без перехода на иной адрес. Module/RegisterName совпадают, но aliases получают отдельные configurations и instances; library остаётся общей до завершения обоих endpoints.
 
-Host может получить конфигурацию до загрузки библиотеки и вызова factory через существующий `IMaster::getConfigManager()->getPluginConfig(configuredName)`. Метод возвращает `IConfig`; экземпляр plugin ему не нужен. `IPluginConfig::getDefaultConfig()` отдельно предоставляет конфигурацию factory. Для named Config blocks оба пути используют `findPluginConfig()`.
+Существующий `IMaster::getConfigManager()->getPluginConfig(configuredName)` возвращает `IConfig` без загрузки библиотеки и вызова factory. `IPluginConfig::getDefaultConfig()` отдельно предоставляет конфигурацию factory. Для named Config blocks оба пути используют `findPluginConfig()`, но сам вызов `getPluginConfig()` не обеспечивает строгую проверку источника endpoint settings.
 
-Перед bind требуется строгая проверка конфигурации:
+До реализации listeners требуется согласовать источник host/factory configuration и выполнить строгую проверку перед bind:
 
 - Явно заданный `Config = Name` должен ссылаться на существующий block. Текущий `findPluginConfig()` допускает fallback к module `.conf` при отсутствии block; host должен исключить такой fallback для ошибочной явной ссылки.
 - `getPluginConfig()` возвращает NULL при перехваченном исключении; NULL означает ошибку endpoint, а не разрешение применить менее строгие Bind/TLS defaults. Отсутствующие необязательные параметры в корректном config получают только документированные defaults.
-- Нельзя предполагать одинаковое поведение `ConfigFile` в обоих путях: `ConfiguredPlugin` учитывает override в constructor, а `ConfigManager::getPluginConfig()` использует default `plugConfigFile`. Первая реализация host settings опирается на named Config blocks; поддержку ConfigFile объявлять только после согласования разрешения и отдельной проверки.
-- Host валидирует свои transport settings и передаёт plugin его configuration; factory не открывает listener и не меняет сопоставление alias/port.
+- Нельзя предполагать одинаковое поведение `ConfigFile` в обоих путях: `ConfiguredPlugin` учитывает override в constructor, а `ConfigManager::getPluginConfig()` использует default `plugConfigFile`. Начальный listener profile отклоняет `ConfigFile`; поддержку override объявлять только после согласования разрешения и отдельной проверки.
+- Обязательность named Config пока не установлена. Возможность использовать документированные defaults без named block, допустимость module `.conf` в этом случае и поведение при его отсутствии остаются открытым контрактом до listeners. Отсутствие необязательного block нельзя смешивать с ошибочной явно заданной ссылкой `Config = Name`.
+- Host валидирует свои transport settings по config, согласованному с configuration factory; factory не открывает listener и не меняет сопоставление alias/port.
 
-Эти проверки выполняются через существующие config interfaces/resolver с явным учётом missing references; новый config accessor в wire ABI не требуется.
+Проверка должна использовать тот же snapshot `plugins.conf`, что и разрешение alias/module/factory. PluginManager держит его в cached `pluginsConf`; отдельный `IPluginManager::getConfig(pathToPluginsConf)` создаёт новый `ConfigFile` и перечитывает файл. Поэтому схема «прочитать plugins.conf через getConfig, проверить Config/ConfigFile, затем вызвать getPluginConfig» не гарантирует, что проверен используемый loader block. Это касается также include files и раскрытых config macros. Отсутствие hot reload не устраняет различие двух snapshots.
+
+До bind нужен доступ к тому же cached snapshot либо узкий внутренний resolver на его основе с проверкой missing references и согласованным выбором configuration для host и factory. Способ доступа ещё не реализован; текущий loader не заявляет strict host settings validation. Legacy fallback policy PluginManager не меняется; новый публичный config accessor в wire ABI сейчас не добавляется. Проверенный config удерживается на срок endpoint, без повторного чтения с диска. Пути, macros и module names разрешаются штатными средствами PluginManager; host не воспроизводит собственный поиск `.so`/`.dll`.
 
 ### Проверка списков и политика ошибок
 
@@ -212,6 +219,7 @@ TLS реализуется поверх byte transport дополнительн�
 | Plugin ABI | `src/include/firebird/FirebirdInterface.idl`: PluginBase, PluginConfig, PluginFactory, PluginManager |
 | Загрузка | `src/yvalve/PluginManager.cpp`: PluginLoadInfo, PluginSet::next, loadModule, releasePlugin |
 | Plugin helpers | `src/common/classes/ImplementHelper.h`: StdPlugin, SimpleFactory, UnloadDetectorHelper |
+| Начальный wire host | `src/remote/server/wire/EndpointConfig.h`: parseEndpointConfig; `ProtocolPlugin.h` / `.cpp`: ProtocolPlugin, ProtocolSession |
 | Конфигурация | `src/common/config/config.h`: ConfigKey, entries; `config.cpp`: Config::getPlugins; `src/yvalve/PluginManager.cpp`: ConfigManager::getPluginConfig, findPluginConfig, ConfiguredPlugin |
 | Module mapping | `builds/install/misc/plugins.conf` |
 | POSIX startup | `src/remote/server/os/posix/inet_server.cpp`: registerAuthPlugins, Super initialization, SRVR_multi_thread |
@@ -221,4 +229,4 @@ TLS реализуется поверх byte transport дополнительн�
 | POSIX objects/targets | `builds/posix/make.shared.variables`: Remote_Server и plugin object sets; `builds/posix/Makefile.in`: plugins, updateCloopInterfaces |
 | Другие build paths | `src/CMakeLists.txt`; `builds/win32/make_boot.bat`; `builds/win32/msvc15` |
 
-Существующие правила PluginManager подтверждены исходниками зафиксированного baseline. Предложенные wire interfaces, config keys и каталоги являются планом новых изменений.
+Существующие правила PluginManager подтверждены исходниками зафиксированного baseline. Начальные wire interfaces, config keys, parser списков и loader/session ownership добавлены в рабочую реализацию; listeners, strict host config, server lifecycle, authentication/attachment bridge, TLS и PgWire остаются следующими этапами.

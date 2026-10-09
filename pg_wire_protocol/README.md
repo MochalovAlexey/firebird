@@ -36,7 +36,7 @@ M0 получает лишь минимальную metadata через суще
 
 ## Документы и состояние
 
-База — `master` Firebird 6, рабочая ветка — `pg_wire_protocol`; точный SHA и исходники см. [BASELINE.md](BASELINE.md). Пакет дополнен 9 октября 2026 года с учётом замечаний review и уточнения границы транзакций. Реализация начата с P0 и конфигурационной части P1. Загрузка wire plugins, listener, auth bridge и SQL execution PgWire ещё не реализованы. Текущие решения — [IMPLEMENTATION_NOTES.md](IMPLEMENTATION_NOTES.md); фактически выполненные проверки — [VALIDATION.md](VALIDATION.md).
+База — `master` Firebird 6, рабочая ветка — `pg_wire_protocol`; точный SHA и исходники см. [BASELINE.md](BASELINE.md). Реализованы конфигурационные списки, начальный CLOOP ABI, загрузка wire plugins и удержание библиотеки на время sessions. Listener, server workers, auth bridge и SQL execution PgWire ещё не реализованы. Текущие решения — [IMPLEMENTATION_NOTES.md](IMPLEMENTATION_NOTES.md), ABI contract — [UsingWireProtocolPlugins.md](../doc/UsingWireProtocolPlugins.md); фактически выполненные проверки — [VALIDATION.md](VALIDATION.md).
 
 | Файл | Назначение |
 |---|---|

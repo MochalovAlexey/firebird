@@ -119,6 +119,10 @@ type
 	IProfilerStats = class;
 	IPerformanceCounters = class;
 	IPerformanceStats = class;
+	IWireProtocol = class;
+	IWireSession = class;
+	IWireConnection = class;
+	IWireServerHost = class;
 
 	FbException = class(Exception)
 	public
@@ -801,6 +805,17 @@ type
 	IPerformanceStats_getElapsedTimePtr = function(this: IPerformanceStats): QWord; cdecl;
 	IPerformanceStats_getFetchedRecordsPtr = function(this: IPerformanceStats): QWord; cdecl;
 	IPerformanceStats_getCountersPtr = function(this: IPerformanceStats; group: Cardinal): IPerformanceCounters; cdecl;
+	IWireProtocol_createSessionPtr = function(this: IWireProtocol; status: IStatus; host: IWireServerHost; connection: IWireConnection): IWireSession; cdecl;
+	IWireSession_runPtr = procedure(this: IWireSession; status: IStatus); cdecl;
+	IWireSession_stopPtr = procedure(this: IWireSession); cdecl;
+	IWireConnection_readPtr = function(this: IWireConnection; status: IStatus; size: Cardinal; buffer: Pointer; timeoutMs: Cardinal): Cardinal; cdecl;
+	IWireConnection_writePtr = function(this: IWireConnection; status: IStatus; size: Cardinal; buffer: Pointer; timeoutMs: Cardinal): Cardinal; cdecl;
+	IWireConnection_shutdownPtr = procedure(this: IWireConnection); cdecl;
+	IWireConnection_getPeerAddressPtr = function(this: IWireConnection): PAnsiChar; cdecl;
+	IWireConnection_getPeerPortPtr = function(this: IWireConnection): Cardinal; cdecl;
+	IWireConnection_isEncryptedPtr = function(this: IWireConnection): Boolean; cdecl;
+	IWireServerHost_isStoppingPtr = function(this: IWireServerHost): Boolean; cdecl;
+	IWireServerHost_logPtr = procedure(this: IWireServerHost; level: Cardinal; length: Cardinal; message: PAnsiChar); cdecl;
 
 	VersionedVTable = class
 		version: NativeInt;
@@ -1169,7 +1184,8 @@ type
 		const TYPE_KEY_HOLDER = Cardinal(10);
 		const TYPE_REPLICATOR = Cardinal(11);
 		const TYPE_PROFILER = Cardinal(12);
-		const TYPE_COUNT = Cardinal(13);
+		const TYPE_WIRE_PROTOCOL = Cardinal(13);
+		const TYPE_COUNT = Cardinal(14);
 
 		procedure registerPluginFactory(pluginType: Cardinal; defaultName: PAnsiChar; factory: IPluginFactory);
 		procedure registerModule(cleanup: IPluginModule);
@@ -4226,6 +4242,104 @@ type
 		function getElapsedTime(): QWord; virtual; abstract;
 		function getFetchedRecords(): QWord; virtual; abstract;
 		function getCounters(group: Cardinal): IPerformanceCounters; virtual; abstract;
+	end;
+
+	WireProtocolVTable = class(PluginBaseVTable)
+		createSession: IWireProtocol_createSessionPtr;
+	end;
+
+	IWireProtocol = class(IPluginBase)
+		const VERSION = 4;
+
+		function createSession(status: IStatus; host: IWireServerHost; connection: IWireConnection): IWireSession;
+	end;
+
+	IWireProtocolImpl = class(IWireProtocol)
+		constructor create;
+
+		procedure addRef(); virtual; abstract;
+		function release(): Integer; virtual; abstract;
+		procedure setOwner(r: IReferenceCounted); virtual; abstract;
+		function getOwner(): IReferenceCounted; virtual; abstract;
+		function createSession(status: IStatus; host: IWireServerHost; connection: IWireConnection): IWireSession; virtual; abstract;
+	end;
+
+	WireSessionVTable = class(ReferenceCountedVTable)
+		run: IWireSession_runPtr;
+		stop: IWireSession_stopPtr;
+	end;
+
+	IWireSession = class(IReferenceCounted)
+		const VERSION = 3;
+
+		procedure run(status: IStatus);
+		procedure stop();
+	end;
+
+	IWireSessionImpl = class(IWireSession)
+		constructor create;
+
+		procedure addRef(); virtual; abstract;
+		function release(): Integer; virtual; abstract;
+		procedure run(status: IStatus); virtual; abstract;
+		procedure stop(); virtual; abstract;
+	end;
+
+	WireConnectionVTable = class(ReferenceCountedVTable)
+		read: IWireConnection_readPtr;
+		write: IWireConnection_writePtr;
+		shutdown: IWireConnection_shutdownPtr;
+		getPeerAddress: IWireConnection_getPeerAddressPtr;
+		getPeerPort: IWireConnection_getPeerPortPtr;
+		isEncrypted: IWireConnection_isEncryptedPtr;
+	end;
+
+	IWireConnection = class(IReferenceCounted)
+		const VERSION = 3;
+
+		function read(status: IStatus; size: Cardinal; buffer: Pointer; timeoutMs: Cardinal): Cardinal;
+		function write(status: IStatus; size: Cardinal; buffer: Pointer; timeoutMs: Cardinal): Cardinal;
+		procedure shutdown();
+		function getPeerAddress(): PAnsiChar;
+		function getPeerPort(): Cardinal;
+		function isEncrypted(): Boolean;
+	end;
+
+	IWireConnectionImpl = class(IWireConnection)
+		constructor create;
+
+		procedure addRef(); virtual; abstract;
+		function release(): Integer; virtual; abstract;
+		function read(status: IStatus; size: Cardinal; buffer: Pointer; timeoutMs: Cardinal): Cardinal; virtual; abstract;
+		function write(status: IStatus; size: Cardinal; buffer: Pointer; timeoutMs: Cardinal): Cardinal; virtual; abstract;
+		procedure shutdown(); virtual; abstract;
+		function getPeerAddress(): PAnsiChar; virtual; abstract;
+		function getPeerPort(): Cardinal; virtual; abstract;
+		function isEncrypted(): Boolean; virtual; abstract;
+	end;
+
+	WireServerHostVTable = class(ReferenceCountedVTable)
+		isStopping: IWireServerHost_isStoppingPtr;
+		log: IWireServerHost_logPtr;
+	end;
+
+	IWireServerHost = class(IReferenceCounted)
+		const VERSION = 3;
+		const LOG_INFO = Cardinal(1);
+		const LOG_WARNING = Cardinal(2);
+		const LOG_ERROR = Cardinal(3);
+
+		function isStopping(): Boolean;
+		procedure log(level: Cardinal; length: Cardinal; message: PAnsiChar);
+	end;
+
+	IWireServerHostImpl = class(IWireServerHost)
+		constructor create;
+
+		procedure addRef(); virtual; abstract;
+		function release(): Integer; virtual; abstract;
+		function isStopping(): Boolean; virtual; abstract;
+		procedure log(level: Cardinal; length: Cardinal; message: PAnsiChar); virtual; abstract;
 	end;
 
 {$IFNDEF NO_FBCLIENT}
@@ -10475,6 +10589,65 @@ end;
 function IPerformanceStats.getCounters(group: Cardinal): IPerformanceCounters;
 begin
 	Result := PerformanceStatsVTable(vTable).getCounters(Self, group);
+end;
+
+function IWireProtocol.createSession(status: IStatus; host: IWireServerHost; connection: IWireConnection): IWireSession;
+begin
+	Result := WireProtocolVTable(vTable).createSession(Self, status, host, connection);
+	FbException.checkException(status);
+end;
+
+procedure IWireSession.run(status: IStatus);
+begin
+	WireSessionVTable(vTable).run(Self, status);
+	FbException.checkException(status);
+end;
+
+procedure IWireSession.stop();
+begin
+	WireSessionVTable(vTable).stop(Self);
+end;
+
+function IWireConnection.read(status: IStatus; size: Cardinal; buffer: Pointer; timeoutMs: Cardinal): Cardinal;
+begin
+	Result := WireConnectionVTable(vTable).read(Self, status, size, buffer, timeoutMs);
+	FbException.checkException(status);
+end;
+
+function IWireConnection.write(status: IStatus; size: Cardinal; buffer: Pointer; timeoutMs: Cardinal): Cardinal;
+begin
+	Result := WireConnectionVTable(vTable).write(Self, status, size, buffer, timeoutMs);
+	FbException.checkException(status);
+end;
+
+procedure IWireConnection.shutdown();
+begin
+	WireConnectionVTable(vTable).shutdown(Self);
+end;
+
+function IWireConnection.getPeerAddress(): PAnsiChar;
+begin
+	Result := WireConnectionVTable(vTable).getPeerAddress(Self);
+end;
+
+function IWireConnection.getPeerPort(): Cardinal;
+begin
+	Result := WireConnectionVTable(vTable).getPeerPort(Self);
+end;
+
+function IWireConnection.isEncrypted(): Boolean;
+begin
+	Result := WireConnectionVTable(vTable).isEncrypted(Self);
+end;
+
+function IWireServerHost.isStopping(): Boolean;
+begin
+	Result := WireServerHostVTable(vTable).isStopping(Self);
+end;
+
+procedure IWireServerHost.log(level: Cardinal; length: Cardinal; message: PAnsiChar);
+begin
+	WireServerHostVTable(vTable).log(Self, level, length, message);
 end;
 
 var
@@ -18291,6 +18464,239 @@ begin
 	vTable := IPerformanceStatsImpl_vTable;
 end;
 
+procedure IWireProtocolImpl_addRefDispatcher(this: IWireProtocol); cdecl;
+begin
+	try
+		IWireProtocolImpl(this).addRef();
+	except
+		on e: Exception do FbException.catchException(nil, e);
+	end
+end;
+
+function IWireProtocolImpl_releaseDispatcher(this: IWireProtocol): Integer; cdecl;
+begin
+	Result := 0;
+	try
+		Result := IWireProtocolImpl(this).release();
+	except
+		on e: Exception do FbException.catchException(nil, e);
+	end
+end;
+
+procedure IWireProtocolImpl_setOwnerDispatcher(this: IWireProtocol; r: IReferenceCounted); cdecl;
+begin
+	try
+		IWireProtocolImpl(this).setOwner(r);
+	except
+		on e: Exception do FbException.catchException(nil, e);
+	end
+end;
+
+function IWireProtocolImpl_getOwnerDispatcher(this: IWireProtocol): IReferenceCounted; cdecl;
+begin
+	Result := nil;
+	try
+		Result := IWireProtocolImpl(this).getOwner();
+	except
+		on e: Exception do FbException.catchException(nil, e);
+	end
+end;
+
+function IWireProtocolImpl_createSessionDispatcher(this: IWireProtocol; status: IStatus; host: IWireServerHost; connection: IWireConnection): IWireSession; cdecl;
+begin
+	Result := nil;
+	try
+		Result := IWireProtocolImpl(this).createSession(status, host, connection);
+	except
+		on e: Exception do FbException.catchException(status, e);
+	end
+end;
+
+var
+	IWireProtocolImpl_vTable: WireProtocolVTable;
+
+constructor IWireProtocolImpl.create;
+begin
+	vTable := IWireProtocolImpl_vTable;
+end;
+
+procedure IWireSessionImpl_addRefDispatcher(this: IWireSession); cdecl;
+begin
+	try
+		IWireSessionImpl(this).addRef();
+	except
+		on e: Exception do FbException.catchException(nil, e);
+	end
+end;
+
+function IWireSessionImpl_releaseDispatcher(this: IWireSession): Integer; cdecl;
+begin
+	Result := 0;
+	try
+		Result := IWireSessionImpl(this).release();
+	except
+		on e: Exception do FbException.catchException(nil, e);
+	end
+end;
+
+procedure IWireSessionImpl_runDispatcher(this: IWireSession; status: IStatus); cdecl;
+begin
+	try
+		IWireSessionImpl(this).run(status);
+	except
+		on e: Exception do FbException.catchException(status, e);
+	end
+end;
+
+procedure IWireSessionImpl_stopDispatcher(this: IWireSession); cdecl;
+begin
+	try
+		IWireSessionImpl(this).stop();
+	except
+		on e: Exception do FbException.catchException(nil, e);
+	end
+end;
+
+var
+	IWireSessionImpl_vTable: WireSessionVTable;
+
+constructor IWireSessionImpl.create;
+begin
+	vTable := IWireSessionImpl_vTable;
+end;
+
+procedure IWireConnectionImpl_addRefDispatcher(this: IWireConnection); cdecl;
+begin
+	try
+		IWireConnectionImpl(this).addRef();
+	except
+		on e: Exception do FbException.catchException(nil, e);
+	end
+end;
+
+function IWireConnectionImpl_releaseDispatcher(this: IWireConnection): Integer; cdecl;
+begin
+	Result := 0;
+	try
+		Result := IWireConnectionImpl(this).release();
+	except
+		on e: Exception do FbException.catchException(nil, e);
+	end
+end;
+
+function IWireConnectionImpl_readDispatcher(this: IWireConnection; status: IStatus; size: Cardinal; buffer: Pointer; timeoutMs: Cardinal): Cardinal; cdecl;
+begin
+	Result := 0;
+	try
+		Result := IWireConnectionImpl(this).read(status, size, buffer, timeoutMs);
+	except
+		on e: Exception do FbException.catchException(status, e);
+	end
+end;
+
+function IWireConnectionImpl_writeDispatcher(this: IWireConnection; status: IStatus; size: Cardinal; buffer: Pointer; timeoutMs: Cardinal): Cardinal; cdecl;
+begin
+	Result := 0;
+	try
+		Result := IWireConnectionImpl(this).write(status, size, buffer, timeoutMs);
+	except
+		on e: Exception do FbException.catchException(status, e);
+	end
+end;
+
+procedure IWireConnectionImpl_shutdownDispatcher(this: IWireConnection); cdecl;
+begin
+	try
+		IWireConnectionImpl(this).shutdown();
+	except
+		on e: Exception do FbException.catchException(nil, e);
+	end
+end;
+
+function IWireConnectionImpl_getPeerAddressDispatcher(this: IWireConnection): PAnsiChar; cdecl;
+begin
+	Result := nil;
+	try
+		Result := IWireConnectionImpl(this).getPeerAddress();
+	except
+		on e: Exception do FbException.catchException(nil, e);
+	end
+end;
+
+function IWireConnectionImpl_getPeerPortDispatcher(this: IWireConnection): Cardinal; cdecl;
+begin
+	Result := 0;
+	try
+		Result := IWireConnectionImpl(this).getPeerPort();
+	except
+		on e: Exception do FbException.catchException(nil, e);
+	end
+end;
+
+function IWireConnectionImpl_isEncryptedDispatcher(this: IWireConnection): Boolean; cdecl;
+begin
+	Result := false;
+	try
+		Result := IWireConnectionImpl(this).isEncrypted();
+	except
+		on e: Exception do FbException.catchException(nil, e);
+	end
+end;
+
+var
+	IWireConnectionImpl_vTable: WireConnectionVTable;
+
+constructor IWireConnectionImpl.create;
+begin
+	vTable := IWireConnectionImpl_vTable;
+end;
+
+procedure IWireServerHostImpl_addRefDispatcher(this: IWireServerHost); cdecl;
+begin
+	try
+		IWireServerHostImpl(this).addRef();
+	except
+		on e: Exception do FbException.catchException(nil, e);
+	end
+end;
+
+function IWireServerHostImpl_releaseDispatcher(this: IWireServerHost): Integer; cdecl;
+begin
+	Result := 0;
+	try
+		Result := IWireServerHostImpl(this).release();
+	except
+		on e: Exception do FbException.catchException(nil, e);
+	end
+end;
+
+function IWireServerHostImpl_isStoppingDispatcher(this: IWireServerHost): Boolean; cdecl;
+begin
+	Result := false;
+	try
+		Result := IWireServerHostImpl(this).isStopping();
+	except
+		on e: Exception do FbException.catchException(nil, e);
+	end
+end;
+
+procedure IWireServerHostImpl_logDispatcher(this: IWireServerHost; level: Cardinal; length: Cardinal; message: PAnsiChar); cdecl;
+begin
+	try
+		IWireServerHostImpl(this).log(level, length, message);
+	except
+		on e: Exception do FbException.catchException(nil, e);
+	end
+end;
+
+var
+	IWireServerHostImpl_vTable: WireServerHostVTable;
+
+constructor IWireServerHostImpl.create;
+begin
+	vTable := IWireServerHostImpl_vTable;
+end;
+
 constructor FbException.create(status: IStatus);
 begin
 	inherited Create('FbException');
@@ -19392,6 +19798,39 @@ initialization
 	IPerformanceStatsImpl_vTable.getFetchedRecords := @IPerformanceStatsImpl_getFetchedRecordsDispatcher;
 	IPerformanceStatsImpl_vTable.getCounters := @IPerformanceStatsImpl_getCountersDispatcher;
 
+	IWireProtocolImpl_vTable := WireProtocolVTable.create;
+	IWireProtocolImpl_vTable.version := 4;
+	IWireProtocolImpl_vTable.addRef := @IWireProtocolImpl_addRefDispatcher;
+	IWireProtocolImpl_vTable.release := @IWireProtocolImpl_releaseDispatcher;
+	IWireProtocolImpl_vTable.setOwner := @IWireProtocolImpl_setOwnerDispatcher;
+	IWireProtocolImpl_vTable.getOwner := @IWireProtocolImpl_getOwnerDispatcher;
+	IWireProtocolImpl_vTable.createSession := @IWireProtocolImpl_createSessionDispatcher;
+
+	IWireSessionImpl_vTable := WireSessionVTable.create;
+	IWireSessionImpl_vTable.version := 3;
+	IWireSessionImpl_vTable.addRef := @IWireSessionImpl_addRefDispatcher;
+	IWireSessionImpl_vTable.release := @IWireSessionImpl_releaseDispatcher;
+	IWireSessionImpl_vTable.run := @IWireSessionImpl_runDispatcher;
+	IWireSessionImpl_vTable.stop := @IWireSessionImpl_stopDispatcher;
+
+	IWireConnectionImpl_vTable := WireConnectionVTable.create;
+	IWireConnectionImpl_vTable.version := 3;
+	IWireConnectionImpl_vTable.addRef := @IWireConnectionImpl_addRefDispatcher;
+	IWireConnectionImpl_vTable.release := @IWireConnectionImpl_releaseDispatcher;
+	IWireConnectionImpl_vTable.read := @IWireConnectionImpl_readDispatcher;
+	IWireConnectionImpl_vTable.write := @IWireConnectionImpl_writeDispatcher;
+	IWireConnectionImpl_vTable.shutdown := @IWireConnectionImpl_shutdownDispatcher;
+	IWireConnectionImpl_vTable.getPeerAddress := @IWireConnectionImpl_getPeerAddressDispatcher;
+	IWireConnectionImpl_vTable.getPeerPort := @IWireConnectionImpl_getPeerPortDispatcher;
+	IWireConnectionImpl_vTable.isEncrypted := @IWireConnectionImpl_isEncryptedDispatcher;
+
+	IWireServerHostImpl_vTable := WireServerHostVTable.create;
+	IWireServerHostImpl_vTable.version := 3;
+	IWireServerHostImpl_vTable.addRef := @IWireServerHostImpl_addRefDispatcher;
+	IWireServerHostImpl_vTable.release := @IWireServerHostImpl_releaseDispatcher;
+	IWireServerHostImpl_vTable.isStopping := @IWireServerHostImpl_isStoppingDispatcher;
+	IWireServerHostImpl_vTable.log := @IWireServerHostImpl_logDispatcher;
+
 finalization
 	IVersionedImpl_vTable.destroy;
 	IReferenceCountedImpl_vTable.destroy;
@@ -19496,5 +19935,9 @@ finalization
 	IProfilerStatsImpl_vTable.destroy;
 	IPerformanceCountersImpl_vTable.destroy;
 	IPerformanceStatsImpl_vTable.destroy;
+	IWireProtocolImpl_vTable.destroy;
+	IWireSessionImpl_vTable.destroy;
+	IWireConnectionImpl_vTable.destroy;
+	IWireServerHostImpl_vTable.destroy;
 
 end.

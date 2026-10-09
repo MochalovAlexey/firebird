@@ -2,7 +2,7 @@
 
 База — `master` Firebird 6, SHA из [BASELINE.md](BASELINE.md). Архитектура и SQL boundary определены в [ARCHITECTURE.md](ARCHITECTURE.md), transaction contract — в [CODEX_CONTEXT.md](CODEX_CONTEXT.md), заявляемые возможности — в [COMPATIBILITY.md](COMPATIBILITY.md).
 
-Исходный Python scaffold содержит 20 тестовых функций / 56 параметризованных случаев и требует миграции. Реализация начата с конфигурационных unit tests в `src/common/tests/WireProtocolConfigTest.cpp` и изолированного native baseline harness `tools/native_baseline.py`. Полные C/C++/raw-wire/plugin/lifecycle suites ещё предстоит реализовать; перечисление проверки в этом документе не означает, что она выполнена. Фактические результаты записаны в VALIDATION.md. Driver-only probe на синтетическом сервере и pytest collection не являются приёмкой Firebird.
+Исходный Python scaffold содержит 20 тестовых функций / 56 параметризованных случаев и требует миграции. Начальные проверки находятся в `src/common/tests/WireProtocolConfigTest.cpp`, `src/remote/server/wire/tests` и изолированных harness в `tools`. Plugin runner загружает настоящую тестовую библиотеку через PluginManager; transport пока имитируется внутри runner. Это частичное покрытие loading/ownership, а не приёмка TCP listeners, workers или server shutdown. Полные raw-wire/engine/lifecycle suites ещё предстоит реализовать; перечисление проверки в этом документе не означает, что она выполнена. Фактические результаты записаны в VALIDATION.md. Driver-only probe на синтетическом сервере и pytest collection не являются приёмкой Firebird.
 
 ## Этапы и обязательный минимум M0
 

@@ -251,7 +251,8 @@ interface PluginManager : Versioned
 	const uint TYPE_KEY_HOLDER = 10;
 	const uint TYPE_REPLICATOR = 11;
 	const uint TYPE_PROFILER = 12;
-	const uint TYPE_COUNT = 13;	// keep in sync
+	const uint TYPE_WIRE_PROTOCOL = 13;
+	const uint TYPE_COUNT = 14;	// keep in sync
 	//// TYPE_COUNT is not count. And these constants starts from 1, different than DIR_* ones.
 
 	// Main function called by plugin modules in firebird_plugin()
@@ -1984,4 +1985,56 @@ interface PerformanceStats : Versioned
 	uint64 getFetchedRecords();
 
 	PerformanceCounters getCounters(uint group);
+}
+
+// Optional server wire protocols. Native Firebird connections do not use these interfaces.
+// See doc/UsingWireProtocolPlugins.md for the threading and lifetime contract.
+interface WireProtocol : PluginBase
+{
+	// Called serially for one plugin instance. No network I/O or engine calls here.
+	// Inputs are borrowed; the host keeps them alive through the session's final release.
+	// Returns one owned reference. The host pins this plugin until after that release.
+	WireSession createSession(Status status, WireServerHost host, WireConnection connection);
+}
+
+interface WireSession : ReferenceCounted
+{
+	// Called once on a host worker. Returns after session resources have been closed.
+	void run(Status status);
+	// Concurrent, idempotent, nonblocking stop request, including before run().
+	// Must not join, perform engine calls, or release the session/plugin itself.
+	void stop();
+}
+
+// Host-owned transport; no platform sockets or TLS objects cross the plugin ABI.
+interface WireConnection : ReferenceCounted
+{
+	// Partial progress is returned immediately. With size > 0, successful read(0)
+	// means EOF; successful write(0) is invalid. size == 0 is a successful no-op.
+	// A failing call reports status and returns 0; earlier successful progress stands.
+	// timeoutMs == 0 uses the host's finite default; a positive value can only shorten
+	// that limit. Timeouts are errors, not EOF. One worker serializes all I/O calls.
+	uint read(Status status, uint size, void* buffer, uint timeoutMs);
+	uint write(Status status, uint size, const void* buffer, uint timeoutMs);
+	// Concurrent, idempotent and nonblocking. Wakes I/O; all subsequent I/O fails.
+	// The host owns the underlying transport through the last reference's release.
+	void shutdown();
+	// Immutable numeric address (without port), borrowed until final release.
+	const string getPeerAddress();
+	uint getPeerPort();
+	boolean isEncrypted();
+}
+
+// Per-connection host services. Authentication/attachment and TLS are added in
+// later interface versions; this initial ABI does not grant database access.
+interface WireServerHost : ReferenceCounted
+{
+	const uint LOG_INFO = 1;
+	const uint LOG_WARNING = 2;
+	const uint LOG_ERROR = 3;
+
+	boolean isStopping();
+	// The host bounds/escapes messages and adds endpoint/session identity.
+	// Plugins must never include credentials, auth payloads or SQL parameter values.
+	void log(uint level, uint length, const string message);
 }

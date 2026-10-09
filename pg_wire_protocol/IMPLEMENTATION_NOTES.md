@@ -32,6 +32,20 @@ M0 требует лишь минимального engine-origin kind чере�
 
 Для P10 выбран OpenSSL 3 API с необязательной сборочной поддержкой TLS; штатная сборка без дополнительных endpoints не должна получать обязательную TLS-зависимость. Предлагаемый POSIX option — `--with-wire-tls=openssl` с default `no`; он ещё не реализован. При подключении зависимости нужны feature detection, POSIX link/install и отдельная Windows packaging проверка. Конкретная поддерживаемая версия поставки определяется при реализации TLS; наличие development headers на машине не подтверждает production profile.
 
-TLS transport и сертификаты принадлежат host, решение об upgrade после SSLRequest — PgWire. Будущий IWireConnection должен поддерживать partial I/O, deadline/wakeup и upgrade без передачи raw sockets/OpenSSL объектов через ABI. Точные CLOOP сигнатуры и stop/ownership contract ещё не реализованы; этот документ не объявляет P0/P1 завершёнными.
+TLS transport и сертификаты принадлежат host, решение об upgrade после SSLRequest — PgWire. Начальный IWireConnection задаёт partial I/O, timeout и shutdown/wakeup без передачи raw sockets/OpenSSL объектов. TLS upgrade будет добавлен через новую версию интерфейса. Этот документ не объявляет P0/P1 завершёнными.
 
-Следующие части P1: интерфейсы CLOOP/тип plugin, удержание module, host startup/shutdown и загрузка тестового модуля. Затем P2 добавит PgWire framing, общий auth service и локальный attachment. BEGIN/$n остаются отдельной будущей работой parser/DSQL.
+## Второй срез P1: ABI и владение плагинами
+
+HEAD до изменений — `e912b12560`. В CLOOP добавлены TYPE_WIRE_PROTOCOL=13 и четыре интерфейса: IWireProtocol, IWireSession, IWireConnection, IWireServerHost. Существующие номера типов и версии интерфейсов сохраняются; C++, Pascal и C bindings обновляются штатным `updateCloopInterfaces`. Точный контракт — [UsingWireProtocolPlugins.md](../doc/UsingWireProtocolPlugins.md).
+
+ProtocolPlugin в `src/remote/server/wire` загружает один configured name за вызов PluginManager. Отсутствующий optional module становится ошибкой данного endpoint, без перехода к следующему имени и без изменения port mapping. Код не открывает sockets. Config::getPlugins знает новый глобальный тип; host всё равно передаёт проверенные имена по одному.
+
+ProtocolSession удерживает plugin, host context и connection. Сначала освобождается возвращённый библиотекой session object, затем host-side references, затем plugin через releasePlugin. Это удерживает библиотеку при удалении endpoint, пока его session ещё работает. Raw session наружу не выдаётся. Создание sessions сериализовано на instance; run допускается один раз, stop может вызываться параллельно и будит transport через shutdown. Владелец wrapper обязан дождаться возврата run и всех stop перед его уничтожением.
+
+Authentication и TLS upgrade пока отсутствуют в ABI и будут добавлены версионированно после реализации соответствующих host services. Host context уже имеет область одного соединения; будущая проверка credentials получит peer/TLS state от host. Ни количества attachments, ни числа транзакций этот ABI не ограничивает.
+
+Тестовый модуль и отдельный runner используют настоящий PluginManager/libfbclient; stream в runner — управляемая имитация partial I/O и блокирующего ожидания. Тестовая библиотека собирается только отдельной целью и не устанавливается в production plugins. Эта проверка не подтверждает TCP transport, server shutdown или PgWire.
+
+До подключения listeners нужно согласовать strict config resolution с кэшированным pluginsConf. Обычный getConfig перечитывает файл, а getPluginConfig и factory используют cached snapshot: отдельная свежая проверка не доказывает корректность фактически загружаемой конфигурации. Legacy fallback не меняется в этом срезе. Доступ к тому же snapshot, missing Config/NULL, ConfigFile и Port override остаются задачей следующей интеграции.
+
+Следующие части P1: strict host settings, listeners, bounded workers/queues, registry, server startup/shutdown и native coexistence с активным дополнительным endpoint. Затем P2 добавит PgWire framing, общий auth service и локальный attachment. BEGIN/$n остаются отдельной будущей работой parser/DSQL.
