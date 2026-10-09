@@ -1,6 +1,6 @@
 # База реализации Firebird 6
 
-Состояние исходников зафиксировано 8 октября 2026 года.
+Исходная база зафиксирована 8 октября 2026 года. Это сведения об исходниках, а не отчёт об успешной сборке или работающей конфигурации.
 
 | Параметр | Значение |
 |---|---|
@@ -11,20 +11,26 @@
 | Локальный provider | `CURRENT_ENGINE="Engine14"` |
 | Engine-only настройка | `EMBEDDED_PROVIDERS="Providers=" CURRENT_ENGINE` |
 | Стандарт C++ | C++20 в `configure.ac` |
-| Начальная платформа | Linux, `ServerMode=Super` |
+| Первая платформа проверки | Linux, `ServerMode=Super`; SuperClassic проверяется отдельно |
 
 ## Проверенные точки интеграции
 
-- `src/remote/server/os/posix/inet_server.cpp`: `registerAuthPlugins()`, SuperServer initialization и основной вызов `SRVR_multi_thread()`; запуск PG service должен происходить в соответствующей ветви lifecycle. Наличие дополнительных путей запуска, включая Unix socket/Classic, требует явной проверки режима.
-- `src/remote/server/server.cpp`: `DatabaseAuth::accept`, remote metadata, внутренние DSQL calls, native cleanup/shutdown.
-- `src/jrd/extds/ValidatePassword.cpp`: обмен client/server authentication plugins в памяти; EDS guards требуют существующий attachment.
-- `src/jrd/constants.h`, `src/common/classes/ParsedList.cpp`: engine-only route; удаление только `Loopback` оставляет `Remote`.
-- `src/yvalve/why.cpp`: `preproviders`, остановка providers/interfaces, `postproviders`.
-- `builds/posix/make.shared.variables`: раздельные `Remote_Common` и `Remote_Server`; новые server sources должны входить в последний.
-- `builds/posix/Makefile.in`: `FB_DAEMON` собирается из server objects и существующих runtime libraries.
+- `src/include/firebird/FirebirdInterface.idl`, `src/yvalve/PluginManager.cpp`, `src/common/classes/GetPlugins.h`: plugin types, CLOOP, factory/module ownership. Новый тип wire plugin и интерфейсы пока отсутствуют; их проект описан в [ARCHITECTURE.md](ARCHITECTURE.md).
+- `src/common/config/config.h`, `src/common/config/config.cpp`, `builds/install/misc/firebird.conf`: регистрация и документирование двух новых global configuration lists.
+- `src/remote/server/os/posix/inet_server.cpp`: auth registration, initialization и native loop. Дополнительный host подключается к server lifecycle; родной frontend остаётся на существующем пути. SuperClassic использует общую многоклиентскую ветвь, но engine/cache lifecycle отличается от Super.
+- `src/remote/server/os/win32/srvr_w32.cpp`: дальнейшее Windows lifecycle wiring.
+- `src/remote/server/server.cpp`: native authentication, DPB sanitization, attachment и shutdown; DispatcherPtr native frontend сам по себе не означает engine-only route.
+- `src/jrd/extds/ValidatePassword.cpp`: in-memory client/server authentication; входит в Engine14, EDS guards требуют существующий attachment. Нельзя прямо вызывать этот helper из нового listener до attach.
+- `src/jrd/constants.h`, `src/yvalve/why.cpp`: локальный provider, config merge и shutdown phases. Дополнительные wire plugins принудительно выбирают local Providers после sanitization, сохраняя остальные database policies.
+- `src/dsql/parse.y`, `src/dsql/dsql.cpp`, `src/dsql/StmtNodes.cpp`, `src/jrd/jrd.cpp`: native grammar, metadata, execution и возвращаемый transaction interface. `BEGIN`/`$n` не поддержаны, public getType теряет подробности исходных operations/controls.
+- `builds/posix/make.shared.variables`: `dirObjects` не рекурсивен. Новый host subdirectory явно добавляется в server objects, PG subdirectory — в отдельную plugin object group.
+- `builds/posix/Makefile.in`: daemon target, shared plugin targets и `updateCloopInterfaces`. Нужны отдельные build/install rules для PgWire.
+- `configure.ac`: `TLS_OPTIONS` — thread-local storage; сетевую TLS-зависимость для PgWire ещё предстоит выбрать и подключить.
+
+Новые исходники планируются в `src/remote/server/wire` (общий host) и `src/plugins/wire/pg` (PG shared library). Привязанные к SHA ссылки и подробности — [SOURCES.md](SOURCES.md).
 
 ## Что установить в P0
 
-Сборку, доступность зависимостей, конфигурацию работающего сервера, AuthServer/AuthClient и security database ещё предстоит проверить. Наличие defaults в исходниках не доказывает действующую конфигурацию установленного экземпляра.
+Проверить фактический HEAD и его происхождение от выбранной базы, build dependencies, штатную сборку и native baseline. Зафиксировать реальные AuthServer/AuthClient, security database и конфигурацию тестового экземпляра. Defaults исходников не доказывают действующую конфигурацию.
 
-Перед реализацией записать фактический HEAD рабочей ветки и проверить его соответствие выбранной базе `master` Firebird 6.
+Выбрать TLS dependency/feature flag/packaging, определить ABI/lifecycle и способ публикации parser-derived metadata без нового SQL-синтаксиса. Записать решения в IMPLEMENTATION_NOTES.md, фактические проверки — в VALIDATION.md после их выполнения.

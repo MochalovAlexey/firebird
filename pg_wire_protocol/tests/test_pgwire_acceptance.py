@@ -1,9 +1,10 @@
-"""Acceptance scaffold for the future native Firebird PostgreSQL frontend.
+"""Original acceptance scaffold; migration to the plugin plan is pending.
 
 Reference client: psycopg2-binary 2.9.11, libpq 17.6, ordinary synchronous
-cursor, Simple Query protocol 3.0, UTF8, Firebird SQL dialect 3.  These tests
-target the completed v0 contract, including password authentication; an early
-experimental transport-only milestone is not expected to pass the suite.
+cursor, Simple Query protocol 3.0, UTF8, Firebird SQL dialect 3.  Expectations
+predate the no-SQL-parsing wire plugin design: automatic BEGIN, transaction
+contexts and RETURNING rejection need revision as specified in TEST_PLAN.md.
+The original 56 collected cases are not the current implementation gate.
 
 Only disposable PGW_T_<uuid> tables are created.  Use a dedicated test database
 and accounts.  Missing configuration is an error, not a skipped test.  Runtime

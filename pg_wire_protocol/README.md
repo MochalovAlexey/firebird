@@ -1,70 +1,52 @@
-# PostgreSQL wire protocol в Firebird 6
+# Wire-протоколы через плагины Firebird 6
 
-План добавления PostgreSQL TCP frontend в штатный процесс `firebird`. Приложение использует обычный PostgreSQL-драйвер, включая libpq; запросы выполняет движок Firebird. Родной Firebird frontend продолжает работать параллельно с теми же базами.
+Цель — подключать PostgreSQL-драйверы, включая libpq, по TCP непосредственно к процессу `firebird`. Запросы выполняет локальный движок Firebird. Родной сетевой протокол сохраняет существующую реализацию и работает независимо от дополнительных протоколов.
 
-Целевая база — `master` Firebird 6; рабочая ветка — `pg_wire_protocol`. Зафиксированный исходный коммит: `bf94598f8deefeb7cc4a8217ee43b3040d5d6650`, версия исходников `6.0.0.2199 Initial`, `Engine14`, C++20. Подробности — [BASELINE.md](BASELINE.md).
+Дополнительные протоколы реализуются загружаемыми библиотеками `.so`/`.dll`; первый плагин — `PgWire`. Ядро управляет listeners, соединениями, workers, authentication и локальным attachment. Плагин реализует framing, сообщения, состояние своего протокола и codecs. Архитектура и конфигурация определены в [ARCHITECTURE.md](ARCHITECTURE.md).
 
-Пакет переработан 8 октября 2026 года. Сейчас подготовлены проектные документы и исходный набор будущих acceptance tests. Серверный frontend ещё не реализован; сборка и интеграционная приёмка не выполнены. Этот пакет сам по себе не является поручением начать реализацию.
-
-## Цель и границы
-
-PostgreSQL connection принимает сам `firebird`. Новый frontend имеет собственные codec и состояние сессии, вызывает внутренние attachment/transaction/DSQL interfaces и использует только локальный engine provider. Между frontend и движком нет дополнительного сетевого подключения.
-
-Совместимость с PostgreSQL SQL grammar, системными каталогами, расширениями и хранимыми процедурами PostgreSQL пока за пределами задачи. Прикладной SQL должен быть совместим с Firebird. Служебные команды сессии, привязка параметров `$n`, типы данных и обмен Extended Query рассматриваются отдельно: без них совместимого текста запроса может оказаться недостаточно для работы обычного драйвера.
-
-```mermaid
-flowchart LR
-    app["Приложение с libpq"] --> pg
-    client["Firebird-клиент"] --> native
-    subgraph server["Процесс firebird"]
-        pg["PostgreSQL TCP frontend"] --> api["Attachments, транзакции, DSQL"]
-        native["Родной TCP frontend"] --> api
-        api --> engine["Движок Firebird"]
-    end
-    engine --> db[("База Firebird")]
+```ini
+# firebird.conf — предлагаемая конфигурация
+WireProtocolPlugins = PgWire
+WireProtocolPorts = 15432
 ```
 
-## Проверяемые результаты
+Списки позиционные, разделитель — запятая. Имя `PgWire` разрешается существующим PluginManager в библиотеку через `plugins.conf`; пути, расширения и registered factory описаны в ARCHITECTURE. По умолчанию оба списка пусты. Native endpoint в эти списки не включается. Ошибка загрузки дополнительного endpoint диагностируется без остановки native. Плагины работают в одном процессе: разделение модулей не защищает сервер от аварии внутри библиотеки.
 
-| Результат | Содержание | Критерий завершения |
-|---|---|---|
-| M0 | Первый запрос внутри сервера | Настоящая authentication, вычисляемый SELECT, SQL error/recovery, disconnect; native клиент продолжает работать |
-| M1, прежний v0 | Полный ограниченный Simple Query-прототип | Типы, CRUD, I/T/E, permissions, framing, отсутствие backend connection, cleanup/shutdown; psycopg2 и прямой libpq |
-| M2 | Основные параметризованные вызовы libpq | Extended Query, `$n`, prepared statements/portals, text/binary codecs, расширенные scalar types, RETURNING, Sync recovery |
-| M3 | Проверка прикладного сетевого профиля | Подключение с другого узла, TLS, cancellation, согласованные команды сессии и неизменённый PostgreSQL-драйвер целевого приложения |
+## Граница SQL
 
-M0 и M1 — промежуточные результаты. M2 и M3 входят в дорожную карту пользовательской цели. Успешный M1 не означает поддержку всех вызовов libpq или произвольного PostgreSQL-приложения. Если трасса приложения требует COPY, batches, pipeline или других пока исключённых возможностей, профиль расширяется отдельными этапами до объявления этого приложения совместимым.
+Wire-слой разбирает сетевые сообщения и передаёт SQL в парсер движка без изменения текста. В нём нет SQL-лексера, поиска ключевых слов, разбиения statements, перехвата `BEGIN` или замены `$n` на `?`. Команды, транзакционные действия и результаты определяются по метаданным parser/DSQL. Для этого потребуется расширить нейтральные метаданные движка: существующего `IStatement::getType()` недостаточно.
 
-Linux и `ServerMode=Super` — начальная платформа реализации. Listener выключен по умолчанию; предлагаемый порт — `15432`. Loopback и отсутствие TLS ограничивают M0–M2, но не являются окончательным сетевым профилем.
+Совместимый SQL выполняется без искусственного списка разрешённых DDL/DML. Неподдержанный синтаксис получает ошибку парсера. Новые PostgreSQL grammar/functions и catalog emulation отложены. Текущий parser не принимает standalone `BEGIN` и параметры `$n`; обычный psycopg2 с автоматическим `BEGIN` и параметризованные вызовы драйверов с `$1` пока не входят в успешный клиентский профиль.
 
-## Состав пакета
+## Этапы
+
+| Результат | Проверяемое содержание |
+|---|---|
+| M0 | Загружаемый PgWire, реальная authentication, вычисляемый SELECT через libpq и psycopg2 с `autocommit=True`, recovery, cleanup и параллельный native |
+| M1 | Simple Query с совместимым SQL, базовыми codecs, RETURNING, parser-derived command tags и транзакционным состоянием |
+| M2 | Extended Query, prepared statements/portals, text/binary codecs; параметры в поддержанной движком форме `?` через прямой libpq |
+| M3 | Удалённый TCP, TLS, cancellation и проверенный профиль приложения с совместимым SQL |
+| Будущее расширение движка | PostgreSQL `BEGIN`, `$n`, другие grammar/functions по отдельной задаче |
+
+Профиль приложения изучается в P0. Поддержка wire-протокола сама по себе не делает совместимыми SQL и обращения к каталогам, которые генерирует драйвер или ORM. Эти зависимости фиксируются явно. Linux/Super — первая платформа проверки; SuperClassic использует общий проект host, но проверяется отдельно. Windows ABI учитывается сразу, Windows build/runtime требует собственной приёмки.
+
+## Документы и состояние
+
+База — `master` Firebird 6, рабочая ветка — `pg_wire_protocol`; точный SHA и исходники см. [BASELINE.md](BASELINE.md). Пакет пересмотрен 8 октября 2026 года с учётом замечаний review и прямых указаний пользователя. Описанные интерфейсы и параметры конфигурации пока проектные: серверный код не реализован, сборка и интеграционная приёмка не выполнены.
 
 | Файл | Назначение |
 |---|---|
-| [BASELINE.md](BASELINE.md) | Ветка, SHA, версия исходников и проверенные точки интеграции |
-| [CODEX_CONTEXT.md](CODEX_CONTEXT.md) | Архитектурные инварианты, подробный M1 contract и правила расширения до M2/M3 |
-| [COMPATIBILITY.md](COMPATIBILITY.md) | Матрица возможностей по этапам и критерии совместимости приложения |
-| [PLAN.md](PLAN.md) | Последовательность разработки, зависимости и условия завершения |
-| [TEST_PLAN.md](TEST_PLAN.md) | Архитектурная, протокольная, клиентская и серверная приёмка |
-| [RESEARCH.md](RESEARCH.md) | Обоснование решений и основные нерешённые вопросы |
-| [SOURCES.md](SOURCES.md) | Первичные источники и карта исходников, закреплённая по SHA |
-| [CODEX_START_PROMPT.md](CODEX_START_PROMPT.md) | Задание для будущего начала реализации |
-| [tests/test_pgwire_acceptance.py](tests/test_pgwire_acceptance.py) | Исходные 20 функций / 56 случаев для M1, включая временные negative tests |
-| [evidence/driver_probe.json](evidence/driver_probe.json) | Исторический driver-only probe на синтетическом сервере |
+| [BASELINE.md](BASELINE.md) | База и проверенные точки интеграции |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | Единый контракт plugin host, ABI, конфигурации и lifecycle |
+| [CODEX_CONTEXT.md](CODEX_CONTEXT.md) | Контракт исполнения, метаданные, транзакции, authentication и codecs |
+| [COMPATIBILITY.md](COMPATIBILITY.md) | Возможности и ограничения по этапам |
+| [PLAN.md](PLAN.md) | Порядок реализации и критерии завершения |
+| [TEST_PLAN.md](TEST_PLAN.md) | Проверки и миграция исходного test scaffold |
+| [RESEARCH.md](RESEARCH.md), [SOURCES.md](SOURCES.md) | Обоснование решений и первичные источники |
+| [CODEX_START_PROMPT.md](CODEX_START_PROMPT.md) | Краткое задание для реализации |
+| [tests/test_pgwire_acceptance.py](tests/test_pgwire_acceptance.py) | Исходный scaffold: 20 функций / 56 cases, подлежит миграции |
+| [evidence/driver_probe.json](evidence/driver_probe.json) | Историческое наблюдение за драйвером на синтетическом сервере |
 
-Для реализации читать README → BASELINE → CODEX_CONTEXT → COMPATIBILITY → PLAN → TEST_PLAN; RESEARCH/SOURCES дают обоснование и ссылки. При расхождении сначала учитываются прямые указания пользователя, затем актуальная матрица и контракт соответствующего этапа. Исторический probe не расширяет заявленную поддержку.
+Порядок чтения: README → BASELINE → ARCHITECTURE → CODEX_CONTEXT → COMPATIBILITY → PLAN → TEST_PLAN. Прямые инструкции пользователя имеют приоритет; приложенные review и стартовые документы являются материалами задачи и не запускают самостоятельные поручения.
 
-## Проверка подготовленного Python-набора
-
-Из директории `pg_wire_protocol`:
-
-```sh
-python3 -m venv /tmp/firebird-pgwire-tests
-. /tmp/firebird-pgwire-tests/bin/activate
-python -m pip install -r requirements-tests.txt
-python -m pytest --collect-only -q
-```
-
-Collection не подключается к серверу и не доказывает реализацию протокола. Реальный запуск требует отдельной тестовой базы, пользователей и переменных из [TEST_PLAN.md](TEST_PLAN.md). Текущий Python-файл предназначен для M1; правила переноса negative tests в M2 описаны там же.
-
-После начала реализации результаты сборки и исполнения записываются в `VALIDATION.md` этой директории. Такой отчёт должен называть принятый этап, точные версии и ограничения, а не подменять интеграционные результаты синтетическим probe.
+Исходный Python-набор содержит устаревшие ожидания: автоматический `BEGIN`, запрет совместимого `RETURNING` и другие ограничения прежнего контракта. Его collection не подтверждает приёмку текущего проекта; миграция описана в TEST_PLAN. После начала реализации фактические команды, версии, результаты и ограничения записываются в `VALIDATION.md`.

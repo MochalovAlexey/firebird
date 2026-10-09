@@ -1,10 +1,10 @@
 # Первичные источники и карта исходников
 
-Исходная карта подготовлена 6 октября 2026 года; пакет обновлён 8 октября 2026 года для M0–M3. Пользователь выбрал master Firebird 6 и рабочую ветку pg_wire_protocol. Локальная база совпадает с закреплённым SHA ниже; ключевые build/provider/entry-point symbols повторно сверены, см. BASELINE.md. Движущиеся URL current/master удобны для навигации; воспроизводимые результаты привязываются к конкретным версиям и SHA.
+Пакет обновлён 8 октября 2026 года. База — `master` Firebird 6, рабочая ветка `pg_wire_protocol`; SHA и состояние checkout описаны в [BASELINE.md](BASELINE.md). Исследованный upstream [bf94598f8deefeb7cc4a8217ee43b3040d5d6650](https://github.com/FirebirdSQL/firebird/tree/bf94598f8deefeb7cc4a8217ee43b3040d5d6650) задаёт development version 6.0.0.2199. Локальные ссылки ниже ведут в этот workspace; номера строк — навигация по исходному snapshot, symbols остаются основным ориентиром.
 
-Архитектура исследования: новый PostgreSQL wire frontend **внутри процесса штатного Firebird server**, со своим listener и codec, проверкой credentials через внутренние auth plugins и прямым вызовом локального engine provider. Внешний gateway, повторное подключение к native TCP endpoint и клиентский attachment bridge исключены. Интерфейсы `IAttachment`/`IStatement` сами по себе не определяют сетевой путь: ими уже пользуется native server, а выбор provider требует отдельного контроля.
+Документ перечисляет доказательства и точки расширения, а не задаёт конкурирующий контракт: архитектура находится в [ARCHITECTURE.md](ARCHITECTURE.md), выводы — в [RESEARCH.md](RESEARCH.md). Новый общий wire host использует PluginManager/CLOOP, PG implementation собирается отдельной shared library. SQL разбирает Firebird parser; wire SQL classification/rewriting исключены требованием пользователя.
 
-Граница доказательств: проведено статическое чтение документации и исходников. Изменённый native server не реализован, не собран и не запущен; работоспособность интеграции пока не проверена. F7–F9 фиксируют точки интеграции. Упоминания v0 в исходной карте относятся к M1; актуальные расширения M2/M3 определены в CODEX_CONTEXT/COMPATIBILITY, дополнительные источники — S16/S17 в конце файла.
+Граница доказательств: статическое чтение исходников и документации. Работающий host/plugin ещё не подтверждён build/runtime tests. Исторический driver_probe описывает синтетический сервер без Firebird; перенесённый Python suite требует миграции и не является универсальным acceptance gate. Движущиеся URL current/master служат навигацией; исполняемые проверки фиксируют версии и SHA.
 
 ## PostgreSQL и драйвер
 
@@ -100,7 +100,7 @@ Native transaction model, TPB semantics, отличие AUTO COMMIT / COMMIT RET
 
 [PostgreSQL Character Types](https://www.postgresql.org/docs/18/datatype-character.html)
 
-NUL недопустим в PostgreSQL character types. Отсюда выбран явный отказ v0, а не тихое усечение Firebird строки.
+NUL недопустим в PostgreSQL character types. Строковый codec должен выдавать явную ошибку вместо тихого усечения Firebird строки.
 
 ### S13 — расширение результатов агрегатов Firebird
 
@@ -114,7 +114,7 @@ SUM(BIGINT) и exact numeric могут вернуть более широкий
 
 [PostgreSQL pg_type.dat](https://github.com/postgres/postgres/blob/REL_17_STABLE/src/include/catalog/pg_type.dat)
 
-BOOLEAN output t/f и встроенные идентификаторы типов. OID в v0 выбираются явно; PostgreSQL catalog storage не создаётся.
+BOOLEAN output t/f и встроенные идентификаторы типов. OID выбираются явно; PostgreSQL catalog storage не создаётся.
 
 ### S15 — дополнительные особенности Firebird SQL
 
@@ -126,153 +126,122 @@ BOOLEAN output t/f и встроенные идентификаторы типо
 
 [Jaybird metadata API](https://www.firebirdsql.org/docs/drivers/java/latest/docs/org.firebirdsql.jaybird/org/firebirdsql/jdbc/FBDatabaseMetaData.html)
 
-FROM в проверенном синтаксисе обязателен; RETURNING и PSQL требуют отдельного consideration, а fixture должна учитывать native DDL semantics. Поведение сверяется с выбранным SHA Firebird 6.
+SQL fixtures учитывают требования parser и native DDL semantics; RETURNING и PSQL требуют соответствующей engine metadata и управления результатами. Поведение сверяется с выбранным SHA Firebird 6.
 
 ## Закреплённая карта исходников Firebird
 
-Repository: [FirebirdSQL/firebird](https://github.com/FirebirdSQL/firebird).
+### F1 — публичные интерфейсы и ownership
 
-Исследованный [commit bf94598f8deefeb7cc4a8217ee43b3040d5d6650](https://github.com/FirebirdSQL/firebird/tree/bf94598f8deefeb7cc4a8217ee43b3040d5d6650).
+- [FirebirdInterface.idl](../src/include/firebird/FirebirdInterface.idl): `IAttachment`, `ITransaction`, `IStatement`, `IResultSet`, `IMessageMetadata`, `IMetadataBuilder`; `cancelOperation` около строки 696.
+- [Interface.h](../src/include/firebird/Interface.h) и [Using OO API](../doc/Using_OO_API.md): вызовы, wrappers и status contract.
+- [RefCounted.h](../src/common/classes/RefCounted.h), [ImplementHelper.h](../src/common/classes/ImplementHelper.h): `RefPtr`, `REF_NO_INCR`, implementation helpers.
 
-[writeBuildNum.sh](https://github.com/FirebirdSQL/firebird/blob/bf94598f8deefeb7cc4a8217ee43b3040d5d6650/src/misc/writeBuildNum.sh) в этом commit задаёт `BuildType=T`, `MajorVer=6`, `MinorVer=0`, `RevNo=0`, `BuildNum=2199`. Это development snapshot официального upstream; он не доказывает наличие готовой версии 6 в целевом продукте. Перед работой Codex должен зафиксировать точный repository/branch/SHA продуктовой базы и повторно сверить указанные symbols.
+Обычный `RefPtr` добавляет ссылку, adopt-вариант принимает уже выданную; successful commit/rollback/detach/free/close могут потреблять interface ownership. Эти interfaces используются штатным native server, но сами по себе не гарантируют local engine route.
 
-### F1 — публичные интерфейсы
+### F2 — официальные примеры OO API
 
-- [FirebirdInterface.idl](https://github.com/FirebirdSQL/firebird/blob/bf94598f8deefeb7cc4a8217ee43b3040d5d6650/src/include/firebird/FirebirdInterface.idl)
-- [Interface.h](https://github.com/FirebirdSQL/firebird/blob/bf94598f8deefeb7cc4a8217ee43b3040d5d6650/src/include/firebird/Interface.h)
-- [Using OO API](https://github.com/FirebirdSQL/firebird/blob/bf94598f8deefeb7cc4a8217ee43b3040d5d6650/doc/Using_OO_API.md)
+- [02.update.cpp](../examples/interfaces/02.update.cpp), [03.select.cpp](../examples/interfaces/03.select.cpp), [04.print_table.cpp](../examples/interfaces/04.print_table.cpp), [05.user_metadata.cpp](../examples/interfaces/05.user_metadata.cpp).
 
-IMetadataBuilder, message offsets, flags, execute/openCursor, ownership. Эти же interfaces применяются внутри native server; внешний клиентский слой для их использования не нужен. Примечание: текст документации о размещении statement types устарел относительно source; публичные isc_info_sql_stmt_* находятся в inf_pub.h. Различие между принимающим возвращённую ссылку wrapper и штатным `RefPtr`, который добавляет свою ссылку, см. F9.
+Примеры показывают message buffers и metadata. Их клиентский attach, retaining и упрощённые error loops не задают серверный auth/lifecycle contract.
 
-### F2 — официальные примеры
+### F3 — dispatcher и native server
 
-- [02.update.cpp](https://github.com/FirebirdSQL/firebird/blob/bf94598f8deefeb7cc4a8217ee43b3040d5d6650/examples/interfaces/02.update.cpp)
-- [03.select.cpp](https://github.com/FirebirdSQL/firebird/blob/bf94598f8deefeb7cc4a8217ee43b3040d5d6650/examples/interfaces/03.select.cpp)
-- [04.print_table.cpp](https://github.com/FirebirdSQL/firebird/blob/bf94598f8deefeb7cc4a8217ee43b3040d5d6650/examples/interfaces/04.print_table.cpp)
-- [05.user_metadata.cpp](https://github.com/FirebirdSQL/firebird/blob/bf94598f8deefeb7cc4a8217ee43b3040d5d6650/examples/interfaces/05.user_metadata.cpp)
+- [why.cpp](../src/yvalve/why.cpp): `Dispatcher::attachOrCreateDatabase`, merge `isc_dpb_config` перед provider iteration, около строки 6550.
+- [server.cpp](../src/remote/server/server.cpp): `DatabaseAuth::accept`, около строки 2554; `prepare_statement`, `execute_statement`, `fetch`, `start_transaction`, `disconnect`.
+- [inet_server.cpp](../src/remote/server/os/posix/inet_server.cpp): POSIX `main`, `registerAuthPlugins` и native server loop.
 
-Примеры полезны для metadata и выполнения statements. Их локальный client attach, retaining или упрощённые циклы ошибок не задают архитектуру PG frontend. Образец серверной аутентификации и создания attachment — F3/F8, lifecycle — F9.
+Native server обращается к dispatcher с configured providers. Host для дополнительных протоколов должен явно ограничить selection локальным engine после sanitization DPB. Это переопределяет `Providers`, но не отменяет остальные database policies. Наличие `IAttachment` или совпадение PID не доказывают отсутствие сетевого перехода.
 
-### F3 — dispatcher и существующий native server
+### F4 — parser, statement semantics и engine metadata
 
-- [yvalve/why.cpp](https://github.com/FirebirdSQL/firebird/blob/bf94598f8deefeb7cc4a8217ee43b3040d5d6650/src/yvalve/why.cpp)
-- [remote/client/interface.cpp](https://github.com/FirebirdSQL/firebird/blob/bf94598f8deefeb7cc4a8217ee43b3040d5d6650/src/remote/client/interface.cpp)
-- [remote/server/server.cpp](https://github.com/FirebirdSQL/firebird/blob/bf94598f8deefeb7cc4a8217ee43b3040d5d6650/src/remote/server/server.cpp)
-- [POSIX server entry point](https://github.com/FirebirdSQL/firebird/blob/bf94598f8deefeb7cc4a8217ee43b3040d5d6650/src/remote/server/os/posix/inet_server.cpp)
+- [jrd.cpp](../src/jrd/jrd.cpp): `JAttachment::prepare` → DSQL.
+- [parse.y](../src/dsql/parse.y): `top: statement | statement ';'`, около строки 913; native transaction/session grammar и параметры.
+- [btyacc_fb.ske](../src/dsql/btyacc_fb.ske): generated parser skeleton и EOF.
+- [dsql.cpp](../src/dsql/dsql.cpp): `isc_info_sql_stmt_flags`/`isc_info_sql_stmt_type`, около строк 848–925.
+- [StmtNodes.cpp](../src/dsql/StmtNodes.cpp), [DsqlStatements.h](../src/dsql/DsqlStatements.h): semantic statement types, RETURNING, MERGE и UPDATE OR INSERT.
 
-Проверены `Dispatcher::attachOrCreateDatabase`, перебор configured providers и DPB config; `DatabaseAuth::accept`, `rem_port::prepare_statement`, `execute_statement`, `fetch`, `start_transaction`, `disconnect`; `main()` POSIX сервера и `registerAuthPlugins`. Это исходные точки для реализации PG listener и прямого выполнения запросов внутри того же процесса.
+Parser получает целый SQL без модификаций. Структура native API сводит RETURNING к SELECT/EXEC_PROCEDURE, MERGE/UPDATE OR INSERT к INSERT, session management к DDL, retaining и non-retaining commit к одному публичному kind. Поэтому command semantics/transaction effects требуют расширения нейтральной metadata движка. Поиск первого слова, SQL allowlist, split по `;` и wire-замена `$n` не являются решением. Будущие `BEGIN`/`$n` относятся к parser/parameter metadata.
 
-`remote/client/interface.cpp` используется как источник о регистрации auth client plugins и поведении `Remote`/`Loopback`, которое требуется исключить из PG execution route. Его клиентский native connection path не является backend предлагаемого решения. Подробности codec/dispatch — F7, проверка credentials/attach — F8, запуск и остановка — F9.
+### F5 — типы, CHAR и полный status vector
 
-### F4 — engine boundary и полный разбор SQL
+- [sqlda_pub.h](../src/include/firebird/impl/sqlda_pub.h), [inf_pub.h](../src/include/firebird/impl/inf_pub.h), [consts_pub.h](../src/include/firebird/impl/consts_pub.h): dialect 3, statement kinds, SQL types, flags.
+- [MsgMetadata.h](../src/common/MsgMetadata.h), [MsgMetadata.cpp](../src/common/MsgMetadata.cpp): lengths, charsets, offsets, metadata builder.
+- [gen.cpp](../src/dsql/gen.cpp): `GEN_port`, около строки 228, превращает внутренний CHAR в varying, сохраняя описание CHAR через `par_is_text`; комментарий ссылается на CORE-2606.
+- [intl.cpp](../src/jrd/intl.cpp): `INTL_adjust_text_descriptor`, около строки 288; `pad_spaces` при выдаче SQL_TEXT, около строки 660.
+- [ExprNodes.cpp](../src/dsql/ExprNodes.cpp): LiteralNode корректирует metadata до максимального количества bytes, около строки 8060.
+- [errd.cpp](../src/dsql/errd.cpp): `internal_post`, около строки 185, добавляет общий `isc_dsql_error` перед конкретным status.
+- [gds.cpp](../src/yvalve/gds.cpp): `fb_sqlstate`, около строки 2464, пример обхода tagged status vector.
+- [jrd messages](../src/include/firebird/impl/msg/jrd.h): конкретные codes и их Firebird SQLSTATE.
 
-- [jrd/jrd.cpp](https://github.com/FirebirdSQL/firebird/blob/bf94598f8deefeb7cc4a8217ee43b3040d5d6650/src/jrd/jrd.cpp)
-- [dsql/dsql.cpp](https://github.com/FirebirdSQL/firebird/blob/bf94598f8deefeb7cc4a8217ee43b3040d5d6650/src/dsql/dsql.cpp)
-- [dsql/parse.y](https://github.com/FirebirdSQL/firebird/blob/bf94598f8deefeb7cc4a8217ee43b3040d5d6650/src/dsql/parse.y)
-- [dsql/btyacc_fb.ske](https://github.com/FirebirdSQL/firebird/blob/bf94598f8deefeb7cc4a8217ee43b3040d5d6650/src/dsql/btyacc_fb.ske)
+CHAR UTF8 SQL_TEXT buffer может быть N×4 bytes с padding. Запросить его как SQL_VARYING через builder позволяет получить engine-correct length, сохранив исходный CHAR OID; это требует проверки с trailing spaces и многобайтным текстом. Error mapping обходит весь status vector и учитывает дополнительные причины. Firebird `42S02`/`HY008` нельзя безусловно выдать вместо PostgreSQL `42P01`/`57014`.
 
-JAttachment::prepare вызывает DSQL_prepare. Начальное правило grammar принимает один statement; generated parser skeleton требует EOF. Это статическое основание отказа multi-statement без partial execution при корректном length/NUL handling.
+### F6 — конфигурация, сборка и TLS dependency
 
-### F5 — типы и ошибки
+- [firebird.conf](../builds/install/misc/firebird.conf), [databases.conf](../builds/install/misc/databases.conf), [config.h](../src/common/config/config.h), [config.cpp](../src/common/config/config.cpp): global/per-database keys.
+- [make.shared.variables](../builds/posix/make.shared.variables): `dirFiles`/`dirObjects` около строк 4–18 не рекурсивны; `Remote_Server` около строки 70; `Engine_Objects` около строки 98.
+- [Makefile.in](../builds/posix/Makefile.in): штатный `FB_DAEMON` target около строки 658, пример отдельного profiler plugin около строки 772; IDL/CLOOP generation.
+- [make.defaults](../builds/posix/make.defaults), [configure.ac](../configure.ac), [CI](../.github/workflows/main.yml): toolchain, dependencies и штатный POSIX build.
+- [src/CMakeLists.txt](../src/CMakeLists.txt): CLOOP header generation присутствует; готовый native server target в просмотренной карте не подтверждён.
 
-- [sqlda_pub.h](https://github.com/FirebirdSQL/firebird/blob/bf94598f8deefeb7cc4a8217ee43b3040d5d6650/src/include/firebird/impl/sqlda_pub.h)
-- [inf_pub.h](https://github.com/FirebirdSQL/firebird/blob/bf94598f8deefeb7cc4a8217ee43b3040d5d6650/src/include/firebird/impl/inf_pub.h)
-- [consts_pub.h](https://github.com/FirebirdSQL/firebird/blob/bf94598f8deefeb7cc4a8217ee43b3040d5d6650/src/include/firebird/impl/consts_pub.h)
-- [jrd diagnostic messages](https://github.com/FirebirdSQL/firebird/blob/bf94598f8deefeb7cc4a8217ee43b3040d5d6650/src/include/firebird/impl/msg/jrd.h)
-- [yvalve/gds.cpp](https://github.com/FirebirdSQL/firebird/blob/bf94598f8deefeb7cc4a8217ee43b3040d5d6650/src/yvalve/gds.cpp)
+Объекты host и отдельной PG library должны явно попасть в соответствующие targets/install rules. В просмотренной server build нет готовой сетевой TLS library. `TLS_OPTIONS` в configure (около строки 1275) — thread-local storage. TLS dependency/опциональность/упаковка определяются в P0; наличие libtomcrypt не решает PostgreSQL SSLRequest → TLS.
 
-SQL_DIALECT_V6=3, statement kinds, SQL type/subtype/scale, fb_sqlstate и исходные диагностические коды.
+### F7 — native wire и транспорт
 
-### F6 — конфигурация и build
+- [protocol.h](../src/remote/protocol.h), [protocol.cpp](../src/remote/protocol.cpp): `P_OP`, `PACKET`, `xdr_protocol`.
+- [remote.h](../src/remote/remote.h): `rem_port`, native XDR streams/callbacks и `ServAttachment/ServTransaction/ServStatement/ServCursor`.
+- [inet.cpp](../src/remote/inet.cpp): `alloc_port`, receive/send, `select_accept/select_multi/select_wait`.
+- [remote.cpp](../src/remote/remote.cpp), [server.cpp](../src/remote/server/server.cpp): `REMOTE_get_timeout_params`, `server_req_t`, `SRVR_multi_thread`, `process_packet`, `loopThread`, `set_server`.
 
-- [firebird.conf](https://github.com/FirebirdSQL/firebird/blob/bf94598f8deefeb7cc4a8217ee43b3040d5d6650/builds/install/misc/firebird.conf)
-- [databases.conf](https://github.com/FirebirdSQL/firebird/blob/bf94598f8deefeb7cc4a8217ee43b3040d5d6650/builds/install/misc/databases.conf)
-- [configure.ac](https://github.com/FirebirdSQL/firebird/blob/bf94598f8deefeb7cc4a8217ee43b3040d5d6650/configure.ac)
-- [Linux and cross-platform CI](https://github.com/FirebirdSQL/firebird/blob/bf94598f8deefeb7cc4a8217ee43b3040d5d6650/.github/workflows/main.yml)
-- [POSIX Makefile.in](https://github.com/FirebirdSQL/firebird/blob/bf94598f8deefeb7cc4a8217ee43b3040d5d6650/builds/posix/Makefile.in)
+Native queues и callbacks передают PACKET; `port_type` отражает transport, а не независимый wire codec. Общий host дополнительных протоколов и PG codec не должны отправлять PG bytes в этот dispatcher. Native listener и его конфигурация остаются самостоятельными.
 
-Прочитаны реальные build commands; сборка в рамках исследования не выполнялась. Базовый путь для Linux — существующие autotools/make и команды CI. В просмотренном `src/CMakeLists.txt` готовый native server target не обнаружен; интеграция PG frontend через CMake не подтверждена. Подключение объектов к штатному `FB_DAEMON`, конфигурация и lifecycle подробно сопоставлены в F9.
+### F8 — проверка credentials и защищённый attach
 
-### F7 — wire protocol, транспорт и native dispatch
+- [ValidatePassword.cpp](../src/jrd/extds/ValidatePassword.cpp): `EDS::validatePassword`, `CBlock`, `SBlock`, `DummyCryptKey`; guards текущего attachment/auth block около строки 175. Сборка этого файла в Engine14 — F6.
+- [SrpClient.cpp](../src/auth/SecureRemotePassword/client/SrpClient.cpp), [SrpServer.cpp](../src/auth/SecureRemotePassword/server/SrpServer.cpp): plugin exchange, security database, `setDbCryptCallback`.
+- [interface.cpp](../src/remote/client/interface.cpp): `registerRedirector` регистрирует client auth plugins, около строки 1110.
+- [inet_server.cpp](../src/remote/server/os/posix/inet_server.cpp): `registerAuthPlugins`, около строки 163.
+- [Auth.h](../src/common/Auth.h), [Auth.cpp](../src/common/Auth.cpp): verified AuthBlock writer.
+- [server.cpp](../src/remote/server/server.cpp): `DatabaseAuth::accept`, sanitization DPB и `addClumplets` с достоверным peer.
+- [jrd.cpp](../src/jrd/jrd.cpp): `JProvider::internalAttach`, `getUserInfo`, `RemoteAccess` и приоритет username над auth block.
+- [constants.h](../src/jrd/constants.h): `CURRENT_ENGINE="Engine14"`, `EMBEDDED_PROVIDERS="Providers=" CURRENT_ENGINE`, около строки 511.
+- [ParsedList.cpp](../src/common/classes/ParsedList.cpp): `getNonLoopbackProviders` удаляет только Loopback; Remote остаётся и может участвовать в security database attach.
 
-- [remote/protocol.h](https://github.com/FirebirdSQL/firebird/blob/bf94598f8deefeb7cc4a8217ee43b3040d5d6650/src/remote/protocol.h)
-- [remote/protocol.cpp](https://github.com/FirebirdSQL/firebird/blob/bf94598f8deefeb7cc4a8217ee43b3040d5d6650/src/remote/protocol.cpp)
-- [remote/remote.h](https://github.com/FirebirdSQL/firebird/blob/bf94598f8deefeb7cc4a8217ee43b3040d5d6650/src/remote/remote.h)
-- [remote/inet.cpp](https://github.com/FirebirdSQL/firebird/blob/bf94598f8deefeb7cc4a8217ee43b3040d5d6650/src/remote/inet.cpp)
-- [remote/remote.cpp](https://github.com/FirebirdSQL/firebird/blob/bf94598f8deefeb7cc4a8217ee43b3040d5d6650/src/remote/remote.cpp)
-- [remote/server/server.cpp](https://github.com/FirebirdSQL/firebird/blob/bf94598f8deefeb7cc4a8217ee43b3040d5d6650/src/remote/server/server.cpp)
+EDS wrapper нельзя вызывать до attachment. Общий host auth service требует явных credentials и доверенной конфигурации, ограниченного exchange, cleanup и policy tests. Копия механики в каждом wire-плагине не нужна. Если реализация затронет EDS, регрессии сохраняют прежние guards; неизменённый EDS не требует обязательного рефакторинга ради M0. Security database начального профиля локальная; отсутствие сетевого fallback проверяется отдельно.
 
-| Проверенный файл и symbol | Что подтверждено | Следствие для встроенного PG frontend |
-|---|---|---|
-| `protocol.h`: `P_OP`, `PACKET`; `protocol.cpp`: `xdr_protocol` | Native opcodes и XDR layout; `PACKET` — структура с полями native сообщений | PG tags и framing требуют отдельного codec; не менять значения native opcodes |
-| `remote.h`: `rem_port` | Transport kind `INET`/`XNET`, native `port_protocol`, callbacks с `PACKET*`, XDR streams, locks и object registry | Тип транспорта не заменяет идентификатор wire protocol; PG 3.0 нельзя присвоить native `port_protocol` |
-| `remote.h`: `ServAttachment`, `ServTransaction`, `ServStatement`, `ServCursor`; `Rdb`, `Rtr`, `Rsr` | Штатный сервер уже держит engine interfaces; registries дополнительно обслуживают native handles и состояние протокола | PG session может владеть теми же видами interfaces, не создавая native packets/object IDs |
-| `inet.cpp`: `alloc_port`, `receive`, `send_full`, `send_partial` | `alloc_port` устанавливает native packet callbacks и создаёт XDR streams; receive/send вызывают `xdr_protocol` | Подмена содержимого native INET port PostgreSQL bytes не создаёт PG listener |
-| `inet.cpp`: `select_accept`, `select_multi`, `select_wait` | Socket accept и ожидание связаны с `rem_port` и глобальной native инфраструктурой | При выделении общих socket helpers сохранять native поведение; для v0 выбран собственный listener того же процесса |
-| `remote.cpp`: `rem_port::getPortConfig`, `REMOTE_get_timeout_params` | Получение per-port config и native timeout parameters | Сверить, какие лимиты переносимы; PG startup/read/write deadlines задавать осмысленно |
-| `server.cpp`: `server_req_t`, `SRVR_multi_thread`, `process_packet`, `loopThread` | Очередь содержит `PACKET req_send/req_receive`; dispatcher и worker loop работают с native opcodes | Не запускать PG bytes через эту очередь без отдельного существенного refactor; v0 использует свою ограниченную группу PG workers в том же server |
-| `server.cpp`: `set_server` | Реестр `srvr` сопоставляет серверы по `rem_port::port_type`, а не codec | Второй вызов `SRVR_multi_thread` с INET port не является независимой PG service |
+### F9 — server lifecycle и режимы
 
-Имена новых PG файлов, классов и config keys в плане являются предложением. В проверенном upstream PG listener/codec отсутствуют; соответствие схемы реальному серверу доказывается будущим build и endpoint tests.
+- [inet_server.cpp](../src/remote/server/os/posix/inet_server.cpp): около строки 378 все non-Classic modes получают `SRVR_multi_client`; Classic имеет fork/accept lifecycle.
+- [jrd.cpp](../src/jrd/jrd.cpp): общий Database instance только для Super, около строки 7509; отличия cleanup около строки 7840.
+- [why.cpp](../src/yvalve/why.cpp): `Dispatcher::shutdown` и последовательность preproviders/providers/postproviders.
+- [server.cpp](../src/remote/server/server.cpp): native `pre_shutdown`, `shut_server`, `Worker::shutdown`, disconnect.
 
-### F8 — внутренняя проверка credentials, auth plugins и защищённый attach
+Общая ветка listener делает SuperClassic возможным, но не доказывает его корректность без lifecycle/coexistence tests. Host останавливает accept/readers и workers согласованно с provider shutdown. Module unload выполняется после последнего callback/interface/thread; бесконечный join до provider shutdown запрещён.
 
-- [jrd/extds/ValidatePassword.cpp](https://github.com/FirebirdSQL/firebird/blob/bf94598f8deefeb7cc4a8217ee43b3040d5d6650/src/jrd/extds/ValidatePassword.cpp)
-- [auth/SecureRemotePassword/client/SrpClient.cpp](https://github.com/FirebirdSQL/firebird/blob/bf94598f8deefeb7cc4a8217ee43b3040d5d6650/src/auth/SecureRemotePassword/client/SrpClient.cpp)
-- [auth/SecureRemotePassword/server/SrpServer.cpp](https://github.com/FirebirdSQL/firebird/blob/bf94598f8deefeb7cc4a8217ee43b3040d5d6650/src/auth/SecureRemotePassword/server/SrpServer.cpp)
-- [common/Auth.h](https://github.com/FirebirdSQL/firebird/blob/bf94598f8deefeb7cc4a8217ee43b3040d5d6650/src/common/Auth.h)
-- [common/Auth.cpp](https://github.com/FirebirdSQL/firebird/blob/bf94598f8deefeb7cc4a8217ee43b3040d5d6650/src/common/Auth.cpp)
-- [remote/server/server.cpp](https://github.com/FirebirdSQL/firebird/blob/bf94598f8deefeb7cc4a8217ee43b3040d5d6650/src/remote/server/server.cpp)
-- [remote/client/interface.cpp](https://github.com/FirebirdSQL/firebird/blob/bf94598f8deefeb7cc4a8217ee43b3040d5d6650/src/remote/client/interface.cpp)
-- [POSIX server registration](https://github.com/FirebirdSQL/firebird/blob/bf94598f8deefeb7cc4a8217ee43b3040d5d6650/src/remote/server/os/posix/inet_server.cpp)
-- [jrd/jrd.cpp](https://github.com/FirebirdSQL/firebird/blob/bf94598f8deefeb7cc4a8217ee43b3040d5d6650/src/jrd/jrd.cpp)
-- [jrd/constants.h](https://github.com/FirebirdSQL/firebird/blob/bf94598f8deefeb7cc4a8217ee43b3040d5d6650/src/jrd/constants.h)
-- [common/classes/ParsedList.cpp](https://github.com/FirebirdSQL/firebird/blob/bf94598f8deefeb7cc4a8217ee43b3040d5d6650/src/common/classes/ParsedList.cpp)
+### F10 — PluginManager и CLOOP
 
-Контракты `IClientBlock`, `IServerBlock`, `IClient`, `IServer`, `IAuth` — F1. `IServerBlock` не предоставляет raw password; `IClientBlock` предоставляет `getPassword`.
+- [FirebirdInterface.idl](../src/include/firebird/FirebirdInterface.idl): PluginBase/PluginFactory/PluginModule/PluginManager, около строк 150–280; существующие TYPE_* и TYPE_COUNT. Wire protocol type пока отсутствует; TYPE_WIRE_CRYPT решает другую задачу.
+- [PluginManager.cpp](../src/yvalve/PluginManager.cpp): `PluginLoadInfo`, около строки 775, разрешает logical name через plugins.conf `Module`/`RegisterName`; `loadModule` около строки 958 исправляет platform extension и вызывает entry point; `releasePlugin` и `waitForType` определяют lifetime.
+- [GetPlugins.h](../src/common/classes/GetPlugins.h): existing typed access to plugin sets.
+- [Makefile.in](../builds/posix/Makefile.in): `FirebirdInterface.idl`/`IdlFbInterfaces.h`, CLOOP build/generation.
 
-| Проверенный symbol | Что подтверждено | Необходимая работа / ограничение |
-|---|---|---|
-| `EDS::validatePassword`, `CBlock`, `SBlock`, `DummyCryptKey` | Существующий обмен auth client/server plugins в памяти; configured plugin lists, ограниченный цикл challenge/response, запись `isc_dpb_auth_block` | Выделить общий credential-validation core; готовая EDS функция требует уже существующий `tdbb` attachment/auth block и не вызывается напрямую из PG pre-attach |
-| `registerSrpClient`, `registerSrpServer` | Регистрация семейств SRP plugins; client registration вызывается из `registerRedirector`, server registration — из server startup | Для общего внутреннего auth обмена обеспечить штатную регистрацию обеих сторон без вызова client connection path |
-| `ServerAuth::authenticate`, `SrvAuthBlock::createPluginsItr` | Native auth учитывает серверный/per-database config, plugin selection и native continuation messages | Не объявлять EDS extraction полной заменой всех native auth policies; поддерживаемый профиль v0 должен быть определён и проверен отдельно |
-| `DatabaseAuth::accept` | Записывает проверенный auth block; удаляет user/password, trusted/internal attach tags и клиентский `isc_dpb_config`; вызывает dispatcher | Выделить или повторить узкий серверный attach helper без native response serialization; PG Startup не должен задавать привилегированные DPB fields |
-| `addClumplets` | Подставляет настоящий remote address первым, исключает дубликаты и задаёт native remote protocol `P<n>` | Для PG сохранить достоверную remote metadata, но передавать правильное имя протокола; не выдавать PG за native `P<n>` |
-| `JProvider::internalAttach`, `getUserInfo` | Local engine отвергает remote-shaped DB name; `RemoteAccess` проверяется по remote address; username в DPB имеет приоритет над auth block | После проверки credentials убрать username/password из attach DPB, сохранить verified auth block и действительную remote address metadata |
-| `Dispatcher::attachOrCreateDatabase` — F3 | Dispatcher перебирает configured providers и применяет DPB config | PG attach route должен быть server-controlled и ограничен локальным engine provider; запрещён fallback в `Remote`/`Loopback` |
-| `CURRENT_ENGINE`, `EMBEDDED_PROVIDERS` в `jrd/constants.h` | В этом upstream: `CURRENT_ENGINE="Engine14"`, `EMBEDDED_PROVIDERS="Providers=" CURRENT_ENGINE` | Проверить эти definitions в целевой ветке; название macro не отменяет необходимость auth block и remote access checks |
-| `ParsedList::getNonLoopbackProviders` | Удаляет только `Loopback`, оставляя `Remote`; вызывается также при открытии security DB в `SrpServer.cpp` | Этот helper сам по себе не гарантирует отсутствие повторного сетевого подключения |
+`WireProtocolPlugins`/`WireProtocolPorts` и wire interfaces — проектируемые расширения, а не готовые upstream возможности. Добавляются новый plugin type, versioned interfaces, config validation и host lifecycle. Логические имена сохраняют штатное сопоставление с `.so`/`.dll`; не требуется второй самостоятельный loader. Детали контракта определены в ARCHITECTURE.
 
-Наличие внутреннего plugin exchange подтверждено чтением кода. Извлечение общего helper, его доступность до attach, поддержка выбранного security database/auth profile, корректность ошибок и отсутствие регрессии EDS ещё требуют реализации и проверок. PostgreSQL TLS и Firebird native WireCrypt — разные механизмы; native crypto state не защищает автоматически новый PG socket.
+### F11 — ключи шифрования базы
 
-### F9 — lifecycle, конфигурация, ownership и сборка штатного сервера
+- [server.cpp](../src/remote/server/server.cpp): `DatabaseAuth::accept` передаёт native crypt callback, около строки 2604.
+- [CryptoManager.cpp](../src/jrd/CryptoManager.cpp): `loadPlugin`, около строки 456; key holder callback около строки 489 и holder-less `setKey` около строки 520.
 
-- [remote/server/os/posix/inet_server.cpp](https://github.com/FirebirdSQL/firebird/blob/bf94598f8deefeb7cc4a8217ee43b3040d5d6650/src/remote/server/os/posix/inet_server.cpp)
-- [remote/server/server.cpp](https://github.com/FirebirdSQL/firebird/blob/bf94598f8deefeb7cc4a8217ee43b3040d5d6650/src/remote/server/server.cpp)
-- [yvalve/why.cpp](https://github.com/FirebirdSQL/firebird/blob/bf94598f8deefeb7cc4a8217ee43b3040d5d6650/src/yvalve/why.cpp)
-- [common/config/config.h](https://github.com/FirebirdSQL/firebird/blob/bf94598f8deefeb7cc4a8217ee43b3040d5d6650/src/common/config/config.h)
-- [common/config/config.cpp](https://github.com/FirebirdSQL/firebird/blob/bf94598f8deefeb7cc4a8217ee43b3040d5d6650/src/common/config/config.cpp)
-- [common/classes/RefCounted.h](https://github.com/FirebirdSQL/firebird/blob/bf94598f8deefeb7cc4a8217ee43b3040d5d6650/src/common/classes/RefCounted.h)
-- [common/classes/ImplementHelper.h](https://github.com/FirebirdSQL/firebird/blob/bf94598f8deefeb7cc4a8217ee43b3040d5d6650/src/common/classes/ImplementHelper.h)
-- [builds/posix/make.shared.variables](https://github.com/FirebirdSQL/firebird/blob/bf94598f8deefeb7cc4a8217ee43b3040d5d6650/builds/posix/make.shared.variables)
-- [builds/posix/make.defaults](https://github.com/FirebirdSQL/firebird/blob/bf94598f8deefeb7cc4a8217ee43b3040d5d6650/builds/posix/make.defaults)
-- [builds/posix/Makefile.in](https://github.com/FirebirdSQL/firebird/blob/bf94598f8deefeb7cc4a8217ee43b3040d5d6650/builds/posix/Makefile.in)
-- [src/CMakeLists.txt](https://github.com/FirebirdSQL/firebird/blob/bf94598f8deefeb7cc4a8217ee43b3040d5d6650/src/CMakeLists.txt)
+Обычный PG-клиент не предоставляет native client key callback. Initial profile исключает необходимость ключа от клиента; серверные источники ключей могут работать и требуют отдельной проверки. Это ограничение не тождественно запрету зашифрованных баз.
 
-| Проверенная область | Что подтверждено | Следствие для плана |
-|---|---|---|
-| POSIX `main`, `registerAuthPlugins`, `SRVR_multi_thread` | Auth registration и Super initialization предшествуют блокирующему native loop; Classic содержит отдельный fork/accept lifecycle | Запуск PG service внутри этого `main`; v0 ограничить Linux `ServerMode=Super`, иные режимы не считать проверенными |
-| `Dispatcher::shutdown` | `fb_shut_preproviders` → shutdown providers/interfaces → `fb_shut_postproviders` → finish/exit | Остановить PG accept, разбудить socket waits и корректно завершить workers; нельзя бессрочно join активный SQL до provider shutdown |
-| Native `pre_shutdown`, `shut_server`, `Worker::shutdown`, `rem_port::disconnect` | Собственные флаги остановки и освобождение cursor/statement/transaction/attachment | Новые PG workers участвуют в shutdown того же процесса; active query и idle socket должны иметь отдельные проверки остановки |
-| `RefPtr(T*)`, `RefPtr(REF_NO_INCR, T*)`, `clear`, `done` в Y-valve | Обычный `RefPtr` добавляет ссылку; вариант `REF_NO_INCR` принимает существующую; successful close/free/commit/rollback/detach потребляет интерфейсную ссылку | Выбрать явную модель владения. Native `Serv*` после consuming close освобождает дополнительную ссылку; adopt wrapper должен разоружаться. Не смешивать эти схемы |
-| `DispatcherPtr` | Штатный internal helper получает dispatcher и управляет его ссылкой | Это образец серверного доступа к engine interfaces; отсутствие сети обеспечивается выбранным local provider route |
-| `ConfigKey`, `entries`, config getters | В `config.h` перечислена процедура добавления конфигурации; global и per-database getters различаются | Новые PG keys и documented defaults — изменения продукта, их ещё нет upstream |
-| `Remote_Common`, `Remote_Server`, `Remote_Client` | `Remote_Common` входит и в server, и в client; `Remote_Server_Objects` образуют server object set | Добавлять PG server sources только в штатный server target; не собирать внешний gateway и не включать listener случайно в client library |
-| `FB_DAEMON`, `FIREBIRD_LIBRARY_LINK` | Штатный `firebird` уже линкуется с `-lfbclient` как частью существующего runtime | Требование — отсутствие client connection/bridge, а не обещание удалить существующую runtime dependency из Firebird |
-| Make targets `tests`, `run_tests` и CI — F6 | Существуют common/engine/isql test executables и Linux autotools/make workflow | Добавить PG codec/session/endpoint tests и native regression checks; готовый PG test target не существует |
-| Просмотренный `src/CMakeLists.txt` | Native server target не обнаружен | Не утверждать готовую CMake сборку встроенного PG frontend; выбрать подтверждённый Linux build path |
+### F12 — внешняя отмена, shutdown и таймауты
 
-Ни успешная сборка, ни запуск изменённого native server, ни отсутствие сетевого backend соединения в runtime в рамках исследования не проверялись. Это обязательные результаты этапа реализации, включая native PostgreSQL driver → PG port → local engine в одном процессе сервера.
+- [VirtualTable.cpp](../src/jrd/VirtualTable.cpp): DELETE MON$ATTACHMENTS → LCK_attachment, DELETE MON$STATEMENTS → LCK_cancel, около строки 62.
+- [Attachment.cpp](../src/jrd/Attachment.cpp): `blockingAstShutdown`/`blockingAstCancel`, около строк 671/695; idle timer и `isc_att_shut_idle`, около строки 798.
+- [jrd.cpp](../src/jrd/jrd.cpp): `JAttachment::cancelOperation`, около строки 2457, async/nonblocking lock; shutdown reasons около строки 6829; `thread_db::getCancelState` с secondary timeout reason около строки 9330.
+- [DsqlRequests.cpp](../src/dsql/DsqlRequests.cpp): `setupTimer`, около строки 179; config/attachment/request statement timeout.
+- [jrd messages](../src/include/firebird/impl/msg/jrd.h): `isc_cancelled`, `isc_att_shutdown`, `isc_att_shut_killed/idle/db_down/engine`, `isc_cfg/att/req_stmt_timeout`.
+
+Тесты включают native admin operations и idle sockets. PG mapping учитывает конкретную причину: admin shutdown 57P01, cancellation/statement timeout 57014, idle-session timeout 57P05 — S9. Обнаружение остановки attachment, доставка FATAL и закрытие idle socket требуют явного механизма; ошибка на следующем engine API call сама по себе не гарантирует немедленного уведомления.
 
 ## Дополнительные источники для M2 и M3
 

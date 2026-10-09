@@ -1,84 +1,77 @@
-# Обоснование PostgreSQL frontend для Firebird 6
+# Обоснование wire-плагинов для Firebird 6
 
-Целевая архитектура — два сетевых frontend в одном процессе `firebird`, с общим движком и базами Firebird. Выбранная база `master` совпадает с SHA исходного исследования: `bf94598f8deefeb7cc4a8217ee43b3040d5d6650`, Firebird `6.0.0.2199 Initial`. Ветка разработки — `pg_wire_protocol`; подробности — [BASELINE.md](BASELINE.md).
+Исследование относится к `master` Firebird 6; исходный SHA и рабочая ветка зафиксированы в [BASELINE.md](BASELINE.md). Это статическое обоснование, не отчёт о работающем endpoint. Актуальный контракт задаёт [ARCHITECTURE.md](ARCHITECTURE.md), этапы — [PLAN.md](PLAN.md), проверки — [TEST_PLAN.md](TEST_PLAN.md). Обозначения S/F относятся к [SOURCES.md](SOURCES.md).
 
-Ниже собраны решения, влияющие на реализацию, и вопросы, которые нужно закрыть сборкой/экспериментом. Это архитектурное исследование, не результат работы нового endpoint. Контракт задают CODEX_CONTEXT и COMPATIBILITY; последовательность — PLAN. Обозначения S/F относятся к [SOURCES.md](SOURCES.md).
+## Изоляция протоколов и plugin infrastructure
 
-## Почему нужен самостоятельный frontend
+Native Firebird protocol использует `P_OP/PACKET/XDR`; `rem_port`, очереди и `SRVR_multi_thread` связаны с этими сообщениями. PostgreSQL startup/tagged messages требуют собственного codec. Изменение номера native protocol либо повторный запуск native dispatcher не создаёт независимый PostgreSQL frontend [F7].
 
-Native Firebird protocol основан на P_OP/PACKET/XDR. PostgreSQL startup и обычные tagged messages имеют иное кадрирование. Добавление native PROTOCOL_VERSION не меняет codec. `rem_port`, queues, `asyncReceive`, send/receive, crypt/compression и keepalive связаны с native packets [F7].
+Выбран общий серверный host дополнительных wire-плагинов. Он работает внутри штатного процесса `firebird`; PG codec/session logic поставляется отдельной shared library. Родной listener работает независимо от наличия дополнительных модулей. `WireProtocolPlugins` и `WireProtocolPorts` задают позиционное соответствие логических имён плагинов и портов; точные правила проверки, отказов и lifecycle описывает ARCHITECTURE.
 
-Отдельный listener внутри процесса позволяет определить codec до чтения сообщения и сохранить native путь. Для первого Linux/SuperServer варианта предлагаются свои socket readiness, session registry и bounded workers. Повторный запуск SRVR_multi_thread поверх глобальной INET/queue infrastructure требует рефакторинга и не является готовым способом добавить второй протокол.
+Firebird уже имеет PluginManager, загрузку `.so`/`.dll`, factories, владение модулем и cleanup. Для wire-протоколов требуется новый тип и версионированные CLOOP interfaces; существующий `IWireCryptPlugin` предназначен для шифрования native bytes и не заменяет их. Логическое имя разрешается в модуль через штатную plugin configuration [F10].
 
-Новые server sources размещаются в `src/remote/server/pgwire` и входят в Remote_Server/FB_DAEMON. Remote_Common используется также клиентом, поэтому listener туда не переносится. Текущая линковка штатного сервера с libfbclient допустима: нативность определяется выбранным provider/call path, а не именем библиотеки [F3, F6, F9].
+Сборочные списки не рекурсивны: `dirObjects(remote/server)` не подхватит произвольный новый подкаталог. Host objects включаются в server target явно; PG implementation получает отдельный plugin target и install rule. Линковка штатного `firebird` с `libfbclient` уже существует; отсутствие backend network hop доказывается provider route и runtime-наблюдением, а не именем runtime-библиотеки [F6, F9].
 
-## Вызовы движка
+## SQL принадлежит парсеру и движку
 
-Native server уже использует IAttachment/ITransaction/IStatement/IResultSet. Новый frontend может работать на том же уровне interfaces без native packet handles и вторичного соединения. Prepare получает совместимый Firebird SQL и dialect 3; metadata/flags определяют execute либо openCursor/fetch [F1–F4].
+SQL передаётся в Firebird неизменным, с явной длиной. Wire-код проверяет framing, NUL, encoding и лимиты; он не разбирает SQL, не ищет первое ключевое слово, не делит batch по `;` и не заменяет `$n`. Предложение внешнего review классифицировать по первому слову отклонено в соответствии с требованием пользователя.
 
-Состояние session отделяется от transport, а код выполнения и codecs разделяются между Simple и Extended Query. Это позволяет начать с PQexec и добавить Bind/portals без второй независимой модели транзакций.
+`JAttachment::prepare` передаёт запрос в DSQL. Текущее начальное правило grammar принимает один statement с необязательной завершающей `;`; несовместимый SQL получает ошибку этого parser. SQL whitelist только для CREATE/DROP TABLE не нужен. Ограничения wire codecs и API-возможностей должны быть явными, но не превращаться во второй SQL dialect [F4].
 
-Полный Simple Query statement проверяется native parser до исполнения. Нельзя делить текст через split(';'). Для BEGIN/COMMIT/ROLLBACK и классификации поддержанных форм нужен ограниченный lexical recognizer с учётом строк/комментариев. SQL batches пока отклоняются; их будущая поддержка потребует отдельной работы с границами команд и implicit transaction, а не исполнения первого распознанного фрагмента [F4, S1].
+Публичные statement kind/flags недостаточны для точного command tag: RETURNING может описываться как SELECT/EXEC_PROCEDURE, MERGE и UPDATE OR INSERT как INSERT, session management как DDL. COMMIT и COMMIT RETAINING также сводятся к одному публичному kind. Требуется нейтральная metadata от parser/engine о семантике команды и её влиянии на transaction/session; она расширяет engine API, а не создаёт PG-specific SQL parser [F4, F5].
 
-## Аутентификация и engine-only route
+`BEGIN` и `$n` нельзя незаметно поддержать в wire layer: их будущая поддержка относится к grammar/parameter metadata. Пока соответствующего синтаксиса нет, запросы завершаются штатной ошибкой Firebird. Тесты используют native SQL, включая поддерживаемое управление транзакциями. Autocommit позволяет начать проверку libpq без автоматически добавляемого драйвером `BEGIN`.
 
-`ValidatePassword.cpp` содержит обмен Firebird auth client/server plugins в памяти. EDS wrapper требует уже существующий attachment/auth block, поэтому pre-attach вызов новой PG session требует выделения общей части, сохраняющей guards EDS [F8].
+## Общий authentication service и engine route
 
-Начальный профиль — Srp256, разрешённый действующей per-database policy, и локальная security database. Наличие core в исходниках ещё не подтверждает его корректную работу из PG startup: нужно проверить регистрацию обеих plugin factories, config resolution, результаты plugin loop и cleanup.
+`EDS::validatePassword` демонстрирует ограниченный обмен auth client/server plugins в памяти, но требует текущий `thread_db` attachment и существующий auth block. Он компилируется в Engine14, поэтому не является готовым pre-attach вызовом для host [F8].
 
-После authentication применяются правила DatabaseAuth::accept: проверенный auth block, удаление raw/trusted/client-controlled DPB fields и настоящий remote address. Последний влияет на RemoteAccess; внутренний вызов не должен превращать сетевого клиента в локальную identity. Выбирается только CURRENT_ENGINE/EMBEDDED_PROVIDERS. getNonLoopbackProviders удаляет Loopback, но сохраняет Remote [F8].
+Общая проверка credentials обслуживает wire-плагины через host service с явными входами и доверенной конфигурацией базы. Копирование этой проверки в каждый протокольный модуль не решает границу ответственности. Существующий EDS path может оставаться неизменным; если общая часть извлекается из него, сохраняются preconditions и добавляется целевая регрессия EDS. Проверяются обе регистрации Srp256, per-database plugin policy, ограниченный auth loop, неизвестные статусы и cleanup [F8].
 
-M1 использует PostgreSQL password exchange на loopback. M3 переносит тот же обмен внутрь TLS для удалённых подключений. PostgreSQL SCRAM и Firebird SRP — разные протокольные механизмы; поддержка Srp256 не означает, что клиент с требованием PG SCRAM сможет подключиться. Такой профиль потребует отдельного решения [S1, S17, F8].
+Host создаёт attachment после проверки credentials: записывает проверенный auth block, удаляет raw/trusted/internal/client-config DPB fields, задаёт достоверный peer address и имя протокола. Это необходимо для identity, privileges и `RemoteAccess`. Native server использует dispatcher с configured providers; требование local-engine-only для новых wire-плагинов строже его обычного provider selection. После sanitization host выбирает `EMBEDDED_PROVIDERS` (`Engine14`); переопределяется выбор provider, а не остальные per-database policies. `getNonLoopbackProviders` недостаточен: он оставляет `Remote`, в том числе для security database. Начальный профиль требует локальную security DB и проверки отсутствия сетевого auth hop [F3, F8].
 
-## Почему одного psycopg2 недостаточно
+Native attach передаёт `setDbCryptCallback`; PostgreSQL-клиент не реализует этот Firebird обмен ключами. Базы, требующие получения ключа от клиента, не входят в исходный PG profile. Это не запрет всех encrypted databases: ключ может быть доступен серверному crypt/key-holder plugin. Такой сценарий требует отдельного fixture [F11].
 
-Закреплённый psycopg2 2.9.11 в обычном synchronous execute вызывает PQexec; параметры адаптируются в SQL на клиенте. Это делает его подходящим первым клиентом Simple Query [S6].
+## Драйверы и границы доказательств
 
-В приложенном driver_probe.json зафиксированы startup 3.0, Query, BEGIN/COMMIT/ROLLBACK, ParameterStatus и работа без BackendKeyData для этого клиента. Сервер опыта был синтетическим; Firebird не участвовал. Скрипта стенда среди приложенных файлов нет. JSON подтверждает только записанное наблюдение, а не интеграцию.
+Обычный синхронный execute закреплённого psycopg2 2.9.11 использует `PQexec`; параметры адаптируются клиентом в SQL. Этот клиент также отправляет собственные transaction commands. Его успешное подключение не доказывает совместимость всех libpq API [S5, S6].
 
-Libpq включает PQexecParams, PQprepare/PQexecPrepared и asynchronous counterparts, использующие Extended Query. Поэтому M2 является самостоятельным обязательным этапом, а прямой C libpq harness добавляется уже в M0/M1. Обычный Psycopg 3 Cursor используется в M2 как второй клиент; перевод в ClientCursor не проверяет тот же контракт [S4, S7, S16].
+`driver_probe.json` описывает синтетический PostgreSQL endpoint без Firebird. Скрипт стенда отсутствует в исходном пакете; JSON остаётся историческим наблюдением о драйвере. Перенесённый Python suite требует миграции: ожидания `BEGIN`, SQL allowlist и прежних этапных отказов не являются универсальным контрактом реализации. Количество tests не равно количеству доказанных возможностей.
 
-Параметры `$n` требуют token-aware mapping к native slots и корректного input metadata. Это отдельный integration contract. PostgreSQL casts, добавленные адаптером, остаются SQL-несовместимостью: появление DATE codec не включает поддержку `::date` [S6].
+`PQexecParams`, `PQprepare/PQexecPrepared` требуют Extended Query. Проверка Parse/Bind/Describe/Execute/Close/Flush/Sync отделяется от SQL syntax compatibility: сначала проверяется поддерживаемый SQL и native `?` parameters прямым libpq harness, затем отдельно — PostgreSQL `$n` после изменения parser. Клиентские `::date`, catalog queries и служебные SET также остаются зависимостями grammar/functions/catalog, даже при готовом wire codec [S4, S7, S16].
 
-## Сложности Extended Query
+Профиль приложения и trace startup/SQL следует выбрать рано. Если драйвер или ORM автоматически посылает несовместимый SQL, это фиксируется как зависимость расширения parser/functions; wire plugin не эмулирует успешное исполнение таких команд.
 
-Statement и portal различаются по lifetime: подготовленный запрос может использоваться после commit, а portal содержит привязанные значения и cursor в transaction context. Разработка должна определить, как Firebird prepare получает transaction и как native handles переживают границы PG cycle.
+## Extended Query, результаты и ошибки
 
-Главная граница implicit transaction — Sync, а не отдельный Execute. Flush позволяет клиенту получить ответы до Sync. Ошибка требует discard-until-Sync; следующая уже поступившая команда не должна исполняться случайно. RowDescription/ReadyForQuery нельзя рассылать по схеме Simple Query после каждого сообщения [S1, S16].
+Prepared statement и portal имеют разный lifetime; portal связывает параметры и cursor с transaction context. Sync задаёт границу implicit transaction, Flush позволяет получить сообщения до Sync, а ошибка требует discard-until-Sync. RowDescription/ReadyForQuery нельзя копировать из Simple Query после каждого Execute [S1, S16].
 
-Параметры с OID=0, повторное использование `$n`, разные native contexts и binary format потребуют самостоятельных fixtures. Их нельзя проверить только запросом с одним INTEGER параметром. Поддержка Extended Query сама по себе не доказывает libpq pipeline API.
+OID выбирает decoder клиента. Кодек использует реальные type/subtype/scale, message offsets, NULL indicator и metadata lifetime. Расширение результата агрегата учитывается после prepare; binary wire layout не совпадает с native buffers. Неподдержанный тип даёт явную ошибку до выполнения, когда metadata уже доступна [F1, F5, S13, S14].
 
-## Типы и результаты
+CHAR UTF8 требует различать объявленные символы и максимальные байты буфера. При чтении как SQL_TEXT padding может занимать весь буфер N×4. Ни выдача всех этих пробелов, ни безусловный rtrim не сохраняют значение CHAR(N). Firebird уже преобразует внутренний CHAR в varying, оставляя внешнее описание CHAR; предпочтительный путь — запросить fetch metadata через `IMetadataBuilder` как SQL_VARYING, сохранив исходный тип для PG OID. Проверки включают ASCII, многобайтные символы, пустую строку, значимые конечные пробелы и `'xy  '` для CHAR(4) [F5].
 
-OID выбирает клиентский decoder; выдача всех значений как text OID скрывает отсутствие типизированной совместимости. Native type/subtype/scale, NULL offsets, CHAR padding и exact decimal formatting нужны уже в M1 [F1, F5, S14].
+DSQL status vector часто начинается с `isc_dsql_error`/`isc_sqlerr`; конкретная причина и дополнительный timeout/shutdown code расположены дальше. Mapping должен безопасно обходить весь tagged vector и выбирать наиболее конкретную причину. `fb_sqlstate` полезен как пример обхода, но Firebird `42S02`/`HY008` не равны PostgreSQL `42P01`/`57014`. Текст ошибок не является ключом классификации [F5, S8, S9].
 
-Узкий scalar subset M1 — ограничение первого этапа. M2 включает floating point, temporal без TZ, INT128/numeric до 38 цифр и RETURNING. Metadata результата может быть шире исходной колонки, например у агрегата; выбор codec делается после prepare. Binary protocol требует собственных преобразований вместо копирования native buffers [S2, S4, S13].
+## Lifecycle, server modes и TLS
 
-RETURNING уже поддерживается движком, но требует корректной классификации command tag и affected rows при наличии cursor. Его реализация не требует общего PostgreSQL parser. Аналогично DATE output codec — самостоятельная задача frontend.
+Сессия владеет socket, auth state, attachment, transaction, statements, portals и cursors. Module lifetime охватывает все callbacks, interfaces и workers; библиотека выгружается после их завершения. Cleanup не затирает первичную ошибку и учитывает consuming операции API [F1, F9, F10].
 
-## Транзакции и служебные команды
+Shutdown выполняется по фазам preproviders → providers/interfaces → postproviders. Host прекращает accept, будит socket waits и согласованно отменяет engine operations через `IAttachment::cancelOperation`. Бесконечный join перед остановкой providers недопустим. В приёмку входят server shutdown, `MON$ATTACHMENTS`, `MON$STATEMENTS`, database shutdown, `ConnectionIdleTimeout` и `StatementTimeout`. Для idle socket отдельно определяется обнаружение завершённого attachment и доставка FATAL/закрытие; наличие engine error на следующем API call не доказывает мгновенное уведомление [F9, F12].
 
-Обычный psycopg2 сам посылает BEGIN, включая connection context при autocommit=True. Поэтому M1 включает I/T/E и настоящий commit/rollback, без retaining вместо autocommit. При E дальнейший SQL отвергается до завершения блока [S5, S6, S10].
+Admin/database shutdown отображается в FATAL `57P01`, query cancellation/statement timeout — в `57014`, idle-session timeout — в FATAL `57P05`, когда причина известна. Дополнительная диагностика берётся из полного status vector [F12, S9].
 
-Модель M1 без savepoints допускает rollback native transaction с сохранением logical E. Для SAVEPOINT потребуется возможность rollback-to после ошибки, а значит изменение обработки ошибок. Поведение locks/isolation нужно тестировать отдельно; одно совпадение ReadyForQuery state этого не доказывает.
+Super и SuperClassic используют общий многоклиентский listener path, поэтому безусловный архитектурный запрет SuperClassic не обоснован. Но database sharing и cleanup в движке различаются. Поддержка каждого режима требует собственных lifecycle/coexistence checks; Classic имеет отдельный process/fork lifecycle [F9].
 
-Connection settings и служебные команды драйвера/пула могут появляться до прикладного SQL. Перед M3 нужен trace целевого приложения. Поддержанные read-only/isolation/encoding/timeout/reset команды должны менять реальное состояние; успешные заглушки SET/SHOW создают скрытую несовместимость. PostgreSQL catalog emulation остаётся за пределами текущей задачи.
+В проверенной server build нет готовой TLS-библиотеки. `TLS_OPTIONS` в configure относится к thread-local storage; libtomcrypt/native WireCrypt не обеспечивает PostgreSQL TLS. Выбор TLS dependency, сборочных flags и упаковки фиксируется в P0, даже если SSLRequest upgrade реализуется позже. PostgreSQL password exchange вне loopback требует защищённого TLS канала; Firebird Srp256 не является PostgreSQL SCRAM [F6, S17].
 
-## Lifecycle и доказательство выполнения внутри Firebird
+## Оставшиеся проверки
 
-Сессия владеет socket, auth state, attachment, transaction, statements, portals и cursors. Ownership должен учитывать consuming API operations и refcount wrappers. Cleanup использует отдельный status и не затирает первичную ошибку [F1, F9].
+- Штатная сборка master и отдельный shared plugin target; загрузка, отключение, ошибка модуля и доступность native listener.
+- CLOOP ABI, порядок загрузки/освобождения modules и позиционная config validation.
+- Общий pre-attach auth service, per-database policy, engine-only route и crypto profile.
+- Достаточная engine metadata без SQL-разбора в wire layer; корректная модель transaction/session effects.
+- CHAR/numeric/binary conversions, полный status mapping, portal lifetime и recovery до/после Sync.
+- Super/SuperClassic shutdown, внешняя отмена, idle detection и TLS transport.
+- Миграция fixtures и trace конкретного приложения с разделением wire failures и SQL dependencies.
 
-Shutdown проходит preproviders → остановку providers/interfaces → postproviders. PG service прекращает accept, будит readers, останавливает новые operations и согласованно завершает workers. Бесконечный join в preproviders может препятствовать самой остановке движка. Этот риск проверяется с P1, а не после всех codecs [F9].
-
-Совпадение MON$SERVER_PID и успешный SELECT недостаточны для доказательства нативности. Нужны владелец listener, review provider route, наблюдение исходящих connect() из сервера и cross-visibility через независимый native клиент. Security DB attachments в памяти допустимы; backend network hop в execution path — нет.
-
-## Что ещё предстоит установить
-
-- Работоспособность штатной сборки выбранного master и наличие нужных dependencies.
-- Размещение общего auth core и сохранение EDS/native поведения после его выделения.
-- Runtime provider route, remote policy и порядок остановки PG workers.
-- Точные native/PG type conversions, prepared-object lifetime и errors до/после Sync.
-- Выбранный TLS механизм в build, cancellation ownership и remote fixture.
-- Приложение, его driver/libpq versions и обязательные session operations для M3.
-
-Эти вопросы имеют отдельные этапы и критерии в PLAN/TEST_PLAN. Календарную оценку следует уточнить после P0/P2; исследование не подменяет executable integration evidence.
+Совпадение `MON$SERVER_PID` и успешный SELECT не заменяют доказательство пути: проверяются владелец listener, выбранный provider, исходящие connect() сервера и видимость изменений независимым native клиентом. Все перечисленные свойства требуют исполняемых проверок; чтение исходников их не подтверждает.

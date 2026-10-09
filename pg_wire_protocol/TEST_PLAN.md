@@ -1,312 +1,223 @@
-# План проверки PostgreSQL frontend в Firebird 6
+# План приёмки wire plugins и PostgreSQL endpoint
 
-База — master Firebird 6, рабочая ветка pg_wire_protocol, исходный SHA из BASELINE.md. Разделы 1–8 описывают приёмку M1 (прежнего v0); общие architecture/auth/lifecycle проверки сохраняются после M1. Разделы 10–13 добавляют проверки M2/M3 и правила изменения временных отрицательных tests.
+База — `master` Firebird 6, SHA из [BASELINE.md](BASELINE.md). Архитектура и SQL boundary определены в [ARCHITECTURE.md](ARCHITECTURE.md), transaction contract — в [CODEX_CONTEXT.md](CODEX_CONTEXT.md), заявляемые возможности — в [COMPATIBILITY.md](COMPATIBILITY.md).
 
-| Этап | Обязательная приёмка |
+Сейчас есть исходный Python scaffold: 20 тестовых функций / 56 параметризованных случаев. Он требует миграции под новые требования. C/C++/raw-wire/plugin/lifecycle suites предстоит реализовать; перечисление проверки в этом документе не означает, что она выполнена. Driver-only probe на синтетическом сервере и pytest collection не являются приёмкой Firebird.
+
+## Этапы и обязательный минимум M0
+
+| Этап | Принимаемый результат |
 |---|---|
-| M0 | Встроенный listener, реальная auth, вычисляемый SELECT/error/recovery/disconnect; psycopg2 и C libpq PQexec; native coexistence |
-| M1 | A/S/W/I/N/L ниже, подготовленные 56 Python cases и отдельные C libpq PQexec/metadata/transaction/error cases |
-| M2 | Применимая регрессия M1, E и D ниже, C libpq parameterized/prepared/async API, обычный Psycopg 3 Cursor |
-| M3 | Применимая регрессия M2, R/C/U ниже, TLS/cancel, отдельный сетевой узел и сценарии выбранного приложения |
+| M0 | Динамический PgWire внутри `firebird`, реальная authentication, вычисляемый SELECT, ошибка/recovery, native coexistence и завершение ресурсов |
+| M1 | Simple Query с совместимым SQL, metadata-driven execution, базовые codecs, native transaction controls, server/auth/lifecycle приёмка |
+| M2 | Extended Query transport, prepared statements/portals и Bind с совместимыми native placeholders; расширенные codecs |
+| M3 | TLS/удалённый TCP/cancellation и подтверждённый профиль конкретного приложения с явно указанными SQL dependencies |
 
-Текущий статус: перенесён исходный Python scaffold; новых C++/C/Extended/TLS tests пока нет. Статически подтверждены 20 Python-функций и 56 случаев. Сборка и исполнение против Firebird не выполнены. Сообщение исходного пакета о collect-only относится к подготовке того пакета, а не к новой интеграционной проверке.
+Поддержка обычных параметризованных PostgreSQL-клиентов с `$n` зависит от будущего расширения parser. Ни M2 transport, ни специальный совместимый SQL fixture не доказывают прозрачную работу такого приложения.
 
-## 1. Что считается результатом
+Малый обязательный набор M0 выполняется раньше полной матрицы:
 
-Для приёмки endpoint должен работать внутри существующего бинарника `firebird`: Linux, `ServerMode = Super`, один серверный PID, собственные `PgListener`, codec, session dispatcher и ограниченная группа workers. Attachment открывается через внутренний server/engine path в памяти. Внешний gateway, второй серверный процесс, backend TCP, выбор `Remote`/`Loopback` provider и подключение через `fbclient` к собственному native listener не входят в принятую архитектуру.
+| ID | Проверка и критерий |
+|---|---|
+| M0-01 | Native baseline собирается и принимает TCP connect/SELECT/disconnect при пустом `WireProtocolPlugins`; дополнительных sockets нет |
+| M0-02 | PgWire загружен как `.so`; generic host и оба listeners принадлежат одному `firebird`; review и наблюдение `connect()` исключают backend hop |
+| M0-03 | Правильные credentials открывают разрешённую БД с проверенным `CURRENT_USER`; неправильный пароль отклонён, следующий правильный connect работает |
+| M0-04 | C libpq `PQexec` и psycopg2 с явно заданным `autocommit=True`, без `with conn`, получают 42 и OID 23 для вычисляемого SELECT |
+| M0-05 | Ошибочный SQL получает engine-derived error; следующий SELECT на том же connection работает; `BEGIN` не получает фиктивного успеха |
+| M0-06 | Отсутствующий PgWire/занятый дополнительный порт дают диагностику, native connect продолжает работать |
+| M0-07 | EOF, незавершённый startup и остановка сервера освобождают sessions/workers; код библиотеки не выгружается до завершения её вызовов |
 
-В M1 PostgreSQL wire 3.0 и Simple Query доставляют совместимый Firebird dialect 3 SQL без перевода. Проверяются типы, CRUD, транзакции, identity и доступ к той же базе обычным Firebird клиентом. Extended Query добавляется в M2; PostgreSQL SQL-парсер остаётся вне задачи.
+Пример M0 SQL: `SELECT CAST(6 * 7 AS INTEGER) AS "answer" FROM RDB$DATABASE`. Второе выражение с другим результатом либо запрос к тестовой таблице исключает hardcoded answer.
 
-Нужны четыре независимых вида свидетельств:
+## Fixtures и свидетельства
 
-1. C++ codec/session tests без базы: формат сообщений, TCP stream, состояния и границы ресурсов.
-2. Реальные psycopg2 и прямой C libpq → native pgwire frontend → Firebird engine: функциональный контракт клиента; с M2 также обычный Psycopg 3 Cursor.
-3. Обычный Firebird клиент: видимость изменений, privileges, сохранность native входа.
-4. Архитектурные и lifecycle проверки: один серверный процесс, отсутствие backend hop, корректные authentication и shutdown.
+- Disposable БД dialect 3/UTF8, alias `pgwire_test`, локальная security database и проверенный Srp256 profile. Начальный режим — Linux/Super, PgWire `127.0.0.1:15432`.
+- Native observer — отдельный настоящий TCP-клиент к той же БД, например `inet://127.0.0.1:3050/pgwire_test`. Его исходящие sockets отделяются от sockets сервера.
+- Пользователь `PGWIRE_TEST` создаёт собственные объекты; `PGWIRE_LIMITED` не имеет доступа к ним. Отдельный административный fixture нужен для monitoring shutdown/timeout cases.
+- Alias allowlist, `RemoteAccess=false`, неподходящий auth profile и missing plugins проверяются отдельными server configs. Тесты не меняют рабочий сервер пользователя.
+- Для cross-visibility observer начинает новую транзакцию; DDL fixtures коммитятся до дальнейшего DML. Cleanup удаляет только объекты текущего теста.
+- Лимиты connections/workers/frames/queues/buffers, startup/write/statement/lock deadlines и общий shutdown deadline записываются в отчёте.
+- Credentials передаются через отдельное окружение; DSN, command output, status vectors и трассы не должны раскрывать пароль.
 
-Driver-only probe в `evidence` содержит синтетические результаты и не подтверждает выполнение SQL в Firebird. Четыре уровня приёмки обязательны независимо от успешной collection.
+Для каждого этапа нужны разные уровни evidence: unit tests codec/state/metadata; прямой libpq и Python client; native observer; process/build/provider/lifecycle checks. Совпадение `MON$SERVER_PID` само по себе не исключает gateway.
 
-## 2. Fixture и границы окружения
+## A. Plugin host, конфигурация и сборка
 
-- Отдельная disposable Firebird database: dialect 3, UTF8, серверный alias `pgwire_test` в разрешённом наборе endpoint.
-- Сборка целевой ветки Firebird с pgwire feature, Linux, `ServerMode = Super`. Native и PG listeners принадлежат одному процессу `firebird`.
-- PG listener на `127.0.0.1:15432`; профиль v0 без TLS. Native observer подключается по явному native TCP connection string к тому же экземпляру, например `inet://127.0.0.1:3050/pgwire_test`.
-- TCP соединение **внешнего native observer** разрешено и необходимо для cross-check. Оно не должно превращаться в реализацию backend path PG frontend.
-- Основной пользователь `PGWIRE_TEST`, способный создавать свои таблицы, и `PGWIRE_LIMITED` без доступа к таблицам первого пользователя. Оба проходят реальную `Srp256` authentication; это не `SYSDBA`, владелец БД/администратор или общий service account.
-- Security database в профиле v0 локальная. Проверка отсутствия исходящих DB connections охватывает и PG auth; внутренние security attachments и штатные caches не считать лишними application attachments.
-- Дополнительные конфигурационные fixtures для отказов: alias вне allowlist, alias с `RemoteAccess = false`, конфигурация без допустимого `Srp256`. Их создаёт harness целевой ветки, не обычный driver suite.
-- Явные лимиты соединений, workers, очередей, входных/выходных данных, handshake, lock/statement ожиданий и остановки сервера. Значения фиксируются в отчёте.
-- Каждый SQL test создаёт собственные имена объектов. После `CREATE TABLE` выполняется commit до DML. Cleanup затрагивает только объекты теста.
-- Native observer использует новое соединение или новую транзакцию, чтобы предыдущий snapshot не скрывал commit.
-- Credentials передаются через окружение; их нет в коде, аргументах `isql`, логах и итоговом отчёте.
-
-Отсутствие сервера или обязательного параметра в выбранной integration job — ошибка, а не успешный skip.
-
-## 3. Обязательные архитектурные gates
-
-Эти проверки надо реализовать в целевой ветке отдельно от подготовленного Python suite.
-
-| ID | Проверка | Достаточное свидетельство |
+| ID | Сценарий | Критерий |
 |---|---|---|
-| A01 | Endpoint находится в существующем `firebird` | Review сборки/entry point и владелец listening socket: тот же PID, который обслуживает native listener; отдельного gateway executable/service нет |
-| A02 | PG attach/SQL не создаёт backend соединения | Review фактического call path и выбранного internal provider; контролируемое наблюдение исходящих `connect()` из серверного процесса во время PG connect/SQL. Ни native TCP/Unix loopback, ни `Remote`/`Loopback` fallback для этого пути не допускаются |
-| A03 | Socket и worker ownership | Собственные listener/selector/worker resources; отсутствует второй независимый запуск `SRVR_multi_thread()` поверх его глобальных native очередей и `INET_select` |
-| A04 | Feature выключена в конфигурации | PG порт не открыт, PG threads/attachments не создаются, обычные native connect/SQL/disconnect проходят |
-| A05 | Сборка с feature выключена | Существующий server target собирается; native smoke проходит. Если выбран runtime-only switch, решение явно зафиксировано вместо выдуманного build flag |
-| A06 | Граница поддержанных режимов | Linux/Super проходит. Включение PG в неподдержанном режиме даёт явный диагностируемый отказ по конфигурационному контракту, без молчаливого запуска иной архитектуры |
-| A07 | Занятый порт/ошибка bind | Предусмотренный startup failure, освобождение частично созданных ресурсов и понятная диагностика; отказ не объявляется успешным стартом PG |
+| A01 | Сборка/установка/загрузка | Generic host входит в server target; PostgreSQL-specific objects находятся в отдельной plugin library, а не в daemon или Remote_Common; экспортирован штатный entrypoint |
+| A02 | Пустые default lists | Ни additional listener, ни его workers/attachments не появляются; native regression проходит |
+| A03 | Два тестовых protocol plugins с разными ответами | Позиция plugins точно соответствует позиции ports; raw clients получают ответ правильного plugin; второго СУБД-протокола для теста не требуется |
+| A04 | `StubA, MissingPlugin, StubB` и три порта | Средний endpoint диагностирован как недоступный; StubB остаётся на третьем порту; первая и родная службы работают |
+| A05 | Разная длина/один пустой список/пустая позиция/trailing comma | Вся некорректная дополнительная конфигурация отклонена до загрузки модулей; native работает |
+| A06 | Порт 0, отрицательный, нечисловой, overflow, >65535, дубликат/конфликт native | Предсказуемый отказ без автоматической подмены порта; native listener не закрывается |
+| A07 | Missing/bad module, wrong factory/type, exception в factory, bind failure | Ошибка содержит plugin/port/reason без секретов; частичные resources освобождены; другие корректные endpoints доступны |
+| A08 | `plugins.conf` Module/RegisterName | Файл с отличающимся именем загружается по логическому имени; неверный RegisterName даёт явный отказ |
+| A09 | Startup integration | Один endpoint на server process; нет второго `SRVR_multi_thread()`, native PACKET/XDR или startup в client library |
+| A10 | Provider/network route | Review actual call path и наблюдение исходящих server `connect()` при auth/SQL: engine-only, без Remote/Loopback/native TCP/Unix backend |
+| A11 | Super, SuperClassic, Classic | Super тестируется явно; SuperClassic не считается автоматически покрытым Super. Неподдержанные modes диагностируются и сохраняют native |
+| A12 | Другие build paths | CLOOP bindings согласованы; CMake/Windows имеют отдельные build results. Проектный переносимый ABI не выдаётся за проверенную DLL |
 
-`MON$SERVER_PID`, имя процесса в SQL или совпадение PID из monitoring tables **сами по себе не доказывают** отсутствие gateway: посредник может подключиться к тому же Firebird и получить тот же PID. Для A01/A02 нужны сведения о владельце sockets, кодовом пути и отсутствии вторичного backend соединения. При сетевом наблюдении отделять исходящий native observer от сервера и документировать ограничения инструмента.
+Strict positional validation проверяется отдельно от PluginManager iterator: optional module skipping не должен менять mapping. Конфигурационные ошибки не проверяют изоляцию от segfault в доверенном плагине: весь код работает в одном процессе.
 
-## 4. Authentication, identity и доступ
+## S. Authentication и identity
 
-PG `AuthenticationCleartextPassword` передаёт пароль выбранному **in-memory Srp256 core**, выделенному из механики `ValidatePassword`. Это не PG SCRAM и не доверенный attach только по имени пользователя. `AuthenticationOk` разрешён после успешной проверки credentials и открытия разрешённого attachment.
-
-| ID | Проверка | Ожидание |
+| ID | Сценарий | Критерий |
 |---|---|---|
-| S01 | Правильный/неправильный пароль, неизвестный пользователь | Успех либо `28P01`; следующий правильный connect работает. После неуспешной authentication не остаётся рабочего user attachment |
-| S02 | Лимит auth rounds, ошибка/неподдержанный результат plugin | Ограниченный отказ и освобождение plugin/auth state; нет зависания и успешного trusted fallback |
-| S03 | `Srp256` недоступен или запрещён применимой конфигурацией | Явный отказ; нет перехода на OS identity, `Legacy_Auth` или service account ради успешного входа |
-| S04 | `SELECT CURRENT_USER FROM RDB$DATABASE` | Identity соответствует аутентифицированному пользователю и документированным правилам его имени; это не имя процесса или владельца сервера |
-| S05 | Второй пользователь читает таблицу без GRANT | `42501`; отсутствие привилегий не компенсируется внутренним engine attach |
-| S06 | Разрешённый/неизвестный alias | Разрешённый alias открывает ожидаемую БД; неизвестный даёт `3D000`. Client-supplied paths, URI, DPB/config/auth block не подменяют серверное сопоставление |
-| S07 | Alias с `RemoteAccess = false` | PG вход отклонён по смыслу как удалённый native вход. Внутренний attach сохраняет remote peer и не обходит проверку как локальный trusted attach |
-| S08 | Server-side alias и per-database security configuration | Credentials и открытие БД используют согласованную конфигурацию alias; alias не позволяет выбрать чужую security database или расширить доступ |
-| S09 | Параллельные логины разных пользователей | Auth block, password и identity не переходят между сессиями; SQL исполняется с правами своего пользователя |
-| S10 | Существующие EDS authentication paths после выделения core | `EDS::validatePassword`/InternalDS/IscDS scenarios сохраняют прежние условия вызова: правильные credentials работают, неправильные отвергаются, skip/precondition cases не меняют семантику |
-| S11 | Обычная native authentication | Существующие native connect/SQL и negative-password tests проходят с включённым и выключенным PG frontend |
+| S01 | Правильный/неправильный пароль, неизвестный пользователь | Правильный вход либо startup `28P01`; AuthenticationOk только после attach; нет рабочего user attachment после отказа |
+| S02 | Auth rounds и ошибочные plugin statuses | Ограниченный обмен в памяти, cleanup, без trusted/OS/service-account fallback |
+| S03 | Srp256 запрещён per-database policy или security DB недоступна | Диагностируемый отказ; native auth configuration не подменяется |
+| S04 | CURRENT_USER, concurrent users, denied SELECT | Реальные разные identities; `42501` без GRANT; credentials/auth blocks не переходят между sessions |
+| S05 | Alias allowlist, неизвестный alias, paths/URIs/options | Только server-authorized local database; неизвестный alias `3D000`; клиент не внедряет DPB/config/trusted identity |
+| S06 | RemoteAccess=false и peer metadata | Отказ удалённому клиенту; внутренний attachment не маскирует TCP origin как embedded |
+| S07 | Native auth и затронутые EDS paths | Native regression обязательна; при выделении helper из EDS сохранить его positive/negative/precondition cases |
 
-S10 требует существующих EDS fixtures/тестов целевой ветки либо узких добавленных регрессионных случаев. Успешный PG login этого не доказывает. Review проверяет, что выделенный core не требует уже существующего пользовательского `thread_db`/attachment и не снимает прежние проверки EDS wrapper.
+Startup SQLSTATE проверять raw ErrorResponse field `C`: `psycopg2.connect()` может бросить OperationalError без `pgcode`. Внутренние security attachments/caches учитывать отдельно от session-owned application attachments.
 
-Точные SQLSTATE startup-ошибок S01/S06 проверяются по полю `C` в raw ErrorResponse в C++/wire test. При неуспешном `psycopg2.connect()` драйвер может не получить PGresult и оставить `OperationalError.pgcode = None`; Python test не должен принимать это за неправильный SQLSTATE сервера. Проверка только исключения `OperationalError` не заменяет raw-wire assertion.
+## W. Framing и SQL boundary
 
-## 5. C++ wire/codec tests
-
-| ID | Сценарий | Ожидание |
+| ID | Сценарий | Критерий |
 |---|---|---|
-| W01 | Startup без tag; Query/Terminate с tag | Точные boundaries и length, network byte order |
-| W02 | Короткий frame разбит по каждой возможной границе | Один результат decoding, без ожидания полного frame в общем accept loop |
-| W03 | Несколько frames в одном чтении; frame больше transport-порции | Каждый разобран ровно один раз; остаток сохранён; размер read buffer не выдан за PG frame limit |
-| W04 | Partial write, backpressure, send failure | Ответ не теряется и не помечается успешным после ошибки; память и cleanup ограничены |
-| W05 | Length меньше минимального, overflow, выше лимита | Отказ до чрезмерной allocation и до исполнения SQL |
-| W06 | Отсутствующий NUL, embedded NUL/хвост, некорректный UTF8 | Protocol/encoding error без усечения SQL и side effects |
-| W07 | EOF в startup/header/payload/password | Cleanup только этой session; остальные listeners и sessions работают |
-| W08 | SSLRequest/GSSENCRequest в M1 | Ровно один byte `N`, затем допустимый startup; TLS-поведение M3 проверяется отдельно, native crypt handshake не появляется |
-| W09 | Startup 3.0; неподдержанные major/minor и options | Успех либо понятный FATAL по профилю; незаявленные настройки не игнорируются с успехом |
-| W10 | Golden bytes RowDescription/DataRow | OID/typlen, UTF8 byte length, `NULL = -1`, empty = 0, text format; BOOLEAN — один byte `t`/`f` |
-| W11 | ErrorResponse/ReadyForQuery/CommandComplete | Обязательные поля и terminators, states `I/T/E`, tags и row counts |
-| W12 | Parse/Bind/Execute в M1 | `FATAL 0A000` и close; с M2 эту временную проверку заменяет группа E |
-| W13 | Пустой и whitespace-only Query | EmptyQueryResponse и правильное состояние транзакции |
-| W14 | Две sessions, interleaved bytes | Независимые framing/auth/SQL states; чужие bytes не попадают в ответ |
-| W15 | Native `DummyPacketInterval` включён | На PG socket не отправляются `op_dummy`, native compression, XDR или wire-crypt bytes; native keepalive работает |
-| W16 | CancelRequest в M1, недопустимые message sequences | Документированный ограниченный отказ/закрытие; с M3 CancelRequest проверяется группой C, native async opcode handling не используется |
+| W01 | Startup без tag, typed messages, fragmentation по каждой границе, coalesced frames | Точные lengths/network order, каждый frame обработан один раз, transport read size не ограничивает размер frame |
+| W02 | Partial write, slow reader, EOF в header/payload/password | Ограниченная память, отсутствие ложного успеха, cleanup только нужной session |
+| W03 | Invalid/overflow/oversized length, NUL/хвост, UTF8 | Отказ до опасной allocation или исполнения; SQL не усекается |
+| W04 | Startup 3.0/неподдержанные version/options, SSLRequest/GSSENCRequest | Реальный профиль: до TLS ровно `N`; неизвестные обещания не подтверждены успешным startup |
+| W05 | Независимые golden bytes результатов/errors | OID, lengths, NULL=-1, empty=0, required ErrorResponse fields, ReadyForQuery и tags; не только собственный encode→decode |
+| W06 | Native keepalive/crypt/compression и parallel sessions | PG stream не получает native bytes; framing/auth/SQL state разных sessions независимы |
+| W07 | Байты SQL на входе и в parser | Instrumented boundary сверяет bytes/length для comments, quotes, semicolons, whitespace и UTF8; wire frontend не нормализует и не переписывает SQL |
+| W08 | Пустой, whitespace/comment-only и незавершённый SQL | EMPTY устанавливается parser metadata; незавершённый SELECT, строка/комментарий дают syntax error, а не EmptyQueryResponse |
+| W09 | `BEGIN`, `$1`, `::date` и похожие tokens внутри literals/comments | Пока parser их не поддерживает в соответствующих позициях — engine syntax errors; внутри literals/comments смысл определяет parser; frontend replacement отсутствует |
+| W10 | Несколько statements в одном Query/Parse | Parser отвергает неподдержанный batch без частичного исполнения; `;` внутри совместимого SQL не разделяется frontend |
 
-Для W10 использовать независимо проверенные byte fixtures. Encode→decode одним кодом не служит единственным доказательством. Отдельная fuzzing infrastructure для v0 не требуется: нужны regression cases границ framing и состояний.
+W07 требует и code review, и наблюдаемой границы передачи текста. Одни удачные строки со словом BEGIN не доказывают отсутствие второго lexer. Unsupported wire messages получают реальный protocol/capability error; точные ожидания меняются после реализации Extended/TLS/cancel.
 
-## 6. SQL и transaction contract
+## Q/T. DSQL metadata, выполнение и транзакции
 
-Часть проверок подготовлена в `tests/test_pgwire_acceptance.py`. Строка в таблице не означает, что проверка уже реализована или пройдена: сверять pytest node IDs и оставшиеся C++/integration cases.
+До автоматического принятия всех совместимых форм P0/P3 должны закрепить полный semantic descriptor. `getType()`/cursor flag недостаточно для отличения SELECT от DML RETURNING или разных DDL/control forms.
 
-| ID | Проверка | Ожидаемое поведение |
+| ID | Сценарий | Критерий |
 |---|---|---|
-| I01 | Connect + `SELECT CAST(6*7 AS INTEGER) FROM RDB$DATABASE` | 42 вычислено Firebird; INTEGER OID 23 |
-| I02 | Пустой result set | Description существует, строк 0, `SELECT 0` |
-| I03 | Типы, границы и metadata | Правильные OID, Python types, значения и quoted column aliases |
-| I04 | UTF8, апостроф, backslash, semicolon, LF/TAB | Нет rewriting, потерь или исполнения фрагмента параметра как SQL |
-| I05 | NULL и пустая строка | `None` отличается от `""` |
-| I06 | CREATE/DROP TABLE, INSERT/UPDATE/DELETE | Правильные tags, rowcount, commit и данные |
-| I07 | Explicit commit и отдельная session | До commit запись не видна, после commit видна |
-| I08 | Explicit rollback | Запись отсутствует, соединение пригодно дальше |
-| I09 | Unique violation внутри block | `23505`, state `E`, следующий SQL получает `25P02` |
-| I10 | COMMIT и ROLLBACK из E | Изменения не сохранены; state `I`; COMMIT из E возвращает tag ROLLBACK |
-| I11 | Disconnect с активной transaction | Rollback; другая session вставляет тот же ключ без оставленного lock |
-| I12 | Ошибка SQL вне block | ErrorResponse + `I`, затем успешный SELECT на том же connection |
-| I13 | Multi-statement, включая DML первым statement | Отказ до любых изменений; никакого `split(';')` |
-| I14 | INSERT/UPDATE/DELETE RETURNING вне поддержки | `0A000` до исполнения; ни одна строка не изменена |
-| I15 | Unsupported output type | `0A000`, без подмены на str/NULL; отказ до исполнения, если тип известен после prepare |
-| I16 | Python date, адаптированная в `::date` | Понятная syntax error; endpoint не переписывает PostgreSQL cast |
-| I17 | U+0000 в выдаваемом text | `22021`; нет молчаливого усечения |
-| I18 | `with connection` при `autocommit=True` | Реальные BEGIN/COMMIT; context manager не принимается за простое закрытие connection |
-| I19 | Пустой Query/повторный BEGIN/COMMIT и ROLLBACK в I | Согласованные states, notices и tags без ложной вложенной транзакции |
-| I20 | Ошибка fetch или commit после начала ответа | Нет ложного CommandComplete; корректный error/state либо закрытие при утрате достоверного состояния |
-| N01 | PG write → native read; native write → PG read | Одна реальная база, видимость подтверждена после commit |
-| N02 | Native SQL под разными пользователями | PG endpoint сохраняет engine privilege enforcement и CURRENT_USER |
+| Q01 | Вычисляемые SELECT, 0/1/many rows, aliases | Реальные значения, правильная description и SELECT row count |
+| Q02 | CREATE/DROP/ALTER и другие доступные DDL | Tag выводится из parser/DSQL metadata, без keywords scanner; изменение видно native observer после commit |
+| Q03 | INSERT VALUES/SELECT, UPDATE, DELETE, MERGE, UPDATE OR INSERT с/без RETURNING | Реальные rows и affected counts, tag исходной операции; cursor не превращает DML в SELECT, coarse INSERT type не маскирует MERGE |
+| Q04 | Supported SQL с unsupported input/output capability | Отказ по metadata до side effects; не blanket rejection синтаксической формы RETURNING |
+| Q05 | SET TRANSACTION, COMMIT/ROLLBACK, RETAINING, SAVEPOINT и session-origin operations | Descriptor различает семантику, transaction characteristics/effect; explicit/implicit origin известен session state. Frontend не классифицирует SQL по тексту |
+| Q06 | Native/PG cross-visibility в обе стороны | Одна база, штатные права и commit/rollback; native клиент не участвует в PG execution path |
+| Q07 | Prepare/fetch/execute/commit errors | Нет ложного CommandComplete; исходная ошибка не затёрта cleanup; uncertain transaction state завершает connection |
+| T01 | Обычный implicit Query | Настоящий commit после успешного исполнения, rollback после ошибки, state I; retaining не подменяет завершение |
+| T02 | Native SET TRANSACTION из I, native COMMIT/ROLLBACK | Реальная transaction, T/I, isolation/read-only и cross-session visibility. Повторный SET TRANSACTION при active handle — 25001/E с сохранением transaction |
+| T03 | Ошибка в explicit transaction | Native handle сохраняется, state E; обычный SQL/SAVEPOINT/RELEASE/COMMIT RETAIN получают 25P02, без незаметного открытия новой transaction |
+| T04 | Полный COMMIT/ROLLBACK из E | COMMIT выполняет rollback и возвращает ROLLBACK/I; ROLLBACK также завершает transaction; ещё незафиксированные изменения не сохранены; native AUTO COMMIT проверяется отдельно T09 |
+| T05 | Native RETAINING в T/E/I | В T реальная retaining operation остаётся T; E + ROLLBACK RETAIN возвращает T после rollback retaining; E + COMMIT RETAIN даёт 25P02/E; в I RETAIN — 25000/I |
+| T06 | SAVEPOINT → изменение → ошибка → ROLLBACK TO → продолжение | Успешный rollback-to возвращает T и сохраняет изменения до savepoint; неверный savepoint даёт error/E; нельзя незаметно откатить весь transaction |
+| T07 | Полный COMMIT/ROLLBACK в I | Parser-derived no-op/I, optional notice; frontend не распознаёт команду самостоятельно |
+| T08 | Disconnect с незавершённой transaction | Rollback и освобождение lock; native observer подтверждает отсутствие uncommitted changes |
+| T09 | Native AUTO COMMIT / NO AUTO UNDO | Metadata сохраняет выбранные характеристики; visibility/error/savepoints соответствуют native API. Уже совершённые AUTO COMMIT commits сохраняются после последующего rollback; ложной атомарности PG block нет |
+| T10 | ALTER SESSION RESET в I/T/E, включая ошибку reset | Engine-derived effect учитывает смену transaction при том же interface pointer; portals/savepoints/session metadata обновлены. В T новая transaction остаётся T, в I остаётся I, в E отказ 25P02. Если reset закрыл attachment — FATAL/close, без ложного recovery |
 
-I03 включает SMALLINT/INTEGER/BIGINT, `INT64_MIN`, BOOLEAN `t/f`, CHAR padding, VARCHAR с кириллицей, NUMERIC(18,0), дробный NUMERIC/DECIMAL на поддержанном физическом типе, ноль и NULL. Для Decimal не использовать double как источник ожидаемого значения. FLOAT/DOUBLE, INT128, DECFLOAT, temporal types, BLOB/ARRAY/OCTETS остаются unsupported.
+Transaction characteristics и session operations, которые объявлены поддержанными, меняют реальное состояние. Unsupported capabilities получают metadata-based refusal до side effects. Native controls не отклоняются целиком только из-за отсутствия frontend recognizer. Проверки statement classification выполняются также для legacy `getType()` и existing callers: новая metadata не должна менять их семантику.
 
-Транзакционные unit tests отдельно проверяют выбранную реализацию `E`: native rollback сразу при ошибке внутри block, сохранение logical failed state и отказ от SQL до COMMIT/ROLLBACK. Для `I` нужен настоящий commit/rollback каждой команды; retaining и native autocommit не заменяют этот контракт.
+## D. Типы, строки и диагностика
 
-## 7. Обязательные lifecycle и resource tests
-
-| ID | Сценарий | Ожидание |
+| ID | Сценарий | Критерий |
 |---|---|---|
-| L01 | Серия connect/auth/query/disconnect, включая ошибки | Attachments, transactions, statements, cursors, sockets и worker slots возвращаются к исходному уровню |
-| L02 | Максимум sessions, очередь заполнена, медленный client | Число workers и размер очередей ограничены; явный отказ/timeout; native listener работает |
-| L03 | Handshake завис, password не прислан, partial query не завершён | Deadline освобождает session; один client не занимает accept loop или worker навсегда |
-| L04 | Shutdown при незавершённом auth, активной transaction и SQL/lock wait | Остановлен accept, работа прервана штатным способом в пределах deadline, выполнены rollback/detach/close, workers joined до разрушения используемой engine/plugin infrastructure |
-| L05 | Ошибка на этапах startup/attachment/cleanup | Нет use-after-free, double release/dispose, забытых sockets и обращения к завершённому provider |
-| L06 | PG worker fault/исключение, malformed client | Затронута только эта session; общий error path не отправляет native PACKET на PG socket |
+| D01 | M1 integers, BOOLEAN, CHAR/VARCHAR, exact numeric, NULL | Верные OID/Python types, bounds, INT64_MIN, scale=0 и fractional numeric без float intermediate |
+| D02 | UTF8 CHAR, varying fetch metadata, trailing spaces | Значения сверяются с native fetch через SQL_VARYING; нет byte-padding повреждения или rtrim логических пробелов; проверяются ASCII/многобайтные значения, пустое и полностью пробельное CHAR |
+| D03 | Quoted aliases, NULL/empty, апостроф/backslash/LF/TAB/semicolon | Metadata и значения не теряются; U+0000 даёт 22021 вместо truncation |
+| D04 | M2 FLOAT/DOUBLE, temporal без TZ, INT128/NUMERIC(38), aggregates | OID/диапазоны/precision определяются result metadata; NaN/Infinity policy явна; нет потери exact numeric |
+| D05 | Binary input/output | Независимые wire fixtures, endian/epoch/units/lengths; native buffer не копируется напрямую в PG binary |
+| D06 | Unsupported type/format или malformed Bind | Capability error до исполнения; действительно неподдержанные types не превращаются в text/NULL |
+| D07 | Full ISC status vector с wrapper и nested causes | SQLSTATE выбирается по полной структуре, включая update-conflict/deadlock/constraint causes; не по локализованному тексту и не только первому коду |
+| D08 | Syntax, unknown table, unique, permission, login | Проверены 42601/42P01/23505/42501/28P01 и fallback; messages сохраняют смысл и не раскрывают credentials |
+| D09 | Native observer удаляет MON$ATTACHMENTS для PG session; отдельно shutdown базы | FATAL 57P01 и закрытие PG connection; target не выполняет последующий SQL |
+| D10 | Native observer отменяет MON$STATEMENTS или срабатывает statement timeout | 57014 в запросе, корректные I/E, освобождение statement/cursor и возможность предусмотренного recovery |
+| D11 | Engine idle timeout | FATAL 57P05 и закрытие, без повторного скрытого attach |
 
-Для L01 выбрать подходящее средство целевой ветки: lifecycle counters, monitoring и/или доступную sanitizer build. Отсутствие SQL lock не доказывает отсутствие утечек handles. Не нужно запускать все инструменты одновременно без конкретного риска.
+Для D09/D11 delivery contract: active operation получает terminal error при возврате из engine; для idle socket обязательна доставка на следующем запросе, если writable channel сохраняется. Harness после administrative action/timeout посылает запрос и проверяет raw ErrorResponse и close; поддержанная eager notification может прийти раньше с тем же кодом. Транспортный обрыв при уже закрытом socket фиксируется отдельно и не подменяет проверку mapping на рабочем канале. Если engine callback позволяет иной контракт, его сначала зафиксировать в CONTEXT и согласовать тест, а не обещать unsolicited сообщения без реализации.
 
-Baseline L01 снимать после прогрева. Отдельно учитывать документированные server/plugin caches; проверять освобождение session-owned ресурсов и отсутствие роста между повторными одинаковыми сериями, а не требовать нулевого числа всех attachments сервера.
+## E. Extended Query с совместимым SQL
 
-Для L04 проверить собственный PgListener/worker group именно в server init/shutdown path. Успешное завершение Python client не подтверждает порядок teardown внутри `firebird`.
+Прямой C libpq harness фиксирует `PQlibVersion`, compile headers, OS и SHA. Он использует `PQexecParams`/`PQprepare` с нулём параметров и с native SQL `SELECT CAST(? AS INTEGER) FROM RDB$DATABASE`; libpq передаёт текст серверу. Это проверяет wire Bind, но не поддержку PostgreSQL `$n`.
 
-## 8. Подготовленный Python suite: окружение и запуск
+| ID | Сценарий | Критерий |
+|---|---|---|
+| E01 | PQexecParams без параметров и с native `?` | Реальное execution через Parse/Bind/Execute/Sync; input metadata и значения согласованы |
+| E02 | PQprepare/PQexecPrepared, OID=0/явные OID, NULL/text/binary | Повторное исполнение с новыми значениями, корректные inference/ParameterDescription, format counts 0/1/N и mismatch errors |
+| E03 | Named/unnamed objects, replacement, Close, Describe | Правильные lifetimes, NoData/RowDescription и parameter metadata; statement способен пережить commit по контракту |
+| E04 | Несколько portals, Execute maxRows, PortalSuspended | Нет потерь/дубликатов; buffers/cursors/formats изолированы; CommandComplete только по завершении |
+| E05 | Parse/Bind/Execute error, последующие сообщения до Sync | Discard-until-Sync, отсутствие side effects отброшенных команд, затем recovery |
+| E06 | Flush без Sync, несколько Execute до Sync | Ответы доступны, implicit commit и ReadyForQuery появляются на правильной границе; ошибка откатывает implicit cycle |
+| E07 | Sync внутри native explicit transaction, Simple/Extended switching | Состояние T/E сохраняется; unnamed invalidation и resources соответствуют контракту |
+| E08 | PQsendQueryParams/PQsendQueryPrepared/PQgetResult | Async/nonblocking API без pipeline, правильный конец результатов и errors |
+| E09 | Limits, EOF/shutdown с prepared objects и suspended portal | Ограниченная память, освобождение всех objects, module lifetime сохраняется |
+| E10 | Обычный Psycopg 3 с параметрами `%s` → `$n` | Пока parser не расширен, зафиксированный syntax failure; не объявлять такую библиотеку параметризованно совместимой |
 
-`tests/test_pgwire_acceptance.py` — executable acceptance cases для будущего endpoint. Он проверяет driver/SQL контракт, но не заменяет C++ framing, authentication-core, architecture и shutdown tests разделов 3–7.
+После отдельной поддержки `$n` в parser добавить repeated/reordered indices, gaps/overflow, references в literals/comments и обычный Psycopg 3 Cursor с переходом к named preparation. Эти проверки обязательны для будущего заявления о таком клиенте. ClientCursor и клиентская подстановка не заменяют Extended Query. Pipeline и COPY требуют самостоятельных матриц, если входят в профиль приложения.
 
-При подготовке collection обнаружила 56 параметризованных cases из 20 тестовых функций; без `native`/`privileges` выбираются 54. Это число собранных, не пройденных against Firebird tests. Среди остающихся отдельных gates — CURRENT_USER, RemoteAccess, raw framing/Extended messages, точные startup SQLSTATE, EDS regression, socket/provider architecture и shutdown. Native roundtrip проверяет видимость SQL effects, а не расположение frontend в процессе.
+## L. Resource ownership и остановка
 
-Закреплённые зависимости: `psycopg2-binary==2.9.11`, `pytest==8.4.2`. Команды выполняются из корня пакета либо соответствующего места после переноса файлов в репозиторий:
+| ID | Сценарий | Критерий |
+|---|---|---|
+| L01 | Серии connect/SQL/error/disconnect после warmup | Session attachments, transactions, cursors, plugin sessions и FDs возвращаются к baseline; documented caches выделены отдельно |
+| L02 | Малформированный/медленный клиент и исчерпание лимита | Другие PG sessions и native обслуживаются; очереди/память ограничены |
+| L03 | Shutdown в accept, idle read, password exchange, incomplete frame/write | Readers/writers разбужены, workers завершены, registry освобождён |
+| L04 | Shutdown active SQL/lock wait | Lock timeout намеренно больше cleanup deadline; shutdown всё равно ограничен и не ждёт естественного lock timeout |
+| L05 | Provider phases | Нет бесконечного join в preproviders; cancellation позволяет providers завершиться; после shutdown не запускаются engine operations |
+| L06 | Library lifetime | Инструментированный plugin подтверждает, что callbacks/sessions завершены до releasePlugin/module cleanup; нет direct dlclose и use-after-unload |
+| L07 | Частичная ошибка создания session/plugin и repeated stop | Идемпотентный cleanup, нет double release; initial status не затёрт вторичной ошибкой |
 
-~~~sh
-python3 -m venv .venv-pgwire
-. .venv-pgwire/bin/activate
-python -m pip install -r requirements-tests.txt
-~~~
+Подходящее свидетельство выбирается под риск: ownership counters, monitoring, FDs, инструментированный тестовый plugin, при необходимости sanitizer. Только отсутствие lock не доказывает отсутствие утечек. Проверять cleanup и worker completion независимо от завершения клиентского процесса.
 
-Пример окружения без настоящих секретов:
+Исходный тестовый профиль T08/L04: cleanup deadline 5 секунд, lock timeout конкурирующей transaction 15 секунд, общий client deadline 30 секунд. Значения фиксируются в fixture и отчёте; при адаптации к CI сохраняется строгий порядок cleanup deadline < lock timeout < client deadline. Это устраняет гонку между Terminate cleanup и проверкой освобождённого ключа.
 
-~~~sh
+## R/C/U. Удалённый профиль, TLS, отмена и приложение
+
+| ID | Сценарий | Критерий |
+|---|---|---|
+| R01 | Отдельный узел/network namespace | Реальная TCP-топология зафиксирована; listener и engine в одном firebird |
+| R02 | SSLRequest → TLS, sslmode=verify-full | Проверены trust/hostname, неверный/истёкший сертификат и отказ handshake; выбранная в P0 TLS dependency отражена в build |
+| R03 | Non-loopback без TLS; partial/slow TLS | Password не передаётся в открытом канале; bounded handshake и shutdown, без вмешательства native WireCrypt |
+| C01 | BackendKeyData/CancelRequest при SQL и lock wait | 57014 в основном connection, безопасная cancellation ownership, correct I/E |
+| C02 | Invalid/stale/чужой key; races с complete/detach | Чужая session не отменяется; cancel socket не создаёт application attachment; нет UAF/hang |
+| U01 | Startup/session commands выбранного приложения | Фиксированы driver/libpq/version/options и trace без секретов; SQL понимает engine parser, settings имеют реальный эффект |
+| U02 | Неизменённый драйвер, сценарии приложения, pooling если нужен | Все обязательные операции работают либо их parser dependencies явно блокируют приёмку; специальный клиентский режим не скрывается |
+| U03 | Итоговые native/PG concurrency и regression | Cross-visibility, privileges, transaction/resource/lifecycle gates повторены для итогового профиля |
+
+Приложение пока не выбрано. Если его driver автоматически посылает `BEGIN`, `$n`, `SET` или catalog queries, эти реальные dependencies нельзя исключить из acceptance. Их неподдержка пока ограничивает применимость endpoint, хотя совместимый SQL уже работает. Исходный Python helper принудительно использует loopback и `sslmode=disable`; R/C/U требуют отдельного harness.
+
+## Миграция Python scaffold
+
+Исходное число 56 не является обязательной целью новой приёмки. Перед execution пересмотреть конкретные node IDs и зафиксировать migration diff:
+
+| Исходная группа | Изменение |
+|---|---|
+| `_pg_connection(autocommit=False)` и тесты implicit BEGIN | Перевести compatible-wire fixtures в `autocommit=True`; explicit transactions проверять передачей native SQL. Отдельный negative test фиксирует реальный отказ driver-generated BEGIN |
+| `test_connection_context_with_autocommit` | `with conn` способен послать BEGIN даже при autocommit=True; прежний positive expectation откладывается до parser support, вместо него проверить/документировать отказ без утраты данных |
+| Scalar/CRUD/error/permissions/native roundtrip | Сохранить смысл, обновить fixtures и сопоставить Q/D/S gates; compatible SQL должен проверяться положительно |
+| `test_returning_rejected_before_changes` | Удалить blanket rejection RETURNING; заменить позитивными rows/tags/counts для поддержанных codecs и отдельным capability refusal без side effects |
+| `test_unsupported_output_types` | Negative только для реально отсутствующего codec; реализованные temporal/floating/INT128 cases становятся positive |
+| `test_python_date_adapter_remains_unsupported_sql` | Syntax boundary `::date` сохраняется независимо от появления DATE codec |
+| Batch/error/disconnect | Сохранить соответствующий parser/transaction/cleanup смысл, исключить прежний frontend lexical contract |
+
+Не делать blanket skip/xfail legacy suite и не требовать одновременно взаимоисключающие positive/negative outcomes. Будущие parser-dependent client tests имеют отдельную отмеченную dependency и не считаются выполненными. Недостающий сервер/fixture в выбранной integration job является ошибкой, а не успешным skip.
+
+Пример окружения для будущего запуска, без настоящих секретов:
+
+```sh
 export PGWIRE_TEST_DSN='host=127.0.0.1 port=15432 dbname=pgwire_test user=PGWIRE_TEST'
-export PGPASSWORD='<пароль основного пользователя>'
+export PGPASSWORD='<пароль тестового пользователя>'
 export PGWIRE_LIMITED_DSN='host=127.0.0.1 port=15432 dbname=pgwire_test user=PGWIRE_LIMITED'
 export PGWIRE_LIMITED_PASSWORD='<пароль ограниченного пользователя>'
 export FB_NATIVE_DSN='inet://127.0.0.1:3050/pgwire_test'
 export FB_NATIVE_USER='PGWIRE_TEST'
-export FB_NATIVE_PASSWORD='<пароль native пользователя>'
+export FB_NATIVE_PASSWORD='<пароль native observer>'
 export FB_ISQL='/absolute/path/to/firebird/isql'
-~~~
+```
 
-`FB_ISQL` — Firebird isql, не одноимённая ODBC-утилита. Native subprocess получает credentials через своё окружение. DSN с паролем нельзя выводить при ошибке теста.
+Python dependencies закреплены в `requirements-tests.txt`; фактический runtime libpq записывать отдельно. Из каталога пакета подготовительная проверка выполняет `python -m py_compile tests/test_pgwire_acceptance.py` и `python -m pytest --collect-only -q`. После миграции запуск выбранного integration набора оборачивается во внешний deadline, например `timeout 180s python -m pytest -q -m integration`. `connect_timeout` не ограничивает зависший SQL; native subprocess и серверные ожидания также имеют собственные deadlines.
 
-Python helper требует явный loopback `host=127.0.0.1` или `host=::1`, `dbname` и `user`, запрещает пароль внутри PG DSN и задаёт `hostaddr`, UTF8, `sslmode=disable`, `gssencmode=disable`, `target_session_attrs=any`, пустые `options`, `connect_timeout=5`. На runtime libpq 18+ он также задаёт `max_protocol_version=3.0`. Другие настройки из окружения/DSN не расширяют заявленный контракт.
+## Отчёт VALIDATION
 
-| Выбранные tests | Обязательные параметры |
-|---|---|
-| Любые integration | `PGWIRE_TEST_DSN`, `PGPASSWORD` |
-| Дополнительно marker `native` | `FB_ISQL`, `FB_NATIVE_DSN`, `FB_NATIVE_USER`, `FB_NATIVE_PASSWORD` |
-| Дополнительно marker `privileges` | `PGWIRE_LIMITED_DSN`, `PGWIRE_LIMITED_PASSWORD` |
+Отдельно записать SHA/build/OS/ServerMode, module filename и configured name/port, limits, driver/header/runtime versions, реальные commands и результаты. Для каждой строки выбранного этапа указать test/node ID, evidence и pass/fail/not-run; collection, unit и live integration отделяются.
 
-Module-level marker — `integration`; дополнительные markers — `native` и `privileges`. Недостающая переменная для выбранной группы вызывает fixture failure. Collection без параметров допускается: SQL при collection не исполняется.
-
-Ограниченный запуск до настройки native/limited fixtures:
-
-~~~sh
-timeout 120s python -m pytest -q -m 'integration and not native and not privileges'
-~~~
-
-Полный подготовленный driver suite:
-
-~~~sh
-timeout 180s python -m pytest -q -m integration
-~~~
-
-Подготовительная проверка без сервера:
-
-~~~sh
-python -m py_compile tests/test_pgwire_acceptance.py
-python -m pytest --collect-only -q
-~~~
-
-Внешний timeout ограничивает зависание драйвера при ошибке wire. `connect_timeout` ограничивает только подключение; он не заменяет общий deadline и server-side lock/statement limits. Native subprocess имеет собственный timeout.
-
-В ограниченном запуске нет native roundtrip и privilege proof. Даже полный Python suite не закрывает architecture/authentication-core/C++/lifecycle gates. В отчёте называть выполненную группу, а не объявлять весь v0 принятым.
-
-## 9. Формат итогового VALIDATION
-
-- Repository/SHA, build flags, ОС и `ServerMode`; включение/выключение PG feature.
-- Firebird server/native client, psycopg2, фактические compile/runtime libpq versions. Пин psycopg2 не заменяет запись libpq/platform profile.
-- PG connection/protocol profile и server limits без секретов.
-- Выполненные commands, collection и реальные execution results раздельно, точные failing/skipped node IDs.
-- A01/A02 evidence: владелец sockets, внутренний attach path и способ исключения secondary backend connections.
-- Srp256, CURRENT_USER, denied privilege, RemoteAccess, alias и EDS/native regression results.
-- Native roundtrip, lifecycle/shutdown и feature-disabled results.
-- Что осталось не реализовано/не проверено; соответствующие gate IDs.
-
-Отчёт называет принятый этап M0/M1/M2/M3. Для M1 допустимо утверждение о Simple Query-профиле psycopg2 и прямого libpq; для M2 нужны перечисленные Extended API; для M3 — конкретный прикладной профиль и удалённый TCP-сценарий. Одного SELECT, collection pytest или `MON$SERVER_PID` недостаточно.
-
-## 10. Прямой libpq и Extended Query в M2
-
-C harness компилируется против явно выбранной libpq и записывает PQlibVersion, header/build version, ОС и server SHA. Уже в M1 он проверяет PQconnectdb/PQexec, PQftype/PQgetisnull/PQcmdTuples, PQtransactionStatus, SQLSTATE и освобождение PGresult/connection. Это отдельный будущий harness, его исходников в текущем пакете ещё нет.
-
-| ID | Проверка | Ожидание |
-|---|---|---|
-| E01 | PQexecParams с совместимым SQL и `$n` | Bind значений через native buffers; реальные результаты Firebird |
-| E02 | Явные parameter OID и OID=0 | Правильные inference/ParameterDescription; неоднозначность даёт ошибку |
-| E03 | Повторный `$1`, перестановка индексов, неверный индекс/overflow | Корректный mapping либо отказ до исполнения |
-| E04 | `$1` внутри строки, комментария, quoted identifier и альтернативной строки Firebird | Эти фрагменты не превращаются в параметры |
-| E05 | PQprepare/PQexecPrepared и разные значения | Повторное исполнение без повторной подстановки SQL; statement переживает commit |
-| E06 | Named и unnamed statements, замена и Close | Spec-defined lifetime и ошибки; handles освобождены |
-| E07 | Describe statement и portal | ParameterDescription, RowDescription/NoData, типы и result formats согласованы |
-| E08 | Bind NULL, empty, text/binary и format counts 0/1/N | Правильная выдача; mismatch/invalid format отвергаются |
-| E09 | Execute maxRows, PortalSuspended, продолжение cursor | Без потерь/дубликатов, CommandComplete только при завершении |
-| E10 | Несколько portals и interleaved sessions | Независимые bound buffers, cursors, formats и identities |
-| E11 | Ошибка Parse/Bind/Execute до Sync | Уже принятые последующие команды не исполняются; recovery после Sync |
-| E12 | Flush без Sync | Ответ приходит; ReadyForQuery и implicit commit не появляются |
-| E13 | Несколько Execute до Sync, commit visibility | Одна implicit transaction до Sync; ошибка откатывает её изменения |
-| E14 | Sync внутри explicit BEGIN block | Block остаётся открытым; I/T/E соответствуют результату |
-| E15 | Simple Query между Extended cycles | Корректная инвалидизация unnamed objects и отсутствие оставшихся cursors |
-| E16 | PQsendQueryParams/PQsendQueryPrepared и PQgetResult | Асинхронный API без pipeline работает, включая nonblocking I/O и ошибки |
-| E17 | Лимиты statements/portals/parameters и большой Bind | Ограниченные ресурсы, изоляция клиентов, отсутствие частичного исполнения |
-| E18 | EOF/shutdown с prepared statement, suspended portal и discard state | Освобождение ресурсов, bounded shutdown, native endpoint не регрессирует |
-| E19 | Обычный Psycopg 3 Cursor, подготовка statement после порога | Реальный Extended Query; переход к named preparation работает |
-
-E01–E08 проверяются прямым libpq, E09–E15 и граничные sequences — raw-wire harness. Версия Psycopg 3 закрепляется перед M2; тест включает server preparation, а не только `prepare_threshold=None`. ClientCursor или клиентская подстановка параметров не заменяют эту приёмку.
-
-Libpq pipeline API не входит в E16. Для его будущей поддержки нужны отдельные tests multiple Sync/error segments и pipeline result statuses.
-
-## 11. Общие codecs и RETURNING в M2
-
-| ID | Проверка | Ожидание |
-|---|---|---|
-| D01 | Все scalar types M2, text и binary input/output | Правильные OID, значения, NULL и длины; Simple Query использует те же text codecs |
-| D02 | Integer и exact numeric границы, INT128/NUMERIC(38), scale | Нет переполнения, float-промежуточного значения или потери точности |
-| D03 | FLOAT/DOUBLE, rounding, NaN/Infinity | Поддержанные значения представлены правильно; остальные дают документированную ошибку |
-| D04 | DATE/TIME/TIMESTAMP без TZ | Epoch/units, до/после опорной даты, leap day, precision и границы диапазона проверены |
-| D05 | Golden binary fixtures из независимого источника | Codec сверяется с PG format, а не только с собственным decode/encode |
-| D06 | SUM/AVG и другие выражения с расширенной metadata | Выбор codec по результату, не по типу исходной колонки |
-| D07 | RETURNING для INSERT VALUES/SELECT, UPDATE, DELETE | Правильные строки, description, command tags и affected rows; 0/1/many rows |
-| D08 | Ошибка conversion/fetch/commit при RETURNING | Нет ложного успеха и случайных частичных изменений вне transaction contract |
-| D09 | Неподдержанные type/format и malformed binary payload | Отказ до side effects, recovery через Sync, без подмены на text/NULL |
-
-Эталонный PostgreSQL может использоваться в отдельных codec/protocol tests для получения fixtures. Он не участвует в исполнении запросов Firebird endpoint. Синтаксически несовместимые SQL не сравниваются как будто обе СУБД обязаны их принимать.
-
-## 12. Удалённый доступ, отмена и приложение в M3
-
-| ID | Проверка | Ожидание |
-|---|---|---|
-| R01 | TCP с другого узла или изолированного network namespace | Задокументирована реальная топология; listener принадлежит `firebird` |
-| R02 | SSLRequest и TLS, libpq sslmode=verify-full | Успех с корректным trust/hostname; отказ с неверным сертификатом/именем |
-| R03 | Non-loopback без TLS | Password authentication не начинается по открытому каналу |
-| R04 | Partial TLS handshake, EOF, timeout, медленный client | Ограниченные ресурсы и корректный shutdown |
-| R05 | Native WireCrypt/DummyPacketInterval вместе с PG TLS | Оба endpoint работают независимо без смешивания wire bytes |
-| C01 | BackendKeyData и CancelRequest | Отмена активного SQL/lock wait и SQLSTATE 57014 в основном connection |
-| C02 | Неверный/старый key, чужая session | Чужая работа не отменяется; cancel socket закрывается без application attach |
-| C03 | Cancel при completion/disconnect/detach | Нет use-after-free, отмены другой session или зависания |
-| C04 | Запрос после cancellation, autocommit/explicit block | Соответствующие I/E и восстановление через control command |
-| U01 | Startup/session settings выбранного клиента | Поддержанные значения реально применены; неизвестные не подтверждены фиктивно |
-| U02 | Read-only/isolation и transaction control | Реальный TPB/поведение и корректное отражение состояния |
-| U03 | SAVEPOINT/ROLLBACK TO/RELEASE, если нужны приложению | После ошибки возможен заявленный rollback-to и продолжение; изменения до savepoint сохранены |
-| U04 | Reset/reuse/pooling lifecycle, если используется | Нет переноса transaction/settings/identity между логическими sessions |
-| U05 | End-to-end приложения с обычным PostgreSQL-драйвером | Совместимый SQL выполняется Firebird; изменения кода/режима клиента и ограничения явно перечислены |
-| U06 | Native/PG concurrency и cross-visibility в итоговом профиле | Одна реальная база, права и transaction isolation не обходятся |
-
-Для R/U нужен отдельный fixture/harness: исходный Python helper принудительно задаёт loopback, sslmode=disable и фиксированный startup profile. Запуск его без изменений не доказывает ни TLS, ни удалённый доступ, ни поддержку обычных настроек приложения.
-
-Целевое приложение пока не выбрано. До U01 фиксируются его версия, driver/libpq, connection options, wire operations и служебные SQL. Неиспользуемые дополнительные возможности обозначаются как не входящие в профиль; обязательная операция приложения не исключается молча ради успешной приёмки.
-
-## 13. Как развивать исходный Python suite
-
-`tests/test_pgwire_acceptance.py` сохранён без изменения поведения как исходный M1 scaffold. На текущем этапе нельзя выдавать его 56 cases за покрытие M2/M3. Перед расширением implementation разделить проверки на стабильные и зависящие от возможностей этапа:
-
-- `test_returning_rejected_before_changes`: M1 negative; в M2 заменить D07/D08, включая проверку отсутствия незапланированных изменений при ошибке.
-- `test_unsupported_output_types`: перечисленные DATE/TIME/TIMESTAMP/FLOAT/DOUBLE/INT128/NUMERIC(38) становятся положительными cases M2. Негативные проверки остаются для действительно неподдержанных типов.
-- `test_python_date_adapter_remains_unsupported_sql`: остаётся syntax boundary, пока `::date` вне scope, даже после появления DATE codec.
-- Batch rejection остаётся, пока multi-statement profile не реализован. Extended Query допускает один statement в Parse независимо от будущей поддержки Simple Query batches.
-- W12 и W16 меняются согласно таблицам E/C; W08 проверяется с учётом включённой TLS policy.
-- Positive M1 regression сохраняется на M2/M3. Не делать blanket skip/xfail исходного набора и не считать одновременно обязательными взаимоисключающие positive/negative expectations.
-
-Отчёт фиксирует активную capability matrix и выбранные node IDs. Исходное число 56 не является постоянной целью после расширения протокола. В конце каждого этапа отдельно приводятся результаты C++/raw-wire, C libpq, Python, native и architecture/lifecycle suites.
+Обязательно приложить A01/A10 process/provider evidence, auth/identity/policy, parser byte/metadata checks, native visibility, shutdown/module lifetime и capability matrix. Указать точный принятый этап и оставшиеся parser/client dependencies. Работающий SELECT, положительный probe, собранные tests или несколько вручную выбранных driver calls не заменяют обязательные gates.
