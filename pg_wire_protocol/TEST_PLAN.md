@@ -2,7 +2,7 @@
 
 База — `master` Firebird 6, SHA из [BASELINE.md](BASELINE.md). Архитектура и SQL boundary определены в [ARCHITECTURE.md](ARCHITECTURE.md), transaction contract — в [CODEX_CONTEXT.md](CODEX_CONTEXT.md), заявляемые возможности — в [COMPATIBILITY.md](COMPATIBILITY.md).
 
-Исходный Python scaffold содержит 20 тестовых функций / 56 параметризованных случаев и требует миграции. Начальные проверки находятся в `src/common/tests/WireProtocolConfigTest.cpp`, `src/remote/server/wire/tests` и изолированных harness в `tools`. Plugin runner загружает настоящую тестовую библиотеку через PluginManager; transport пока имитируется внутри runner. Это частичное покрытие loading/ownership, а не приёмка TCP listeners, workers или server shutdown. Полные raw-wire/engine/lifecycle suites ещё предстоит реализовать; перечисление проверки в этом документе не означает, что она выполнена. Фактические результаты записаны в VALIDATION.md. Driver-only probe на синтетическом сервере и pytest collection не являются приёмкой Firebird.
+Исходный Python scaffold содержит 20 тестовых функций / 56 параметризованных случаев и требует миграции. Начальные проверки находятся в `src/common/tests/WireProtocolConfigTest.cpp`, `src/remote/server/wire/tests` и изолированных harness в `tools`. Plugin runner проверяет loading/ownership с mock transport; отдельные socket tests используют POSIX sockets. `wire_host_smoke.py` запускает Linux/Super с native SQL и двумя TCP echo endpoints из настоящей тестовой библиотеки: проверяются конфигурация, workers/queues, timeout и server shutdown. PostgreSQL raw-wire/engine suites ещё предстоит реализовать; перечисление проверки в этом документе не означает, что она выполнена. Результаты в VALIDATION.md относятся к указанным там ревизиям; после перехода host на штатный getPluginConfig требуется повторный прогон. Driver-only probe на синтетическом сервере и pytest collection не являются приёмкой Firebird.
 
 ## Этапы и обязательный минимум M0
 
@@ -61,10 +61,13 @@
 | A11 | Super, SuperClassic, Classic | Super тестируется явно; SuperClassic не считается автоматически покрытым Super. Неподдержанные modes диагностируются и сохраняют native |
 | A12 | Другие build paths | CLOOP bindings согласованы; CMake/Windows имеют отдельные build results. Проектный переносимый ABI не выдаётся за проверенную DLL |
 | A13 | Разные bind/TLS/protocol settings через Config двух aliases | Каждый instance получает свою секцию Config. Сохраняются только два positional списка plugins/ports; host проверяет bind/TLS policy. До M3 remote/TLS настройки не включают необъявленную capability; с M3 проверяются разные сертификаты/policies без переноса настроек между endpoints |
+| A14 | Штатный getPluginConfig: module `.conf` fallback для первого alias, named Config для второго | Оба endpoint получают ожидаемые host settings и различимые ответы plugin. Отсутствие named Config само по себе не является ошибкой; NULL getter отклоняет endpoint. Заданные host settings проверяются на тип, диапазон и повтор независимо от источника |
 
 Strict positional validation проверяется отдельно от PluginManager iterator: optional module skipping не должен менять mapping. Конфигурационные ошибки не проверяют изоляцию от segfault в доверенном плагине: весь код работает в одном процессе.
 
-Для A04 дополнительно проверяется отказ implicit Config::getPlugins(TYPE_WIRE_PROTOCOL) и direct loader name с запятой до module entrypoint. Для native-conflict части A06 нужны startup cases с явным RemoteServicePort, override `-p`, RemoteServiceName, отключённым TCP и пересекающимися bind/dual-stack адресами; конфликтный endpoint не должен вызывать module entrypoint, native продолжает работать. Эта часть A06 ожидает интеграции listeners и текущим loader smoke не покрыта.
+Для A04 дополнительно проверяется отказ implicit Config::getPlugins(TYPE_WIRE_PROTOCOL) и direct loader name с запятой до module entrypoint. Для native-conflict части A06 нужны startup cases с явным RemoteServicePort, override `-p`, RemoteServiceName, отключённым TCP и пересекающимися bind/dual-stack адресами; конфликтный endpoint не должен вызывать module entrypoint, native продолжает работать. Результаты прежнего IPv4 loopback smoke с override `-p` записаны в VALIDATION для соответствующей ревизии; текущий вариант требует повторной проверки, остальные варианты — отдельных запусков.
+
+Конфигурация подготавливается до запуска через стандартные средства Firebird. Для разных aliases рекомендуется named Config. Приёмка host не вводит отдельную проверку структуры Plugin/Config blocks или новых правил разрешения конфигурации; она проверяет настройки, возвращённые существующим getter, их defaults и совместную работу endpoint/native.
 
 ## S. Authentication и identity
 

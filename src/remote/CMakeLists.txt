@@ -51,6 +51,10 @@ add_src_unix(fbserver_src
     ../auth/SecureRemotePassword/srp.cpp
     server/os/posix/inet_server.cpp
     server/server.cpp
+    # Additional wire transport belongs to the server, not the client library.
+    server/wire/ProtocolPlugin.cpp
+    server/wire/os/posix/Server.cpp
+    server/wire/os/posix/SocketConnection.cpp
 
     inet.cpp
     merge.cpp

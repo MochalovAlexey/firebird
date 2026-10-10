@@ -5,11 +5,15 @@ server. They are loaded into the server process through the existing plugin
 manager under `IPluginManager::TYPE_WIRE_PROTOCOL`. Native Firebird connections
 continue to use their existing frontend and do not use these interfaces.
 
-This first interface revision provides plugin creation, session ownership and
-host transport contracts. TCP listener startup, database authentication,
-attachments and a production PostgreSQL protocol plugin are separate subsequent
-implementation steps. Registering `WireProtocolPlugins` and `WireProtocolPorts`
-currently supplies configuration infrastructure; it does not start a listener.
+The initial host implementation starts additional TCP listeners on Linux in
+`ServerMode = Super`, using IPv4 loopback only. It provides bounded workers and
+queues, socket transport, session ownership and server shutdown integration.
+SuperClassic and Classic are diagnosed without starting additional listeners;
+their native frontend remains available. Other platforms need separate wiring
+and acceptance. Database authentication, attachments, TLS and a production
+PostgreSQL protocol plugin remain subsequent steps. Recorded checks and coverage
+limits are in `pg_wire_protocol/VALIDATION.md`; earlier runs describe their
+recorded revisions. The current configuration changes require a fresh run.
 
 The interface definitions are in
 [`FirebirdInterface.idl`](../src/include/firebird/FirebirdInterface.idl). The
@@ -50,6 +54,10 @@ Plugin = SecondEndpoint {
 }
 
 Config = FirstConfig {
+    BindAddress = 127.0.0.1
+    Workers = 4
+    QueueSize = 16
+    IOTimeout = 30000
     Label = first
 }
 
@@ -79,19 +87,44 @@ reads the two wire settings together, validates positional pairs, and passes
 one explicit configured name to the loading adapter. A direct adapter call
 also rejects list separators before invoking the plugin manager.
 
-The host must validate endpoint configuration before creating listeners. The
-current loading adapter validates its supplied name and port, but does not
-implement Bind/TLS settings or listener creation. Future transport settings
-belong in named per-alias configuration blocks, without additional positional
-lists. The existing configuration manager can read a named plugin configuration
-before loading its module. Explicit missing Config references and the existing
-differences in ConfigFile resolution need validation by that host layer.
+Before bind or module loading, the host calls the existing
+`IConfigManager::getPluginConfig(name)` and validates its transport settings.
+Configuration uses the standard plugin lookup and file fallback rules; named
+`Config` sections, as shown above, are the usual way to give aliases distinct
+settings. The factory receives its configuration through `IPluginConfig`.
+Prepare the configuration before starting the server. No additional resolver
+or structural rules for `plugins.conf` are introduced. A null lookup result is
+an endpoint error; an omitted host setting in a returned configuration uses the
+documented default.
 
-The same startup layer must reject conflicts with the actual native TCP
-listener before loading wire modules. This gate is still pending along with
-listener integration. Comparing only with `RemoteServicePort` is insufficient:
-command-line port overrides, service-name resolution, disabled TCP, bind address
-and dual-stack behavior must be reflected in the native endpoint metadata.
+| Host setting | Default | Accepted values |
+|---|---|---|
+| `BindAddress` | `127.0.0.1` | Exactly `127.0.0.1` |
+| `Workers` | `4` | Decimal integer from 1 to 16 |
+| `QueueSize` | `16` | Decimal integer from 1 to 64 |
+| `IOTimeout` | `30000` | Decimal milliseconds from 1 to 300000 |
+
+Repeated host settings are errors. Any `Port` entry is rejected: the positional
+list is the only port source. Any `TLS` entry is rejected in this initial
+plaintext profile. Plugin-specific entries remain available to its factory.
+At most 16 endpoints may be configured, with a combined budget of 64 workers.
+A malformed list or excessive endpoint count disables the additional
+configuration. Config, load or bind failure for one endpoint is logged while
+the remaining endpoints and native frontend continue.
+
+The startup hook borrows the already bound native listener and reads its address
+with `getsockname`. Its resolved port includes command-line `-p` and service-name
+resolution. A matching port conflicts with IPv4 wildcard or `127.0.0.1`, an IPv6
+wildcard accepting IPv4, or an overlapping IPv4-mapped address. An IPv6-only
+listener or Unix socket does not reserve the additional IPv4 loopback endpoint.
+Native conflict and successful bind are checked before the wire module loads;
+the native descriptor is never changed or closed by this host.
+
+Configuration is applied at startup. There is no hot reload. A full accepted
+connection queue closes new connections; queued sockets do not create plugin
+sessions until a worker is available. `IOTimeout` bounds queue wait and each
+transport operation. Protocol plugins must additionally bound complete frames
+and startup sequences across partial operations.
 
 ## Interface responsibilities
 
@@ -183,6 +216,14 @@ attachment ownership. It must not turn `stop()` into a blocking cancellation or
 detach operation. Server shutdown must allow providers to terminate active SQL;
 an unconditional join before provider shutdown can deadlock that process.
 
+The Linux host registers `preproviders` and `postproviders` shutdown callbacks.
+The first stops accept, wakes connections and requests session stop without
+joining workers. After provider shutdown, all endpoints share one five-second
+deadline for acceptor and worker completion. Owners are released only after all
+callbacks finish. If the deadline expires, shutdown reports failure and retains
+owners rather than unloading code still in use. This deadline does not make an
+arbitrarily blocking plugin callback safe.
+
 ## Transport I/O
 
 One worker serializes the connection's `read` and `write` calls. Both methods
@@ -227,8 +268,9 @@ The host's explicit stop and transport shutdown remain necessary to wake a
 blocked call.
 
 `log(level, length, message)` accepts `LOG_INFO`, `LOG_WARNING` or `LOG_ERROR`.
-The byte buffer is borrowed for the call; the length is explicit. The host bounds
-and escapes the message and adds endpoint/session identity. It must not treat
+The byte buffer is borrowed for the call; the length is explicit. The initial
+host bounds messages to 512 input bytes, replaces nonprintable bytes and adds
+the configured alias and port. It must not treat
 the supplied message as a format string. Plugins must exclude credentials,
 authentication payloads and SQL parameter values from diagnostics. Logging from
 `stop()` is unsuitable if it can block on I/O or a shared lock.
@@ -260,3 +302,10 @@ The plugin manager may delay module unloading; immediate disappearance from the
 process map is not the ownership contract. Test configuration changes and global
 shutdown in isolated processes because the plugin manager and configuration
 caches are process-wide.
+
+`wire_host_smoke.py` prepares an isolated runtime and starts a real Super server
+with native TCP and two aliases of the test module. Its labelled byte echo
+checks target listeners, queue limits, timeout and shutdown. The test module is
+built under `tests`, is not installed as a production plugin and performs no SQL.
+Only separately recorded successful runs establish acceptance; these fixtures
+do not establish PostgreSQL or authentication support on the additional ports.

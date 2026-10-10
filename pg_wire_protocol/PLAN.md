@@ -4,7 +4,7 @@
 
 PostgreSQL grammar/functions отложены. Все этапы передают SQL существующему parser без wire-классификации и переписывания. Расширение нейтральных parser/DSQL metadata входит в реализацию протокола; принятие нового SQL-синтаксиса — отдельная будущая работа.
 
-Состояние на 9 октября 2026: реализованы global parameters, parser позиционных списков, начальный CLOOP ABI и loader с удержанием plugin/session. Подробные результаты сборки и проверок — [VALIDATION.md](VALIDATION.md). P0/P1 целиком и M0 ещё не завершены; следующий кодовый шаг — строгая конфигурация из snapshot PluginManager, TCP listeners, bounded workers и интеграция startup/shutdown сервера.
+Состояние на 9 октября 2026: добавлены global parameters, начальный CLOOP ABI, loader/session ownership и Linux/Super TCP host с ограниченными workers/queues и startup/shutdown. Host использует существующий getPluginConfig; после изменения конфигурационного пути нужны повторные проверки. Прежние результаты и границы покрытия в [VALIDATION.md](VALIDATION.md) относятся к указанным там ревизиям. P1 не объявляется завершённым для всех платформ/режимов, M0 ещё не реализован. Следующий функциональный этап после приёмки host — P2: PgWire framing, authentication и локальный attachment.
 
 ## P0. База, зависимости и проектирование
 
@@ -22,13 +22,17 @@ PostgreSQL grammar/functions отложены. Все этапы передаю�
 
 Реализовать `WireProtocolPlugins` / `WireProtocolPorts` по ARCHITECTURE: позиционные comma-separated списки, пустой default, проверка до загрузки, отсутствие сдвига портов при недостающем модуле. Native не включается в список. Общая ошибка списков отключает дополнительную конфигурацию с диагностикой; ошибка модуля или bind — его endpoint. Проверить одну тестовую библиотеку с двумя aliases/instances, включая отсутствующее имя между ними.
 
-Bind/TLS и другие endpoint settings хранить в именованных `Config` блоках `plugins.conf`, без дополнительных позиционных списков. До load/bind обеспечить строгую проверку того же cached snapshot, который использует PluginManager: одного `getPluginConfig(configuredName)` недостаточно для обнаружения missing named Config, а `getConfig()` перечитывает файл. Порт имеет один источник — `WireProtocolPorts`; второй Port/override не допускается. Строго проверять missing Config/NULL и отдельно учитывать отличие пути ConfigFile от factory config resolution.
+Endpoint settings получать через существующий `IConfigManager::getPluginConfig(name)` до bind/load, сохраняя стандартный named Config / module `.conf` fallback. NULL — ошибка endpoint. Конфигурацию подготавливать до запуска; для разных aliases рекомендуется named Config в `plugins.conf`, без дополнительных позиционных списков. Проверять значения host settings в возвращённом IConfig. Порт имеет один источник — `WireProtocolPorts`; любой Port в host settings отвергается.
+
+Начальный host принимает только BindAddress=127.0.0.1 и отвергает любой TLS entry. Workers: default 4, диапазон 1–16; QueueSize: default 16, диапазон 1–64; IOTimeout: default 30000 ms, диапазон 1–300000 ms. Повтор host setting — ошибка endpoint. Общие пределы: 16 configured endpoints и 64 workers. Проверить queue-full close, expiration queued socket и timeout реальных transport operations; whole-frame deadlines появятся в protocol plugin.
 
 Общий host разместить в `src/remote/server/wire`, plugin — в `src/plugins/wire/pg`. `dirObjects` не рекурсивен: явно включить host objects в server target, а PG objects — в отдельную shared library и install target. PG codec не линкуется в daemon как встроенный frontend.
 
-Host владеет listeners, transport, workers, registry и shutdown. До загрузки модулей проверяет конфликт с фактическими native TCP endpoints с учётом `-p`, service-name resolution, отключённого TCP и bind/dual-stack; это обязательная часть следующей startup интеграции. ABI не передаёт `rem_port`, platform socket types или STL. Linux/Super проверяется первым; SuperClassic использует общий host с отдельной приёмкой. Windows wiring и Classic/inetd требуют явно определённого дальнейшего scope.
+Host владеет listeners, transport, workers, registry и shutdown. Реализованный startup получает native endpoint через getsockname после bind: `-p` и service-name resolution уже учтены; IPv4 wildcard/loopback и IPv6 dual-stack/mapped overlap проверяются до загрузки wire модуля. Unix-only или IPv6-only native не резервирует IPv4 loopback port. Успешный bind также предшествует load. ABI не передаёт `rem_port`, platform socket types или STL. Начальное включение — Linux/Super; SuperClassic/Classic диагностируются с сохранением native. Windows wiring и приёмка других режимов остаются незакрытой частью scope.
 
-**Готово:** loading/config tests, disabled/default, ошибки endpoint, bounded workers, stop/wakeup и удержание модуля до завершения callbacks. Native продолжает работать. Проверки выполняются на test plugins ещё до SQL.
+В preproviders остановить accept и разбудить transport перед plugin stop без worker join. В postproviders все acceptors/workers разделяют один deadline 5 секунд; при его превышении сообщить ошибку и сохранить owners вместо выгрузки исполняемого модуля. Проверить stop/cleanup idle, queued и partial sessions реального server. SQL/auth cancellation относится к следующим этапам.
+
+**Критерий готовности начального Linux/Super среза:** loading/config/transport tests, disabled/default, ошибки endpoint, bounded workers, stop/wakeup и удержание модуля до завершения callbacks. Native продолжает работать в том же процессе. Проверки выполняются на test plugin ещё до SQL, результаты подтверждаются отдельными PASS в VALIDATION. Полное покрытие Windows и других server modes этим критерием не закрывается.
 
 ## P2. PgWire framing, authentication и attachment
 

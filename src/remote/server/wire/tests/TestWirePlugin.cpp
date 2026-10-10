@@ -94,11 +94,27 @@ public:
 			return;
 		}
 
+		const bool tcp = mode == "tcp_echo";
+		const unsigned peerPort = connection->getPeerPort();
 		if (std::string(connection->getPeerAddress()) != "127.0.0.1" ||
-			connection->getPeerPort() != 43210 || connection->isEncrypted())
+			(tcp ? (peerPort == 0 || peerPort > 65535) : peerPort != 43210) ||
+			connection->isEncrypted())
 		{
 			fail(status);
 			return;
+		}
+		if (tcp)
+		{
+			const std::string greeting = label + '\n';
+			unsigned position = 0;
+			while (position != greeting.size())
+			{
+				const unsigned written = connection->write(status, greeting.size() - position,
+					greeting.data() + position, 0);
+				if ((status->getState() & IStatus::STATE_ERRORS) || written == 0)
+					return;
+				position += written;
+			}
 		}
 
 		char buffer[11];

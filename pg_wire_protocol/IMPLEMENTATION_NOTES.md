@@ -2,21 +2,25 @@
 
 Начало реализации: 9 октября 2026 года. База исходников — master Firebird 6 из BASELINE.md; HEAD до изменений — `d533d51ad2`. Фактические результаты сборки и проверок записываются отдельно в [VALIDATION.md](VALIDATION.md).
 
+Текущий срез P1 добавляет Linux/Super TCP listeners, socket transport, ограниченные workers/queues и startup/shutdown, используя штатный getPluginConfig. После изменения конфигурационного пути нужна повторная приёмка; прежние результаты в VALIDATION относятся к записанным там ревизиям. Authentication/attachment service, production PgWire и TLS ещё отсутствуют. Windows и другие server modes не закрыты этим срезом.
+
 ## Первый срез P1
 
-Первый срез регистрирует глобальные `WireProtocolPlugins` / `WireProtocolPorts` и реализует проверку позиционных пар. Он не загружает wire plugins и не открывает listeners. Оба параметра имеют пустое значение по умолчанию; существующие ConfigKey сохраняют номера, новые добавляются в конец.
+Первый срез зарегистрировал глобальные `WireProtocolPlugins` / `WireProtocolPorts` и проверку позиционных пар; сам parser не загружает plugins и не открывает listeners. Оба параметра имеют пустое значение по умолчанию; существующие ConfigKey сохраняют номера, новые добавлены в конец.
 
 Парсер конфигурации располагается в `src/remote/server/wire/EndpointConfig.h`. Это внутренний header-only компонент generic host; стандартные C++ types здесь не пересекают будущий plugin ABI. Unit tests входят в существующий `common_test` через `src/common/tests`, без создания отдельного test framework.
 
 Список имеет строгий comma-separated формат с ASCII whitespace по краям. Пустые позиции, несовпадающие длины, нечисловые/нулевые/переполненные порты, дубли портов и configured names отклоняются. Для двух endpoints одной factory используются разные aliases в plugins.conf. Configured name не должен содержать разделители, позволяющие превратить один элемент в список при вызове PluginManager.
 
-Пары формируются до загрузки модулей, без фильтрации неизвестных имён. Ошибка проверки не выдаёт частичный список. Будущий host при такой ошибке отключает дополнительную конфигурацию с диагностикой, сохраняя native startup. Проверка конфликта с фактическим native endpoint и bind относится к интеграции host, а не к чистому парсеру строк.
+Пары формируются до загрузки модулей, без фильтрации неизвестных имён. Ошибка проверки не выдаёт частичный список. Host при такой ошибке отключает дополнительную конфигурацию с диагностикой, сохраняя native startup. Проверку фактического native endpoint и bind выполняет Server, а не parser строк.
 
 ## Конфигурация endpoint
 
-Порт задаётся только в WireProtocolPorts. Bind/TLS/limits размещаются в именованном Config соответствующего alias в plugins.conf. Host получает IConfig через `IMaster::getConfigManager()->getPluginConfig(configuredName)` до load/bind; factory получает собственный IPluginConfig штатным путём.
+Порт задаётся только в WireProtocolPorts. Named Config соответствующего alias в plugins.conf — штатный способ разделить limits и protocol settings между instances. Host получает IConfig через существующий `IConfigManager::getPluginConfig(configuredName)` до bind/load; factory получает собственный IPluginConfig штатным путём.
 
-Начальная реализация будет использовать named Config blocks. Нельзя предполагать идентичность произвольного ConfigFile override в двух путях загрузчика; это требует отдельного теста/исправления. Явно отсутствующий Config и NULL не должны приводить к запуску с ослабленной default policy.
+Применяются существующие правила разрешения конфигурации и module-file fallback. Конфигурация подготавливается до запуска; для согласованных host/plugin settings разных aliases рекомендуется named Config. NULL от getPluginConfig означает отказ endpoint. Неуказанные host settings в возвращённом IConfig получают defaults; заданные значения проходят host validation.
+
+Начальные settings: BindAddress=127.0.0.1 без альтернативных адресов; Workers default 4, диапазон 1–16; QueueSize default 16, диапазон 1–64; IOTimeout default 30000 ms, диапазон 1–300000 ms. Повтор host setting запрещён. Любой Port или TLS в Config отклоняется. Максимум 16 configured endpoints и суммарный budget 64 workers; ошибка одного endpoint сохраняет остальные позиции и native frontend.
 
 Расширяемость проверяется одной тестовой библиотекой с двумя aliases и отдельными instances/configs. MissingPlugin между ними сохраняет третьему элементу третий порт. Проверка должна наблюдать и удержание общего module, когда один instance завершается, а второй ещё выполняет callback.
 
@@ -46,12 +50,22 @@ Authentication и TLS upgrade пока отсутствуют в ABI и буду
 
 Тестовый модуль и отдельный runner используют настоящий PluginManager/libfbclient; stream в runner — управляемая имитация partial I/O и блокирующего ожидания. Тестовая библиотека собирается только отдельной целью и не устанавливается в production plugins. Эта проверка не подтверждает TCP transport, server shutdown или PgWire.
 
-До подключения listeners нужно согласовать strict config resolution с кэшированным pluginsConf. Обычный getConfig перечитывает файл, а getPluginConfig и factory используют cached snapshot: отдельная свежая проверка не доказывает корректность фактически загружаемой конфигурации. Legacy fallback не меняется в этом срезе. Доступ к тому же snapshot, missing Config/NULL, ConfigFile и Port override остаются задачей следующей интеграции.
+## Текущий срез P1: Linux/Super TCP host
 
-Следующие части P1: strict host settings, listeners, bounded workers/queues, registry, server startup/shutdown и native coexistence с активным дополнительным endpoint. Затем P2 добавит PgWire framing, общий auth service и локальный attachment. BEGIN/$n остаются отдельной будущей работой parser/DSQL.
+`wire/os/posix/Server.cpp` реализует bind/listen/accept, фиксированные worker slots, ограниченную очередь и registry активных sessions. Запуск подключён к POSIX startup после native bind. Дополнительные listeners включаются только в Super; SuperClassic/Classic получают диагностику с сохранением native. P1 для остальных платформ/режимов остаётся незавершённым.
+
+Host проверяет значения transport settings и конфликт с фактическим native listener, затем выполняет bind и только после его успеха загружает plugin. Полная очередь закрывает новое принятое соединение. Queued socket ещё не имеет plugin session; его ожидание ограничено IOTimeout. Session создаётся в свободном worker; factory callback сериализован, sessions одного instance могут работать параллельно.
+
+`SocketConnection` владеет accepted descriptor с O_NONBLOCK/FD_CLOEXEC. recv/send возвращают partial progress, poll использует steady-clock deadline; EINTR не начинает новый timeout. Нулевой timeout выбирает host default, положительный только сокращает его. SIGPIPE подавляется для записи. Конкурентный shutdown вызывает SHUT_RDWR без close; descriptor закрывается при последнем release, поэтому ожидающий syscall не получает повторно использованный fd. Transport пока plaintext; frame/startup deadlines добавит protocol plugin.
+
+В preproviders host прекращает accept, будит active transports и очищает очередь, запрашивает plugin stop без join. В postproviders задан один общий deadline 5 секунд для acceptors/workers всех endpoints. После завершения callbacks освобождаются session/endpoint/plugin owners. При превышении deadline callback сообщает ошибку и удерживает owners вместо выгрузки работающего кода. Это не средство остановки произвольно зависшего доверенного plugin callback.
+
+Diagnostics содержат alias и port; plugin log ограничивается 512 input bytes, непечатные bytes заменяются, пользовательский текст не становится printf format. Пароли и SQL parameters plugin передавать не должен.
+
+Отдельные проверки реального POSIX transport и `wire_host_smoke.py` используют изолированный runtime, один сервер с native TCP/SQL и двумя test aliases, queue/timeout и shutdown. Конфигурационная часть должна проверять штатный getPluginConfig и fallback вместе с host setting validation. Test echo выдаёт configured label и возвращает bytes; PostgreSQL framing/authentication/SQL он не реализует. Результаты каждого запуска фиксируются только в VALIDATION после выполнения. Следующий функциональный этап P2 добавит PgWire, общий auth service и локальный attachment; BEGIN/$n остаются будущей работой parser/DSQL.
 
 ## Уточнения после review второго среза
 
 ProtocolSession::stop сначала вызывает transport shutdown, затем plugin stop. Это устраняет зависимость пробуждения read от callback плагина, в том числе цикл с ошибочно удерживаемым mutex. Требование неблокирующего plugin stop сохраняется; fixture с mutex намеренно нарушает его, чтобы проверить защитный порядок. Произвольное зависание кода внутри доверенного модуля этим не изолируется.
 
-Native-port conflict остаётся обязательной проверкой следующего startup среза до загрузки модулей. Она должна использовать фактический native TCP endpoint с учётом `-p`, service-name resolution, отключённого TCP и bind/dual-stack. Сравнение только с сырым RemoteServicePort не добавляется в библиотечный loader, не имеющий startup context.
+Native conflict проверяется Server через getsockname borrowed listener после native bind: `-p` и service-name resolution уже разрешены. IPv4 wildcard/127.0.0.1, IPv6 wildcard с IPv4 support и соответствующий mapped address пересекаются с дополнительным loopback listener. Unix и IPv6-only native не резервируют этот IPv4 port. При ошибке определения metadata дополнительный host не запускается; native socket не изменяется. Сравнение с сырым RemoteServicePort не добавляется в библиотечный loader, не имеющий startup context.

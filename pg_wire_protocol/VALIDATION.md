@@ -2,7 +2,7 @@
 
 Дата: 9 октября 2026 года. HEAD до изменений: `d533d51ad2`, baseline master Firebird 6 `bf94598f8deefeb7cc4a8217ee43b3040d5d6650`.
 
-Текущий этап: P0 и два среза P1 — конфигурация, затем ABI/loader/session ownership. PgWire endpoint пока отсутствует; M0–M3 не приняты. Исходные Python acceptance cases не запускались против Firebird и требуют миграции по TEST_PLAN.md. Первый срез ниже относится к HEAD `d533d51ad2`, второй — к `e912b12560` до изменений.
+Текущий этап: P0 и начальный Linux/Super срез P1 — конфигурация, ABI/loader/session ownership, TCP listeners/transport, workers/queues и server lifecycle. Host использует существующий `IConfigManager::getPluginConfig`, интерфейс ConfigManager не расширяется. PgWire endpoint пока отсутствует; M0–M3 не приняты. Исходные Python acceptance cases не запускались против Firebird и требуют миграции по TEST_PLAN.md. Ниже сохранена история проверок; результаты упрощения конфигурации приведены в последнем разделе.
 
 ## Окружение и сборка
 
@@ -143,4 +143,90 @@ ABI/loader/session ownership проверены для этого среза. Py
 - Проверка чувствительности тестов: отдельные копии loader под `/tmp` с прежним порядком stop и разрешённой запятой отклонены harness. Первая достигает страховочного timeout, вторая преждевременно загружает модуль. Рабочие исходники и binaries при этом не заменялись; итог — `/tmp/firebird-pgwire-review-mutants-20261009/summary.json`.
 - Native TCP smoke — PASS, все 9 checks, shutdown exit 0. Изолированная копия `/tmp/firebird-pgwire-native-review-20261009`, port 51649, Super/Srp256/TCPv4, версия `LI-T6.0.0.2199-dev`.
 
-Native-port conflict ещё не проверяется кодом: server startup/listeners остаются следующим срезом. ARCHITECTURE/PLAN/TEST_PLAN уточнены: до загрузки модулей нужны фактические native endpoints с учётом `-p`, service-name resolution, disabled TCP и bind/dual-stack. Эта часть A06 не принята.
+На момент этого среза native-port conflict ещё не проверялся кодом: server startup/listeners оставались следующим срезом. ARCHITECTURE/PLAN/TEST_PLAN уточнены: до загрузки модулей нужны фактические native endpoints с учётом `-p`, service-name resolution, disabled TCP и bind/dual-stack. Результат следующего среза приведён ниже.
+
+## Третий срез P1: strict Config и Linux/Super TCP host
+
+Этот раздел сохраняет результаты первоначального варианта host. По решению пользователя расширение ConfigManager и отдельный strict resolver затем удалены; соответствующие config tests ниже относятся только к тому варианту. Актуальное поведение и повторная проверка описаны в следующем разделе.
+
+9 октября 2026 года, HEAD до изменений `3e9fa366e2`. В той же Linux/Debug сборке реализованы строгий lookup named Config на cached snapshot PluginManager, TCP host, POSIX transport и startup/shutdown integration. `IConfigManager` расширен до версии 4 с сохранением legacy lookup; C++, Pascal и C bindings обновлены штатным `updateCloopInterfaces`.
+
+```sh
+cd /tmp/firebird-pgwire-build
+./config.status --file=gen/Makefile:builds/posix/Makefile.in --file=gen/make.shared.variables:builds/posix/make.shared.variables
+make -j4 > p1-host-checked-build.log 2>&1
+make -C gen -j4 TARGET=Debug wire_tests /tmp/firebird-pgwire-build/gen/Debug/firebird/tests/common_test > p1-host-checked-tests-build.log 2>&1
+gen/Debug/firebird/tests/common_test --run_test=WireProtocolConfigTests --report_level=detailed --log_level=error > p1-host-config-tests.log 2>&1
+gen/Debug/firebird/tests/common_test --run_test=CommonClassesSuite/ConfigFileTests --report_level=detailed --log_level=error > p1-host-config-regression.log 2>&1
+```
+
+Все команды PASS. Полная штатная сборка включает host/transport в daemon. WireProtocolConfigTests: 12 cases / 171 assertions; существующие ConfigFileTests: 3 cases / 4 assertions. C binding проверен `gcc -std=c11 -Wall -Wextra -Werror -fsyntax-only` для нового lookup, его версии/flag и прежних wire interfaces; sources — `wire_config_c_check.c` и `wire_abi_c_check.c` в build directory. Pascal compiler отсутствует.
+
+Из корня workspace выполнены:
+
+```sh
+python3 pg_wire_protocol/tools/plugin_config_smoke.py \
+  --firebird-dir /tmp/firebird-pgwire-build/gen/Debug/firebird \
+  --work-dir /tmp/firebird-pgwire-plugin-config-20261009
+python3 pg_wire_protocol/tools/wire_plugin_smoke.py \
+  --firebird-dir /tmp/firebird-pgwire-build/gen/Debug/firebird \
+  --work-dir /tmp/firebird-pgwire-plugin-host-20261009
+LD_LIBRARY_PATH=/tmp/firebird-pgwire-build/gen/Debug/firebird/lib \
+  /tmp/firebird-pgwire-build/gen/Debug/firebird/tests/wire_socket_test
+python3 pg_wire_protocol/tools/wire_host_smoke.py \
+  --firebird-dir /tmp/firebird-pgwire-build/gen/Debug/firebird \
+  --work-dir /tmp/firebird-pgwire-host-tcp-20261009
+python3 pg_wire_protocol/tools/native_baseline.py \
+  --firebird-dir /tmp/firebird-pgwire-build/gen/Debug/firebird \
+  --work-dir /tmp/firebird-pgwire-native-host-disabled-20261009
+```
+
+| Проверка | Результат |
+|---|---|
+| Strict plugin config | PASS: 26 изолированных cases; missing/duplicate Plugin/Config, ConfigFile, nested reference, loader keys, includes/case, legacy fallback и bad arguments |
+| Общий config snapshot | PASS: после инициализации cache и замены файла strict lookup и factory видят исходный named Config |
+| ABI/plugin lifecycle regression | PASS: настоящая shared library, aliases/failure paths/ownership/stop, mock transport |
+| POSIX socket transport | PASS: partial I/O, EOF, deadline/clamping, EINTR, sticky shutdown, пробуждение read, fd ownership/setup failure, TCP backpressure и broken peer без SIGPIPE |
+| Native + два wire aliases | PASS: native SQL и два дополнительных TCP listener в одном процессе; одна test library, разные Config/instances; Missing между aliases не сдвигает ports |
+| Ошибки endpoint | PASS: отсутствующий Config, Port override, remote bind, TLS, duplicates и недопустимые Workers/QueueSize/IOTimeout; валидные endpoints и native работают |
+| Workers/queue/deadline | PASS: переполнение закрывает лишний socket, queued client получает worker после освобождения, queued socket истекает при занятом worker, idle read завершается по timeout |
+| Server shutdown | PASS: SIGTERM пробуждает idle/partial sessions, session release предшествует plugin/module cleanup, exit 0 без forced kill |
+| Native-port conflict | PASS: `-p` отличается от RemoteServicePort; конфликт с фактическим портом отклонён до module entrypoint, native SQL работает |
+| Пустые списки по умолчанию | PASS: 9 native baseline checks — Srp256/TCPv4, вычисляемый SELECT, identity, commit/rollback, неверный пароль, reconnect и shutdown exit 0 |
+
+Сетевые проверки запускались с разрешённым локальным TCP вне sandbox. Каждый server harness использует отдельные runtime/security DB/data/locks под `/tmp`; пароли генерируются в памяти и не попадают в argv или отчёт. Все тестовые серверы остановлены.
+
+Свидетельства: `summary.json` и соседние logs/events в указанных work directories. Transport log — `/tmp/firebird-pgwire-build/p1-host-socket-tests.log`. В coexist run native port 50237, First 55369, Second 33753; shutdown 0.114 секунды. Native conflict run: фактический port 57697 при configured 45271, shutdown 0.114 секунды. Default-disabled native run: port 35041. Это временные порты конкретного запуска; harness выбирает свободные заново.
+
+В CMake UNIX server source list добавлены три host objects, чтобы POSIX startup hook имел реализацию. `cmake -P /tmp/firebird-wire-cmake-check.cmake` — PASS: declarations включают каждый существующий source ровно один раз в UNIX fbserver, без добавления в client library/Windows target. Это проверка source lists; отдельная полная CMake-сборка, Windows, SuperClassic/Classic runtime, service-name/Unix-only/IPv6 native cases пока не проверялись. Проверка конфликта использует `getsockname`, но runtime PASS выше относится только к IPv4 loopback с `-p`. Общие максимумы 16 endpoints / 64 workers заданы кодом; их граничная нагрузочная приёмка остаётся отдельной проверкой.
+
+После обновления комментариев firebird.conf финальный `make -j4 > p1-host-packaging-build.log 2>&1` — PASS, exit 0. Python AST четырёх tools, локальные ссылки 13 документов и `git diff --check` — PASS.
+
+Начальный Linux/Super host проверен с тестовым byte echo. Он не реализует PostgreSQL framing, authentication или SQL. Следующий функциональный этап — P2; полное межплатформенное покрытие P1 и M0 этим результатом не закрываются.
+
+## Упрощение конфигурации: существующий ConfigManager
+
+9 октября 2026 года, тот же HEAD `3e9fa366e2`. По решению пользователя host переведён на существующий `getPluginConfig(name)` со штатными правилами разрешения конфигурации. Конфигурация подготавливается до запуска сервера. Новый метод, flag и strict resolver удалены, отдельные PluginConfigSmoke/tool и build target также удалены. Проверки transport settings и native-port conflict сохранены.
+
+После штатного `updateCloopInterfaces` IDL, C++/Pascal bindings и `PluginManager.cpp` побайтно совпадают с HEAD. Generated C binding имеет прежнюю `IConfigManager_VERSION == 3`; `gcc -std=c11 -Wall -Wextra -Werror -fsyntax-only` для `wire_config_existing_api_check.c` и `wire_abi_c_check.c` в build directory — PASS.
+
+`wire_host_smoke.py` теперь проверяет первый alias через module `.conf` fallback, второй — через named Config. Greeting первого alias подтверждает чтение настроек factory, проверки его Workers/QueueSize/IOTimeout — чтение host. Отдельный отказ из-за отсутствия named Config больше не требуется. Результаты strict resolver из предыдущего раздела не являются проверкой текущего кода.
+
+```sh
+cd /tmp/firebird-pgwire-build
+./config.status --file=gen/Makefile:builds/posix/Makefile.in --file=gen/make.shared.variables:builds/posix/make.shared.variables > p1-config-api-revert-make.log 2>&1
+make -C gen TARGET=Debug updateCloopInterfaces > p1-config-api-revert-cloop.log 2>&1
+make -j4 > p1-config-api-revert-build.log 2>&1
+make -C gen -j4 TARGET=Debug wire_tests > p1-config-api-revert-wire-tests-build.log 2>&1
+cd /home/aleksey/dev/my_firebird/firebird
+python3 -B pg_wire_protocol/tools/wire_plugin_smoke.py \
+  --firebird-dir /tmp/firebird-pgwire-build/gen/Debug/firebird \
+  --work-dir /tmp/firebird-pgwire-plugin-config-revert-20261009
+python3 -B pg_wire_protocol/tools/wire_host_smoke.py \
+  --firebird-dir /tmp/firebird-pgwire-build/gen/Debug/firebird \
+  --work-dir /tmp/firebird-pgwire-host-file-fallback-20261009
+```
+
+Все команды PASS, exit 0. Plugin smoke подтвердил загрузку/ошибки/ownership и порядок stop/release с настоящей библиотекой. TCP host smoke: 11 checks PASS, включая file fallback для host и factory, named Config второго alias, native SQL/auth/transactions, queue/worker limits, timeouts, конфигурационные ошибки endpoint, конфликт фактического native-порта и shutdown. Оба тестовых сервера завершились с exit 0 без forced kill; summary/logs сохранены в указанных work directories. Сетевой запуск выполнен с разрешённым локальным TCP на изолированном runtime под `/tmp`.
+
+Python AST оставшихся трёх tools, ссылки документации и `git diff --check` — PASS. Интерфейс ConfigManager, его реализация и сгенерированные C++/Pascal bindings в текущем рабочем дереве не отличаются от HEAD до среза TCP host.

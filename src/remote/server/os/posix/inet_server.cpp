@@ -85,6 +85,7 @@
 #include "../remote/inet_proto.h"
 #include "../remote/server/serve_proto.h"
 #include "../remote/server/ReplServer.h"
+#include "../remote/server/wire/Server.h"
 #include "../yvalve/gds_proto.h"
 #include "../common/utils_proto.h"
 #include "../common/classes/fb_string.h"
@@ -404,6 +405,8 @@ int CLIB_ROUTINE main( int argc, char** argv)
 
 		// activate paths set with -e family of switches
 		ISC_set_prefix(0, 0);
+		if (!super)
+			WireProtocol::startServer(-1, false);
 
 		// set shutdown signals handler for listener
 		if (standaloneClassic)
@@ -691,6 +694,8 @@ int CLIB_ROUTINE main( int argc, char** argv)
 		}
 
 		fb_shutdown_callback(NULL, closePort, fb_shut_exit, port);
+		if (super)
+			WireProtocol::startServer(port->port_handle, Config::getServerMode() == MODE_SUPER);
 
 		SRVR_multi_thread(port, INET_SERVER_flag);
 

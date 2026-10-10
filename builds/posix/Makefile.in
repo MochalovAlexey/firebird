@@ -920,6 +920,7 @@ run_tests_process: tests_process
 # module out of $(PLUGINS), production dependencies and installation targets.
 WIRE_TEST_PLUGIN = $(FB_TESTS_DIR)/$(LIB_PREFIX)WireTestPlugin.$(SHRLIB_EXT)
 WIRE_TEST_SMOKE = $(FB_TESTS_DIR)/wire_plugin_smoke$(EXEC_EXT)
+WIRE_SOCKET_TEST = $(FB_TESTS_DIR)/wire_socket_test$(EXEC_EXT)
 PYTHON ?= python3
 
 .PHONY: wire_tests wire_tests_process run_wire_tests run_wire_tests_process
@@ -927,13 +928,18 @@ PYTHON ?= python3
 wire_tests:
 	$(MAKE) TARGET?=$(DefaultTarget) wire_tests_process
 
-wire_tests_process: $(WIRE_TEST_PLUGIN) $(WIRE_TEST_SMOKE)
+wire_tests_process: $(WIRE_TEST_PLUGIN) $(WIRE_TEST_SMOKE) $(WIRE_SOCKET_TEST)
 
 $(WIRE_TEST_PLUGIN): $(Wire_Test_Plugin_Objects) | $(LIBFIREBIRD_BASENAME)
 	@mkdir -p $(dir $@)
 	$(LINK_PLUGIN) $(call LIB_LINK_SONAME,$(notdir $@).0) -o $@ $^ $(LINK_PLUG_LIBS) $(FIREBIRD_LIBRARY_LINK)
 
 $(WIRE_TEST_SMOKE): $(Wire_Test_Objects) $(Wire_Server_Objects) $(COMMON_LIB) | $(LIBFIREBIRD_BASENAME)
+	@mkdir -p $(dir $@)
+	$(EXE_LINK) $(EXE_LINK_OPTIONS) $^ -o $@ $(FIREBIRD_LIBRARY_LINK) $(LINK_LIBS)
+
+$(WIRE_SOCKET_TEST): $(Wire_Socket_Test_Objects) $(call dirOs,remote/server/wire) $(COMMON_LIB) \
+		$(call makeObjects,remote/server/wire,ProtocolPlugin.cpp) | $(LIBFIREBIRD_BASENAME)
 	@mkdir -p $(dir $@)
 	$(EXE_LINK) $(EXE_LINK_OPTIONS) $^ -o $@ $(FIREBIRD_LIBRARY_LINK) $(LINK_LIBS)
 

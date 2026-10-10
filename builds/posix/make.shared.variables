@@ -89,7 +89,8 @@ AllObjects += $(Static_Client_Interface_Object)
 # Real shared-module integration tests; not linked into production plugins.
 Wire_Test_Plugin_Objects:= $(call makeObjects,remote/server/wire/tests,TestWirePlugin.cpp)
 Wire_Test_Objects:= $(call makeObjects,remote/server/wire/tests,WirePluginSmoke.cpp)
-AllObjects += $(Wire_Test_Plugin_Objects) $(Wire_Test_Objects)
+Wire_Socket_Test_Objects:= $(call makeObjects,remote/server/wire/tests,SocketConnectionTest.cpp)
+AllObjects += $(Wire_Test_Plugin_Objects) $(Wire_Test_Objects) $(Wire_Socket_Test_Objects)
 
 
 # Chacha plugin
