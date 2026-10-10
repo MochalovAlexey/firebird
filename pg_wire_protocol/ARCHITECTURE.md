@@ -2,7 +2,7 @@
 
 Дополнительные wire-протоколы реализуются динамическими плагинами внутри процесса `firebird`. Первый плагин — PostgreSQL. Общая серверная инфраструктура управляет TCP listeners, соединениями и workers; плагин реализует конкретный протокол и обращается к локальному движку через интерфейсы Firebird. Родной frontend сохраняет свой путь запуска, настройки, XDR и обработку запросов.
 
-Документ описывает целевую архитектуру и границы текущего среза. Linux/Super host P1 со штатным ConfigManager прошёл проверки, записанные в VALIDATION. В P2 добавлены общий authentication/attachment bridge и отдельный PgWire module со Startup/framing; целевые Linux/Super проверки этого среза прошли, см. [VALIDATION.md](VALIDATION.md). SQL execution начинается в P3, каждый корректный Query пока получает 0A000. TLS, Windows wiring/runtime и другие server modes не приняты. Требование пользователя об отсутствии SQL-разбора во frontend применяется ко всем этапам.
+Документ определяет host/plugin contract и границы SQL. P4 с ограниченным lexer внутри плагина и существующими engine interfaces принят в целевом Linux/Super loopback профиле. Сборка, unit tests и повторные SQL/lifecycle/startup/native проверки прошли; evidence и исторические результаты находятся в [VALIDATION.md](VALIDATION.md). Следующий этап — P5: explicit I/T/E и session controls. TLS, Windows и другие server modes требуют отдельной реализации и приёмки.
 
 ## Разделение ответственности
 
@@ -26,31 +26,27 @@ flowchart LR
 | Общий wire host | Конфигурация endpoints, загрузка плагинов, bind/listen/accept, byte transport, peer metadata, лимиты, workers, registry, остановка |
 | Host authentication/attachment bridge | Разрешённые aliases, проверка credentials, per-database policy, доверенный auth block, настоящий remote address, engine-only attachment |
 | Плагин PgWire | Framing, Startup, PostgreSQL authentication messages, Simple/Extended Query state, codecs, errors, prepared statements/portals |
-| DSQL и parser | Разбор SQL, классификация операций, входные/выходные metadata, подготовка и исполнение |
+| DSQL и parser | Полная проверка SQL, штатные input/output metadata, подготовка и реальное исполнение |
 
 Native не включается в список дополнительных плагинов и не переводится на новый ABI. Дополнительные listeners не вызывают вторую независимую `SRVR_multi_thread()` и не используют native `PACKET`/XDR. Между плагином и движком нет TCP/Unix socket connection, gateway или отдельного серверного процесса.
 
 Плагины являются доверенным кодом в одном процессе. Модульная структура изолирует исходники и ABI, но не защищает процесс от аварии внутри DLL. Доступность native при ошибках дополнительного endpoint означает сохранение работы при предусмотренных конфигурационных, загрузочных, bind и session errors.
 
-## SQL целиком разбирается движком
+## SQL: ограниченная классификация в плагине, проверка и исполнение в движке
 
-Начиная с P3, после проверки структуры wire-сообщения плагин передаёт SQL движку с явной длиной, без изменения SQL bytes. Завершающий NUL сообщения PostgreSQL является частью wire framing и не входит в текст SQL. UTF8 проверяется как encoding, а не как SQL grammar.
+SQL передаётся в engine prepare целиком, с исходной byte length и без изменения текста. Ограниченный lexer внутри PgWire определяет вид команды, command tag, профиль transaction/session controls и признак tokenless EMPTY. Он учитывает comments, строки и quoted identifiers, но не проверяет grammar, имена объектов, privileges или типы. Общий wire host SQL не анализирует.
 
-Плагин и общий host не выполняют:
+После успешного engine prepare плагин сочетает lexical descriptor с существующими `getType()`, `getFlags()`, input/output metadata и affected records. `FLAG_HAS_CURSOR` выбирает cursor/fetch; output metadata определяет singleton output и codecs. RETURNING не превращает DML в SELECT. Неподдержанный control либо UNKNOWN, включая USING wrapper, получает 0A000 до execution; ошибка самого prepare сохраняет приоритет. Новые публичные DSQL getInfo items, AST annotations и parser diagnostics для PgWire не добавляются.
 
-- поиск SQL keywords, распознавание BEGIN/COMMIT/ROLLBACK или DDL по тексту;
-- tokenization комментариев, строк и quoted identifiers;
-- разделение SQL по `;`, удаление комментариев или анализ «пустоты» через SQL lexer;
-- определение RETURNING, statement kind и command tag через regex или префиксы;
-- замену `$1` на `?`, перестановку SQL fragments или иную SQL-трансляцию.
+Запрещены SQL rewriting, удаление comments из передаваемого текста, разбиение batches, замена `$n` на `?`, подстановка параметров SQL-литералами и эмуляция успешного SET/BEGIN. Совместимость синтаксиса и реальное исполнение определяет только Firebird. Неподдержанный batch передаётся parser целиком и отвергается без частичных эффектов.
 
-Message type, длина payload, имена prepared statements/portals и форматы Bind разбираются плагином: это поля wire-протокола. SQL внутри Query/Parse остаётся входом штатного parser. Нулевую длину SQL payload можно установить из framing; смысл whitespace/comment-only SQL устанавливает parser.
+EMPTY определяется ограниченным lexer только для нулевой строки, whitespace и полностью закрытых comments без SQL tokens. Даже такой текст передаётся в обычный engine prepare неизменённым. Только сочетание этого признака с engine syntax error 42601 после успешного cleanup преобразуется в EmptyQueryResponse; permission, cancellation, resource и другие ошибки не маскируются. Незаконченные строка/comment/statement и отдельный `;` остаются parser errors. Native parser diagnostics и `isql -autoterm` не меняются.
 
-CommandComplete и transaction transitions формируются по результату разбора/исполнения и DSQL metadata. Если существующие `getType()`, `getFlags()`, affected records и transaction handles не сообщают достаточно информации, добавить нейтральные semantic metadata на стороне DSQL. Они описывают операцию Firebird и не содержат готовые PostgreSQL responses. Плагин кодирует wire tag из этих данных.
+Одна implicit READ COMMITTED/write/nowait application transaction охватывает prepare/execute/open/fetch. Результат передаётся потоком, handles освобождаются до commit, CommandComplete выдаётся только после успешного commit. Ошибка вызывает rollback; неопределённое состояние после commit/cleanup требует закрытия connection. IOTimeout задаёт также engine statement timeout, но не hard deadline prepare.
 
-Неподдержанный SQL, включая PostgreSQL `BEGIN` или параметры `$n`, пока получает ошибку штатного parser. Их поддержка требует отдельного будущего расширения parser/DSQL и тестов. В частности, Extended Query transport можно реализовать и проверить с совместимым SQL, но обычные параметризованные вызовы libpq с `$n` нельзя объявлять поддержанными до появления соответствующей поддержки в parser. Значения Bind преобразуются в buffers по metadata уже подготовленного запроса; текст запроса при этом не переписывается.
+Текущие text codecs: SMALLINT/INTEGER/BIGINT, BOOLEAN, CHAR/VARCHAR, NUMERIC/DECIMAL в SHORT/LONG/INT64 и NULL. CHAR читается через varying fetch metadata с сохранением logical OID и пробелов. Ограничения output/input проверяются до исполнения по штатным metadata.
 
-Для неподдержанных statement capabilities или codecs отказ до исполнения основывается на metadata после prepare. Ограничение batches проверяется поведением parser; frontend не ищет второй statement самостоятельно. Нехватка metadata фиксируется как задача DSQL, а не обходится дополнительным lexer.
+Будущий P5 расширяет plugin-local control descriptor для retaining/savepoints/session actions и использует реальные transaction handles. PostgreSQL BEGIN и `$n` остаются ошибками native parser до отдельного будущего расширения grammar/functions. Это расширение не входит в текущий рефакторинг.
 
 ## Загрузка через существующий PluginManager
 
@@ -154,7 +150,7 @@ Config = PgRemoteConfig {
 }
 ```
 
-`BindAddress` — реализованная host setting с единственным допустимым значением `127.0.0.1`. PgRemote иллюстрирует будущий удалённый профиль; текущий host отвергает его запуск, без перехода на иной адрес. PgWire собирается отдельной production library; в P2 доступен startup/authentication, SQL execution ещё отсутствует. Module/RegisterName совпадают, но aliases получают отдельные configurations и instances; library остаётся общей до завершения обоих endpoints.
+`BindAddress` — реализованная host setting с единственным допустимым значением `127.0.0.1`. PgRemote иллюстрирует будущий удалённый профиль; текущий host отвергает его запуск, без перехода на иной адрес. PgWire собирается отдельной production library; P2 startup/authentication проверен, P3 SELECT execution принят в целевом Linux/Super M0. Module/RegisterName совпадают, но aliases получают отдельные configurations и instances; library остаётся общей до завершения обоих endpoints.
 
 Host использует существующий `IMaster::getConfigManager()->getPluginConfig(configuredName)` до bind/load и проверяет полученные transport settings. Разрешение конфигурации и fallback к module `.conf` остаются штатными. Named `Config` — обычный способ задать разные настройки aliases, а не обязательное условие загрузки. Factory получает конфигурацию через существующий `IPluginConfig::getDefaultConfig()`.
 
@@ -220,7 +216,7 @@ TLS реализуется поверх byte transport дополнительн�
 - `src/remote/server/wire/Authentication.cpp`: transport-neutral Srp256/attachment helper без зависимости от PgWire или активного EDS attachment;
 - `src/plugins/wire/pg/`: PostgreSQL messages, session, Simple/Extended exchanges, codecs и diagnostics;
 - `src/include/firebird/FirebirdInterface.idl`: новый plugin type и ABI;
-- существующие DSQL/parser файлы: только согласованные neutral metadata; будущий PostgreSQL syntax выделяется в самостоятельный scope.
+- DSQL/parser и публичные statement info interfaces сохраняются; будущий PostgreSQL syntax выделяется в самостоятельный scope.
 
 В `Remote_Server` входит generic host, а PgWire собирается отдельной shared library в plugins. PostgreSQL-specific objects не включаются в `Remote_Common`, libfbclient common transport или сам `FB_DAEMON`. Штатная линковка плагина с public/runtime libraries допускается и не означает вторичного сетевого подключения. Private DSQL classes и `thread_db` не становятся ABI плагина.
 
@@ -240,8 +236,9 @@ TLS реализуется поверх byte transport дополнительн�
 | Windows startup | `src/remote/server/os/win32/srvr_w32.cpp`: start_connections_thread |
 | Shutdown | `src/yvalve/why.cpp`: Dispatcher::shutdown; `src/remote/server/server.cpp`: set_server, pre_shutdown |
 | Auth bridge | `src/remote/server/wire/Authentication.cpp`: authenticateAndAttach; native/EDS образцы: DatabaseAuth::accept и ValidatePassword.cpp |
-| PostgreSQL module | `src/plugins/wire/pg/Protocol.{h,cpp}`: framing/codec; `PgWire.cpp`: plugin/session |
+| PostgreSQL module | `src/plugins/wire/pg/Protocol.{h,cpp}`: framing; `ResultCodec.{h,cpp}`: scalar results; `PgWire.cpp`: plugin/session; `Execute.cpp`: unchanged SQL через engine interfaces; `ErrorStatus.cpp`: full-vector diagnostics и explicit SQLSTATE fallback |
+| SQL classification | `src/plugins/wire/pg/SqlInfo.{h,cpp}`: ограниченный plugin-local descriptor; `Execute.cpp` использует штатные getType/getFlags/input/output/affected records |
 | POSIX objects/targets | `builds/posix/make.shared.variables`: Remote_Server и plugin object sets; `builds/posix/Makefile.in`: plugins, updateCloopInterfaces |
 | Другие build paths | `src/CMakeLists.txt`; `builds/win32/make_boot.bat`; `builds/win32/msvc15` |
 
-Существующие правила PluginManager подтверждены исходниками зафиксированного baseline. ABI и Linux/Super transport/server host добавлены в рабочую реализацию; конфигурация использует штатный API. Фактическая приёмка хранится в VALIDATION и не выводится из этого описания. Authentication/attachment bridge и PgWire Startup реализованы в P2; целевые Linux/Super проверки прошли по [VALIDATION.md](VALIDATION.md). SQL execution/P3, TLS и остальные платформы/режимы остаются следующими этапами.
+Существующие правила PluginManager подтверждены исходниками baseline. ABI и Linux/Super host используют штатный config API. P4 с ограниченным lexer внутри плагина и существующими engine interfaces принят в целевом Linux/Super loopback профиле. Сборка, unit tests и повторные SQL/lifecycle/startup/native проверки прошли; evidence и исторические результаты находятся в [VALIDATION.md](VALIDATION.md). Следующий этап — P5: explicit I/T/E и session controls. TLS, Windows и другие server modes требуют отдельной реализации и приёмки.

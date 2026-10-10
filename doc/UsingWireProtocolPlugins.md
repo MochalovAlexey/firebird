@@ -10,12 +10,14 @@ The initial host implementation starts additional TCP listeners on Linux in
 queues, socket transport, session ownership and server shutdown integration.
 SuperClassic and Classic are diagnosed without starting additional listeners;
 their native frontend remains available. Other platforms need separate wiring
-and acceptance. P2 adds host authentication and local attachments, and a separate
-`PgWire` production module providing PostgreSQL startup. The targeted
-Linux/Super P2 checks passed; SQL execution and TLS remain subsequent steps.
-Recorded checks and coverage limits are in `pg_wire_protocol/VALIDATION.md`,
-including the completed P1 run using the existing configuration API. Those P1
-results are separate from the recorded P2 startup/authentication checks.
+and acceptance. P2 added host authentication and local attachments, and a separate
+`PgWire` production module providing PostgreSQL startup. P3 introduced query
+execution; the current P4 implementation supports Simple Query DML/DDL,
+RETURNING, procedures/blocks and basic result codecs. Completion classification
+now belongs to the PgWire plugin and uses the existing engine API. The refactor
+passed targeted Linux/Super checks; explicit transaction/session controls are P5, while TLS
+remains a later step. Recorded checks and coverage limits are in
+[`VALIDATION.md`](../pg_wire_protocol/VALIDATION.md).
 
 The interface definitions are in
 [`FirebirdInterface.idl`](../src/include/firebird/FirebirdInterface.idl). The
@@ -147,9 +149,11 @@ PgWire checks its version before calling them. TLS upgrade requires a later
 transport interface version.
 
 Database access uses the host's authentication and local attachment service.
-Plugins must not create a secondary native network connection. Any SQL executor
-added later must pass SQL unchanged to the Firebird parser; these interfaces are
-not a SQL rewriting or classification layer.
+Plugins must not create a secondary native network connection. The PgWire SQL
+executor passes the entire SQL text unchanged to the Firebird parser with an
+explicit byte length. Its limited leading-command classifier is contained in
+the plugin; the host ABI and engine SQL parser remain protocol-independent.
+Classification does not rewrite, split or validate SQL.
 
 ## Session creation and lifetime
 
@@ -292,7 +296,7 @@ detach or drop it. Child statement, transaction and other interfaces retain
 their usual ownership rules. Close child interfaces before
 `detachDatabase(status, attachment)`, which invalidates the borrowed handle even
 on error. The host also closes attachments left after `run()` returns. Neither
-this API nor the generic host imposes PgWire's future single-transaction rule on
+this API nor the generic host imposes PgWire's single-transaction rule on
 other plugins.
 
 The P2 helper exchanges `Srp256` client/server plugin messages in memory, provided
@@ -355,7 +359,7 @@ built under `tests`, is not installed as a production plugin and performs no SQL
 Only separately recorded successful runs establish acceptance; these fixtures
 do not establish PostgreSQL or authentication support on the additional ports.
 
-## PgWire startup profile (P2, Linux/Super checks passed)
+## PgWire startup profile (Linux/Super)
 
 POSIX and CMake production build definitions include a separate `PgWire` shared
 module. Its code is not linked into the native daemon frontend. Windows server
@@ -393,14 +397,91 @@ bodies to 4096 bytes including NUL. Length checks precede allocation; string
 boundaries and UTF8 are validated. AuthenticationOk follows successful engine
 attach. Startup then reports encoding, DateStyle, application name and the
 compatibility token `16.0 (Firebird pgwire prototype)`, and ends with ReadyForQuery
-`I`. Every structurally valid Query receives `0A000` and ReadyForQuery `I`,
-including empty or incompatible SQL. No SQL text is parsed or classified by the
-wire layer. P3 adds execution through the Firebird parser and the first M0 SELECT.
+`I`. The recorded P2 implementation returned `0A000` for every structurally valid
+Query. The current Simple Query executor replaces that temporary response.
+Firebird prepares and validates the complete SQL before the plugin uses its
+limited completion classification.
 
 `ProtocolTest.cpp` tests framing and literal response bytes with partial I/O.
 `pgwire_startup_smoke.py` exercises the loaded module, raw PostgreSQL startup,
 authentication, native monitoring and session cleanup on an isolated runtime.
-The targeted Linux/Super run passed all 52 startup harness checks using libpq
-14.24. Results, commands and remaining coverage limits are recorded in
-[`VALIDATION.md`](../pg_wire_protocol/VALIDATION.md). Startup and the test echo do
-not constitute M0; engine SQL execution starts in P3.
+Results, commands and coverage limits are recorded in
+[`VALIDATION.md`](../pg_wire_protocol/VALIDATION.md). Startup checks and the test
+echo do not establish SQL execution support; query acceptance is recorded
+separately.
+
+## PgWire Simple Query profile (P4, Linux/Super checks passed)
+
+`Execute.cpp` sends the complete Query SQL and its explicit byte length to engine
+prepare; only the framing NUL is excluded. The original SQL is never rewritten
+or split into statements. Firebird remains responsible for syntax, names,
+permissions and execution semantics. Unsupported PostgreSQL syntax, including
+standalone BEGIN and `$n` parameters, receives the engine's error.
+
+After successful prepare, the plugin's `SqlInfo.cpp` classifies the leading
+command for CommandComplete and current capability checks. It skips native
+whitespace and comments, treats quoted strings/identifiers as opaque tokens and
+reads only the prefix needed to distinguish a command or DDL object. It does not
+parse expressions, walk CTE bodies or implement PostgreSQL grammar. The existing
+statement type independently blocks transaction operations; session commands
+and unclassified prefixes, including USING wrappers, receive `0A000` before
+execution. The engine parser, native statement types and public getInfo API
+have no protocol-specific metadata additions.
+
+Cursor execution uses `IStatement::getFlags() & FLAG_HAS_CURSOR` and
+openCursor/fetchNext. Other statements use execute with output message metadata
+when columns are present. Output columns come from the existing
+IMessageMetadata interface; input parameters in Simple Query receive `0A000`.
+Supported SQL includes SELECT, INSERT/UPDATE/DELETE/MERGE/UPDATE OR INSERT,
+compatible DDL, RETURNING and executable/selectable blocks and procedures.
+Unsupported input/output capabilities are checked before execution.
+
+Supported text outputs are SMALLINT/INTEGER/BIGINT (OID 21/23/20), BOOLEAN (16),
+CHAR/VARCHAR (1042/1043), NUMERIC/DECIMAL stored in SHORT/LONG/INT64 (1700), and
+NULL. Scale and subtype are preserved, and exact numerics do not pass through
+floating point. CHAR uses varying fetch conversion while retaining its logical
+CHAR OID and meaningful spaces. UTF8/NONE/ASCII strings must contain valid UTF8
+on output; OCTETS and unsupported charsets/types receive `0A000` from metadata
+checks. Column aliases come from the engine; table OID and attribute number are
+zero, and typmod is -1. Column provenance mapping is not implemented.
+
+One implicit READ COMMITTED/write/nowait application transaction covers prepare,
+execute/open and fetch. RowDescription and DataRow are streamed when there are
+output columns. After completion, cursor and statement handles are closed and
+the transaction is committed; only then is CommandComplete sent. Errors roll
+back the transaction. Failed cleanup or an uncertain commit result closes the
+session. ReadyForQuery is currently `I`; native SET TRANSACTION, COMMIT/ROLLBACK,
+savepoints/retaining and session management remain unsupported until P5.
+
+SELECT tags count transmitted rows. DML tags use the engine's affected-record
+count independently of RETURNING rows: `INSERT 0 n`, `UPDATE n`, `DELETE n`,
+`MERGE n` and `UPDATE OR INSERT n`. EXECUTE BLOCK/PROCEDURE tags have no count.
+DDL retains its operation and object, including RECREATE, CREATE OR ALTER and
+DECLARE. SET GENERATOR and SET STATISTICS have standalone tags. These completion
+strings are formed exclusively in the plugin.
+
+Even an empty Query first goes through the engine prepare call. Only a syntax
+error (`42601`) combined with the plugin classifier's entirely tokenless input
+produces EmptyQueryResponse after transaction cleanup. Whitespace and fully
+closed comments qualify; a standalone semicolon, unfinished string or
+unterminated block comment does not. Native block comments do not nest. The
+engine's existing diagnostics and isql continuation behavior are unchanged.
+
+`IOTimeout` also sets the engine statement timeout. It does not forcibly preempt
+prepare or guarantee a hard deadline for synchronous engine callbacks. Error
+mapping in `ErrorStatus.cpp` examines the full structured status vector,
+including explicit SQLSTATE fallback: parser errors use `42601`, missing
+relations `42P01`, permission failures `42501`, unique violations `23505`, foreign
+keys `23503`, and CHECK violations `23514`. Native `isc_not_valid` remains the
+coarser `23000` because it also represents domain validation. Shutdown,
+cancellation and resource failures take precedence. Transport failure or timeout
+closes the stream without writing into a possibly partial frame.
+
+The refactored profile passed the full POSIX build, four unit executables
+(including 284 SQL classification checks), 12 Simple Query groups, seven lifecycle
+groups, 52 startup checks and nine native checks. Real clients were C libpq 14.24
+and psycopg2 2.9.11/libpq 17.6. Server traces showed no backend network connections.
+Commands, evidence and coverage limits are maintained in
+[`VALIDATION.md`](../pg_wire_protocol/VALIDATION.md). Extended Query, additional
+codecs, remote TCP/TLS, cancellation messages and other server modes require
+subsequent implementation and validation.

@@ -13,11 +13,13 @@
 
 #include "firebird.h"
 #include "Protocol.h"
+#include "Execute.h"
 #include "../common/classes/ImplementHelper.h"
 #include "../common/status.h"
 
 #include <atomic>
 #include <chrono>
+#include <cstring>
 #include <string>
 
 using namespace Firebird;
@@ -120,9 +122,8 @@ public:
 					return;
 				if (message.type == 'Q')
 				{
-					// P2 provides startup/authentication. P3 adds engine execution here;
-					// do not inspect or classify SQL text in the wire layer.
-					protocol.error("0A000", "Query execution is not implemented yet", false);
+					if (!executeQuery(protocol, owned.attachment, message.text(), limits.timeoutMs))
+						return;
 					protocol.ready();
 				}
 				else
@@ -132,7 +133,10 @@ public:
 		}
 		catch (const ProtocolError& ex)
 		{
-			sendFatal(protocol, ex.sqlState(), ex.what());
+			// A failed output may have sent only a frame prefix. Appending an
+			// ErrorResponse would corrupt that frame; close the transport instead.
+			if (std::strcmp(ex.sqlState(), "08006") != 0)
+				sendFatal(protocol, ex.sqlState(), ex.what());
 		}
 		catch (const FbException&)
 		{

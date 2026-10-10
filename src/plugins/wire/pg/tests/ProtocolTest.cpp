@@ -128,7 +128,7 @@ public:
 		const unsigned count = std::min(size, writeChunk);
 		const auto* bytes = static_cast<const std::uint8_t*>(buffer);
 		output.insert(output.end(), bytes, bytes + count);
-		return count;
+		return excessiveWrite ? size + 1 : count;
 	}
 	void shutdown() override {}
 	const char* getPeerAddress() override { return "127.0.0.1"; }
@@ -140,7 +140,7 @@ public:
 	unsigned readChunk = 3, writeChunk = 2;
 	std::vector<unsigned> timeouts;
 	std::chrono::milliseconds delay{0};
-	bool failRead = false, excessiveRead = false;
+	bool failRead = false, excessiveRead = false, excessiveWrite = false;
 	int refs = 1;
 };
 
@@ -332,7 +332,123 @@ void verifyBackend(IMaster* master)
 	Connection stalled;
 	stalled.writeChunk = 0;
 	Protocol stalledProtocol(master, &stalled);
-	expectError("08P01", [&] { stalledProtocol.ready(); });
+	expectError("08006", [&] { stalledProtocol.ready(); });
+	require(stalled.output.empty(), "Failed write emitted a second error frame");
+	Connection excessive;
+	excessive.excessiveWrite = true;
+	Protocol excessiveProtocol(master, &excessive);
+	expectError("08006", [&] { excessiveProtocol.ready(); });
+	require(excessive.output == Bytes({'Z', 0}), "Invalid write progress appended an error frame");
+}
+
+void verifyResults(IMaster* master)
+{
+	Connection connection;
+	connection.writeChunk = 1;
+	Protocol protocol(master, &connection);
+	protocol.rowDescription({{"answer", 23, 4}});
+	protocol.dataRow({std::nullopt, std::string(), std::string("\xD0\xAF"),
+		std::string("-2147483648")});
+	protocol.commandComplete("SELECT 1");
+	const Bytes expected = {
+		'T', 0, 0, 0, 31, 0, 1, 'a', 'n', 's', 'w', 'e', 'r', 0,
+		0, 0, 0, 0, 0, 0, 0, 0, 0, 23, 0, 4, 0xFF, 0xFF, 0xFF, 0xFF, 0, 0,
+		'D', 0, 0, 0, 35, 0, 4,
+		0xFF, 0xFF, 0xFF, 0xFF,
+		0, 0, 0, 0,
+		0, 0, 0, 2, 0xD0, 0xAF,
+		0, 0, 0, 11, '-', '2', '1', '4', '7', '4', '8', '3', '6', '4', '8',
+		'C', 0, 0, 0, 13, 'S', 'E', 'L', 'E', 'C', 'T', ' ', '1', 0
+	};
+	require(connection.output == expected,
+		"RowDescription/DataRow/CommandComplete differ from literal wire layout");
+	connection.output.clear();
+	protocol.rowDescription({{"\xD0\xAF", 1043, -1, 7}});
+	const Bytes varying = {
+		'T', 0, 0, 0, 27, 0, 1, 0xD0, 0xAF, 0,
+		0, 0, 0, 0, 0, 0, 0, 0, 4, 19, 0xFF, 0xFF, 0, 0, 0, 7, 0, 0
+	};
+	require(connection.output == varying,
+		"UTF8 alias, signed type size or type modifier changed");
+	connection.output.clear();
+	protocol.rowDescription({});
+	protocol.dataRow({});
+	require(connection.output == Bytes({'T', 0, 0, 0, 6, 0, 0, 'D', 0, 0, 0, 6, 0, 0}),
+		"Zero-column rows lost their count or boundary");
+	connection.output.clear();
+	protocol.emptyQuery();
+	protocol.ready();
+	require(connection.output == Bytes({'I', 0, 0, 0, 4, 'Z', 0, 0, 0, 5, 'I'}),
+		"EmptyQueryResponse must contain no CommandComplete or result payload");
+}
+
+void verifyResultErrors(IMaster* master)
+{
+	Connection connection;
+	Protocol protocol(master, &connection);
+	expectError("22021", [&] {
+		protocol.rowDescription({{"valid", 23, 4}, {std::string("x\0y", 3), 23, 4}});
+	});
+	expectError("22021", [&] { protocol.rowDescription({{"\xED\xA0\x80", 23, 4}}); });
+	expectError("22021", [&] { protocol.dataRow({std::string("valid"), std::string("x\0y", 3)}); });
+	expectError("22021", [&] { protocol.dataRow({std::string("\xF4\x90\x80\x80")}); });
+	expectError("22021", [&] { protocol.commandComplete(std::string_view("SELECT 1\0x", 10)); });
+	expectError("22021", [&] { protocol.commandComplete("\xC0\x80"); });
+	require(connection.output.empty(), "Invalid result text emitted a partial frame");
+
+	Limits limits;
+	limits.frameBytes = 31;
+	Connection description;
+	Protocol descriptionProtocol(master, &description, limits);
+	expectError("0A000", [&] { descriptionProtocol.rowDescription({{"answer!", 23, 4}}); });
+	expectError("0A000", [&] { descriptionProtocol.rowDescription({{"", 23, 4}, {"", 23, 4}}); });
+	require(description.output.empty(), "Oversized RowDescription emitted a partial frame");
+	descriptionProtocol.rowDescription({{"answer", 23, 4}});
+	require(description.output.size() == 32 && description.output[4] == 31,
+		"RowDescription at its exact byte limit was rejected");
+
+	limits.frameBytes = 14;
+	Connection row;
+	Protocol rowProtocol(master, &row, limits);
+	expectError("0A000", [&] { rowProtocol.dataRow({std::string("12345")}); });
+	expectError("0A000", [&] { rowProtocol.dataRow({std::string("ab"), std::string("cd")}); });
+	require(row.output.empty(), "Oversized DataRow emitted a partial frame");
+	rowProtocol.dataRow({std::string("1234")});
+	require(row.output.size() == 15 && row.output[4] == 14,
+		"DataRow at its exact byte limit was rejected");
+
+	limits.frameBytes = 13;
+	Connection command;
+	Protocol commandProtocol(master, &command, limits);
+	expectError("0A000", [&] { commandProtocol.commandComplete("SELECT 10"); });
+	require(command.output.empty(), "Oversized CommandComplete emitted a partial frame");
+	commandProtocol.commandComplete("SELECT 1");
+	require(command.output.size() == 14 && command.output[4] == 13,
+		"CommandComplete at its exact byte limit was rejected");
+
+	limits.frameBytes = 5;
+	Connection tiny;
+	Protocol tinyProtocol(master, &tiny, limits);
+	expectError("0A000", [&] { tinyProtocol.rowDescription({}); });
+	expectError("0A000", [&] { tinyProtocol.dataRow({}); });
+	require(tiny.output.empty(), "Short result frame limit underflowed");
+
+	// The initial result profile supports at most 32767 fields. Do not truncate
+	// a larger count, even when the message fits the independent byte limit.
+	std::vector<Column> columns(32768, {"", 23, 4});
+	std::vector<std::optional<std::string>> values(32768);
+	expectError("0A000", [&] { protocol.rowDescription(columns); });
+	expectError("0A000", [&] { protocol.dataRow(values); });
+	require(connection.output.empty(), "Excessive result field count wrote a frame");
+	values.pop_back();
+	connection.writeChunk = 4096;
+	protocol.dataRow(values);
+	require(connection.output.size() == 131075 && connection.output[5] == 0x7F &&
+		connection.output[6] == 0xFF, "Maximum supported result count changed");
+
+	connection.output.clear();
+	expectError("08006", [&] { protocol.dataRow({std::string("42")}, Protocol::Clock::now()); });
+	require(connection.output.empty(), "Expired result deadline wrote a frame");
 }
 
 void verifyDeadlinesAndTransport(IMaster* master)
@@ -356,6 +472,20 @@ void verifyDeadlinesAndTransport(IMaster* master)
 	Protocol writesProtocol(master, &writes, limits);
 	expectError("08006", [&] { writesProtocol.authenticationOk(); });
 	require(writes.output.size() < 9, "Short writes reset the frame deadline");
+	const Bytes authenticationFrame{'R', 0, 0, 0, 8, 0, 0, 0, 0};
+	require(std::equal(writes.output.begin(), writes.output.end(), authenticationFrame.begin()),
+		"Partial authentication write appended an error frame");
+
+	Connection rowWrites;
+	rowWrites.writeChunk = 8;
+	rowWrites.delay = 10ms;
+	Protocol rowWritesProtocol(master, &rowWrites, limits);
+	expectError("08006", [&] { rowWritesProtocol.dataRow({std::string(64, '7')}); });
+	Bytes rowFrame{'D', 0, 0, 0, 74, 0, 1, 0, 0, 0, 64};
+	rowFrame.insert(rowFrame.end(), 64, '7');
+	require(rowWrites.output.size() < rowFrame.size() &&
+		std::equal(rowWrites.output.begin(), rowWrites.output.end(), rowFrame.begin()),
+		"Partial DataRow deadline appended an error frame or reset its budget");
 
 	Bytes input = startup({{"user", "a"}, {"database", "d"}});
 	append(input, frame('p', text("secret")));
@@ -407,6 +537,8 @@ int main()
 		verifyFrontend(master);
 		verifyFrontendErrors(master);
 		verifyBackend(master);
+		verifyResults(master);
+		verifyResultErrors(master);
 		verifyDeadlinesAndTransport(master);
 		std::puts("PgWire protocol codec tests passed");
 		return 0;

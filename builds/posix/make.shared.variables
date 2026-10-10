@@ -94,7 +94,10 @@ AllObjects += $(Wire_Test_Plugin_Objects) $(Wire_Test_Objects) $(Wire_Socket_Tes
 
 PgWire_Objects:= $(call dirObjects,plugins/wire/pg)
 PgWire_Test_Objects:= $(call makeObjects,plugins/wire/pg/tests,ProtocolTest.cpp)
-AllObjects += $(PgWire_Objects) $(PgWire_Test_Objects)
+PgWire_Error_Test_Objects:= $(call makeObjects,plugins/wire/pg/tests,ErrorStatusTest.cpp)
+PgWire_Result_Test_Objects:= $(call makeObjects,plugins/wire/pg/tests,ResultCodecTest.cpp)
+PgWire_Sql_Test_Objects:= $(call makeObjects,plugins/wire/pg/tests,SqlInfoTest.cpp)
+AllObjects += $(PgWire_Objects) $(PgWire_Test_Objects) $(PgWire_Error_Test_Objects) $(PgWire_Result_Test_Objects) $(PgWire_Sql_Test_Objects)
 
 
 # Chacha plugin

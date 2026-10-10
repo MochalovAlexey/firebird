@@ -44,6 +44,28 @@ void appendInteger(std::vector<std::uint8_t>& bytes, std::uint32_t value)
 		bytes.push_back(static_cast<std::uint8_t>(value >> shift));
 }
 
+void appendShort(std::vector<std::uint8_t>& bytes, std::uint16_t value)
+{
+	bytes.push_back(static_cast<std::uint8_t>(value >> 8));
+	bytes.push_back(static_cast<std::uint8_t>(value));
+}
+
+void checkFieldCount(std::size_t count)
+{
+	if (count > 32767)
+		throw ProtocolError("0A000", "Result field count exceeds its limit");
+}
+
+void addResultBytes(std::size_t& size, std::size_t amount, unsigned frameLimit)
+{
+	// The protocol constructor guarantees frameLimit >= 5. Subtraction before
+	// addition bounds both size_t arithmetic and the signed wire length fields.
+	const auto maximum = frameLimit - 4;
+	if (size > maximum || amount > maximum - size)
+		throw ProtocolError("0A000", "Result frame exceeds its limit");
+	size += amount;
+}
+
 void validateUtf8(std::string_view text)
 {
 	const auto* bytes = reinterpret_cast<const unsigned char*>(text.data());
@@ -88,11 +110,16 @@ std::string_view consumeString(const std::vector<std::uint8_t>& bytes, std::size
 	return value;
 }
 
-void appendString(std::vector<std::uint8_t>& bytes, std::string_view text)
+void validateBackendString(std::string_view text)
 {
 	if (text.find('\0') != std::string_view::npos)
 		throw ProtocolError("22021", "NUL in backend wire string");
 	validateUtf8(text);
+}
+
+void appendString(std::vector<std::uint8_t>& bytes, std::string_view text)
+{
+	validateBackendString(text);
 	bytes.insert(bytes.end(), text.begin(), text.end());
 	bytes.push_back(0);
 }
@@ -246,7 +273,7 @@ void Protocol::writeExact(const void* buffer, unsigned size, Deadline deadline)
 		ThrowStatusWrapper wrapped(status.get());
 		const unsigned count = connection->write(&wrapped, size - done, bytes + done, remaining(deadline));
 		if (!count || count > size - done)
-			malformed("Transport returned invalid write length");
+			throw ProtocolError("08006", "Transport returned invalid write length");
 		done += count;
 		remaining(deadline);
 	}
@@ -363,6 +390,84 @@ void Protocol::error(std::string_view sqlState, std::string_view message, bool f
 	appendString(body, message);
 	body.push_back(0);
 	send('E', body, deadline);
+}
+
+void Protocol::rowDescription(const std::vector<Column>& columns, Deadline deadline)
+{
+	deadline = normalize(deadline);
+	checkFieldCount(columns.size());
+	std::size_t size = 0;
+	addResultBytes(size, 2, limits.frameBytes);
+	for (const auto& column : columns)
+	{
+		// Name terminator plus table OID, attribute, type OID/size/modifier, format.
+		addResultBytes(size, 19, limits.frameBytes);
+		addResultBytes(size, column.name.size(), limits.frameBytes);
+		validateBackendString(column.name);
+	}
+	std::vector<std::uint8_t> body;
+	body.reserve(size);
+	appendShort(body, columns.size());
+	for (const auto& column : columns)
+	{
+		appendString(body, column.name);
+		appendInteger(body, 0); // Table identity is not mapped to PostgreSQL OIDs.
+		appendShort(body, 0);
+		appendInteger(body, column.oid);
+		appendShort(body, static_cast<std::uint16_t>(column.typeSize));
+		appendInteger(body, static_cast<std::uint32_t>(column.typeModifier));
+		appendShort(body, 0); // Text format.
+	}
+	send('T', body, deadline);
+}
+
+void Protocol::dataRow(const std::vector<std::optional<std::string>>& values, Deadline deadline)
+{
+	deadline = normalize(deadline);
+	checkFieldCount(values.size());
+	std::size_t size = 0;
+	addResultBytes(size, 2, limits.frameBytes);
+	for (const auto& value : values)
+	{
+		addResultBytes(size, 4, limits.frameBytes);
+		if (value)
+		{
+			addResultBytes(size, value->size(), limits.frameBytes);
+			validateBackendString(*value);
+		}
+	}
+	std::vector<std::uint8_t> body;
+	body.reserve(size);
+	appendShort(body, values.size());
+	for (const auto& value : values)
+	{
+		if (value)
+		{
+			appendInteger(body, value->size());
+			body.insert(body.end(), value->begin(), value->end());
+		}
+		else
+			appendInteger(body, 0xFFFFFFFF); // NULL length -1, without value bytes.
+	}
+	send('D', body, deadline);
+}
+
+void Protocol::commandComplete(std::string_view tag, Deadline deadline)
+{
+	deadline = normalize(deadline);
+	std::size_t size = 0;
+	addResultBytes(size, 1, limits.frameBytes);
+	addResultBytes(size, tag.size(), limits.frameBytes);
+	validateBackendString(tag);
+	std::vector<std::uint8_t> body;
+	body.reserve(size);
+	appendString(body, tag);
+	send('C', body, deadline);
+}
+
+void Protocol::emptyQuery(Deadline deadline)
+{
+	send('I', {}, deadline);
 }
 
 } // namespace Firebird::PgWire

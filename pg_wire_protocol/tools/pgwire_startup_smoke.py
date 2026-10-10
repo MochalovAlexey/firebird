@@ -3,8 +3,8 @@
 
 Uses Python's standard library and an installed libpq runtime through ctypes.
 The new work directory retains an isolated runtime, databases and sanitized
-logs. PostgreSQL Query is expected to return 0A000 at this stage; this is not
-the M0 SQL execution acceptance suite.
+logs. Includes SELECT and error recovery after the P3 execution slice; the
+separate pgwire_query_smoke.py covers the complete M0 execution matrix.
 """
 
 import argparse
@@ -146,14 +146,69 @@ class Client:
         except ConnectionResetError:
             pass
 
-    def query_error(self, text=b"SELECT 42"):
-        self.send(packet(b"Q", text + b"\0"))
-        self.query_response()
+    def query(self, text, fragmented=False):
+        self.send(packet(b"Q", text + b"\0"), fragmented)
+        return self.query_response()
 
     def query_response(self):
-        kind, payload = self.message()
-        require(kind == b"E" and error_fields(payload)["C"] == "0A000", "P2 Query did not return 0A000")
-        require(self.message() == (b"Z", b"I"), "P2 Query error did not restore ReadyForQuery I")
+        result = {"columns": None, "rows": [], "command": None, "error": None}
+        for _ in range(100000):
+            kind, payload = self.message()
+            if kind == b"T":
+                require(result["columns"] is None and len(payload) >= 2, "duplicate/invalid RowDescription")
+                columns, offset = [], 2
+                for _ in range(struct.unpack("!H", payload[:2])[0]):
+                    end = payload.find(b"\0", offset)
+                    require(end >= offset and end + 19 <= len(payload), "truncated column metadata")
+                    name = payload[offset:end].decode("utf-8")
+                    table, attribute, oid, size, modifier, format_code = struct.unpack("!IhIhih", payload[end + 1:end + 19])
+                    columns.append({"name": name, "table": table, "attribute": attribute, "oid": oid,
+                                    "size": size, "modifier": modifier, "format": format_code})
+                    offset = end + 19
+                require(offset == len(payload), "trailing RowDescription bytes")
+                result["columns"] = columns
+            elif kind == b"D":
+                require(result["columns"] is not None and result["command"] is None and result["error"] is None,
+                        "DataRow outside result set")
+                require(len(payload) >= 2 and struct.unpack("!H", payload[:2])[0] == len(result["columns"]),
+                        "DataRow column count mismatch")
+                row, offset = [], 2
+                for _ in result["columns"]:
+                    require(offset + 4 <= len(payload), "truncated DataRow length")
+                    length = struct.unpack("!i", payload[offset:offset + 4])[0]
+                    offset += 4
+                    require(length >= -1 and offset + max(length, 0) <= len(payload), "invalid DataRow value length")
+                    row.append(None if length == -1 else payload[offset:offset + length].decode("utf-8"))
+                    offset += max(length, 0)
+                require(offset == len(payload), "trailing DataRow bytes")
+                result["rows"].append(row)
+            elif kind == b"C":
+                require(result["command"] is None and result["error"] is None and payload.endswith(b"\0"),
+                        "invalid/duplicate CommandComplete")
+                result["command"] = payload[:-1].decode("utf-8")
+            elif kind == b"E":
+                require(result["error"] is None and result["command"] is None, "ErrorResponse after completion")
+                result["error"] = error_fields(payload)
+            elif kind == b"Z":
+                require(payload == b"I", "implicit query did not restore ReadyForQuery I")
+                require(result["error"] is not None or result["command"] is not None, "query has no result or error")
+                return result
+            else:
+                raise RuntimeError(f"unexpected Query response {kind!r}")
+        raise RuntimeError("Query response exceeded message bound")
+
+    def query_integer(self, text=b'SELECT CAST(6 * 7 AS INTEGER) AS "answer" FROM RDB$DATABASE', expected=42):
+        result = self.query(text)
+        require(result["error"] is None and result["rows"] == [[str(expected)]] and result["command"] == "SELECT 1",
+                "computed integer SELECT returned an unexpected result")
+        require(result["columns"] == [{"name": "answer", "table": 0, "attribute": 0, "oid": 23,
+                                       "size": 4, "modifier": -1, "format": 0}], "integer RowDescription mismatch")
+
+    def query_error(self, text=b"SELECT CAST(1 AS DOUBLE PRECISION) FROM RDB$DATABASE", expected="0A000"):
+        result = self.query(text)
+        require(result["error"] is not None and result["error"]["C"] == expected,
+                f"Query did not return expected SQLSTATE {expected}")
+        return result
 
     def close(self, terminate=True):
         if terminate:
@@ -175,6 +230,11 @@ def libpq_child():
         "PQexec": (ctypes.c_void_p, [ctypes.c_void_p, ctypes.c_char_p]),
         "PQresultStatus": (ctypes.c_int, [ctypes.c_void_p]),
         "PQresultErrorField": (ctypes.c_char_p, [ctypes.c_void_p, ctypes.c_int]),
+        "PQntuples": (ctypes.c_int, [ctypes.c_void_p]),
+        "PQnfields": (ctypes.c_int, [ctypes.c_void_p]),
+        "PQfname": (ctypes.c_char_p, [ctypes.c_void_p, ctypes.c_int]),
+        "PQftype": (ctypes.c_uint, [ctypes.c_void_p, ctypes.c_int]),
+        "PQgetvalue": (ctypes.c_char_p, [ctypes.c_void_p, ctypes.c_int, ctypes.c_int]),
         "PQclear": (None, [ctypes.c_void_p]),
         "PQfinish": (None, [ctypes.c_void_p]),
     }
@@ -192,16 +252,24 @@ def libpq_child():
     try:
         require(library.PQstatus(connection) == 0, "libpq startup failed")
         require(library.PQprotocolVersion(connection) == 3, "libpq protocol version mismatch")
-        for sql in (b"SELECT 42", b"BEGIN", b"not SQL"):
+        for sql in (b'SELECT CAST(6 * 7 AS INTEGER) AS "answer" FROM RDB$DATABASE', b"BEGIN", b"not SQL"):
             result = library.PQexec(connection, sql)
             require(result, "libpq did not allocate a result")
             try:
-                require(library.PQresultStatus(result) == 7, "libpq query did not return PGRES_FATAL_ERROR")
-                require(library.PQresultErrorField(result, ord("C")) == b"0A000", "libpq SQLSTATE mismatch")
+                if sql.startswith(b"SELECT"):
+                    require(library.PQresultStatus(result) == 2, "libpq SELECT did not return PGRES_TUPLES_OK")
+                    require(library.PQntuples(result) == 1 and library.PQnfields(result) == 1, "libpq SELECT dimensions mismatch")
+                    require(library.PQfname(result, 0) == b"answer" and library.PQftype(result, 0) == 23,
+                            "libpq integer metadata mismatch")
+                    require(library.PQgetvalue(result, 0, 0) == b"42", "libpq computed value mismatch")
+                else:
+                    require(library.PQresultStatus(result) == 7, "libpq query did not return PGRES_FATAL_ERROR")
+                    require(library.PQresultErrorField(result, ord("C")) == b"42601", "libpq parser SQLSTATE mismatch")
                 require(library.PQtransactionStatus(connection) == 0, "libpq transaction status is not IDLE")
             finally:
                 library.PQclear(result)
-        print(json.dumps({"libpq_version": library.PQlibVersion(), "protocol": 3, "query_sqlstate": "0A000"}))
+        print(json.dumps({"libpq_version": library.PQlibVersion(), "protocol": 3, "select_value": 42,
+                          "select_oid": 23, "parser_sqlstate": "42601"}))
     finally:
         library.PQfinish(connection)
 
@@ -214,7 +282,7 @@ class StartupHarness(Harness):
         self.blocked_password = secrets.token_urlsafe(32)
         self.trap = None
         self.summary["transport"] = "real PostgreSQL protocol 3.0 TCP startup/authentication"
-        self.summary["stage"] = "P2; Query is deliberately unsupported (0A000)"
+        self.summary["stage"] = "P2 startup/authentication regression with P3 SELECT execution"
         self.cases = []
 
     def redact(self, value):
@@ -292,9 +360,10 @@ QUIT;
         config = config.replace("WireProtocolPorts = \n", f"WireProtocolPorts = {self.pg_port}\n")
         config_path.write_text(config)
         timeout = endpoints[0].get("timeout", 15000)
+        module = endpoints[0].get("module", self.module)
         aliases = "wire_host,WIRE_HOST_TEST,pg_remote_off,pg_auth_off,pg_security_off,pg_local_only,configured_but_missing"
         (self.runtime / "plugins.conf").write_text(
-            f"Plugin = PgWire\n{{\nModule = {self.module}\nRegisterName = PgWire\nConfig = Startup\n}}\n"
+            f"Plugin = PgWire\n{{\nModule = {module}\nRegisterName = PgWire\nConfig = Startup\n}}\n"
             f"Config = Startup\n{{\nBindAddress = 127.0.0.1\nWorkers = 4\nQueueSize = 16\n"
             f"IOTimeout = {timeout}\nDatabaseAliases = {aliases}\n}}\n")
 
@@ -391,12 +460,15 @@ QUIT;
         require(values("PG_ENCRYPTED") == ["<false>"] * 2 or values("PG_ENCRYPTED") == ["FALSE"] * 2,
                 "plaintext PG connection reported encryption")
         self.native_probe("native_with_pg_identities")
-        # No SQL is interpreted by P2, including text that future grammar may reject.
-        for text in (b"SELECT 42", b"BEGIN", b"/* comment */", b"not SQL", b"SELECT 1; SELECT 2"):
-            first.query_error(text)
-        second.send(packet(b"Q", b"SELECT 1\0") + packet(b"Q", b"SELECT 2\0"))
-        second.query_response()
-        second.query_response()
+        first.query_integer()
+        for text in (b"BEGIN", b"not SQL", b"SELECT $1 FROM RDB$DATABASE"):
+            first.query_error(text, "42601")
+            first.query_integer()
+        second.send(packet(b"Q", b"SELECT CAST(1 AS INTEGER) FROM RDB$DATABASE\0") +
+                    packet(b"Q", b"SELECT CAST(2 AS INTEGER) FROM RDB$DATABASE\0"))
+        for expected in ("1", "2"):
+            result = second.query_response()
+            require(result["error"] is None and result["rows"] == [[expected]], "coalesced SELECT results mismatch")
         first.close()
         second.close()
         self.no_attachments()
@@ -641,8 +713,8 @@ QUIT;
         second = Client(self).login(database=b"pg_local_only")
         require(self.attachment_count() == 1, "traced PgWire attachment not visible to native SQL")
         self.native_probe("native_under_strace")
-        first.query_error()
-        second.query_error()
+        first.query_integer()
+        second.query_integer()
         self.denied(b"WIRE_HOST_TEST", self.bad_password, b"wire_host", "28P01")
         self.denied(b"WIRE_HOST_TEST", self.password, b"pg_security_off", "3D000")
         first.close()

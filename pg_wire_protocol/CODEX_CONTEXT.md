@@ -1,12 +1,12 @@
 # Контекст реализации wire protocol plugins в Firebird 6
 
-Контракт реализации M0–M3. Архитектура host/plugin, конфигурация и lifecycle определены в [ARCHITECTURE.md](ARCHITECTURE.md); границы приёмки — в [COMPATIBILITY.md](COMPATIBILITY.md), [PLAN.md](PLAN.md) и [TEST_PLAN.md](TEST_PLAN.md). Прямые требования пользователя имеют приоритет. Документ задаёт контракт этапов. Linux/Super P1 принят в пределах VALIDATION; целевые Linux/Super проверки реализованного P2 Startup/authentication прошли, см. [VALIDATION.md](VALIDATION.md). SQL execution отсутствует: каждый корректный Query пока получает 0A000 + ReadyForQuery I; engine parser подключается в P3. Планируемые M0–M3 не являются заявлением о текущей поддержке.
+Контракт реализации M0–M3. Архитектура host/plugin определена в [ARCHITECTURE.md](ARCHITECTURE.md), границы приёмки — в [COMPATIBILITY.md](COMPATIBILITY.md), [PLAN.md](PLAN.md) и [TEST_PLAN.md](TEST_PLAN.md). Прямые требования пользователя имеют приоритет. P4 с ограниченным lexer внутри плагина и существующими engine interfaces принят в целевом Linux/Super loopback профиле. Сборка, unit tests и повторные SQL/lifecycle/startup/native проверки прошли; evidence и исторические результаты находятся в [VALIDATION.md](VALIDATION.md). Следующий этап — P5: explicit I/T/E и session controls. TLS, Windows и другие server modes требуют отдельной реализации и приёмки.
 
 ## 1. Цель и границы
 
 Обычный PostgreSQL-драйвер, включая libpq, подключается по TCP к процессу `firebird`, а запросы исполняет движок Firebird. Дополнительные wire protocols подключаются библиотеками plugins. Родной Firebird wire protocol остаётся встроенным, работает параллельно и доступен независимо от списка дополнительных plugins.
 
-Plugin разбирает только сетевой протокол: framing, startup, authentication exchange, Query/Parse/Bind и другие сообщения, сериализацию типов и ответов. **Весь SQL передаётся существующему parser/DSQL Firebird без изменения.** В plugin и общем wire host запрещены SQL lexer, recognizer, поиск первого значимого слова, keyword allowlist, splitting batches и переписывание SQL. Это относится также к BEGIN, COMMIT, ROLLBACK, пустым запросам, command tags и `$n`. Операция определяется по результату parser/DSQL, а не по исходному тексту.
+SQL передаётся движку неизменённым. Плагину разрешён ограниченный lexer для command tags, профиля controls и EMPTY; полная проверка SQL и исполнение остаются в engine. Точный контракт и запреты rewrite/splitting/эмуляции заданы в разделе 5.
 
 PostgreSQL-синтаксис, который parser Firebird пока не принимает, возвращает настоящую ошибку. Расширения grammar, функций и системных объектов выполняются позднее в движке отдельным этапом. Они не заменяются сетевыми обходами. Значения Bind передаются через metadata/message buffers; SQL из литералов не собирается.
 
@@ -17,12 +17,12 @@ Plugin вызывает серверный host API и внутренние atta
 - База: `master` Firebird 6, SHA `bf94598f8deefeb7cc4a8217ee43b3040d5d6650`, `6.0.0.2199 Initial`, `Engine14`, C++20; рабочая ветка `pg_wire_protocol`.
 - Зафиксированный driver-only probe: psycopg2 2.9.11, runtime libpq 17.6. Он выполнен на синтетическом сервере и не доказывает интеграцию с Firebird.
 - Текущий host — Linux, `ServerMode=Super`; SuperClassic/Classic диагностируются с сохранением native. Их интеграция и Windows wiring/runtime требуют отдельной работы. P1 POSIX build/runtime принят по VALIDATION, production PgWire добавлен в POSIX/CMake build definitions и прошёл целевые POSIX/Linux/Super проверки P2; полная CMake/Windows acceptance этим не заявляется.
-- M0: загрузка PG plugin, настоящее TCP-подключение, authentication, вычисляемый SELECT, минимальный engine metadata item для его отличия от RETURNING/SELECT_BLOCK, SQL error/recovery, disconnect, работа native listener. Полный descriptor и EMPTY не являются условием первого SELECT.
+- M0: загрузка PG plugin, настоящее TCP-подключение, authentication, вычисляемый SELECT, SQL error/recovery, disconnect, работа native listener. Полный descriptor и EMPTY не являются условием первого SELECT.
 - M1: Simple Query на совместимом Firebird SQL, metadata, codecs, CRUD, совместимый DDL, DML RETURNING, реальные транзакции, privileges и lifecycle.
 - M2: Extended Query lifecycle, prepared statements/portals, Bind с native `?` либо без параметров, text/binary codecs. Синтаксис `$n` сюда не входит.
 - M3: TLS, другой сетевой узел, cancellation и конкретный профиль приложения, совместимый с текущим parser. Это не заявление о работе любого PostgreSQL-приложения.
 
-M0/M1 проверяются прямым C libpq `PQexec` и psycopg2 с `autocommit=True`, без `with connection`: context manager может отправить BEGIN даже при autocommit. Обычный transactional mode psycopg2 автоматически посылает BEGIN; пока он отклоняется parser. Для проверки явных транзакций прямой libpq отправляет совместимый `SET TRANSACTION`, COMMIT и ROLLBACK. Включение будущей поддержки BEGIN требует отдельного изменения parser и тестов.
+M0/M1 проверяются прямым C libpq `PQexec` и psycopg2 с `autocommit=True`, без `with connection`: context manager может отправить BEGIN даже при autocommit. Обычный transactional mode psycopg2 автоматически посылает BEGIN; пока он отклоняется parser. В P5 для проверки явных транзакций прямой libpq отправляет совместимый `SET TRANSACTION`, COMMIT и ROLLBACK. Включение будущей поддержки BEGIN требует отдельного изменения parser и тестов.
 
 ## 3. Host, plugin и конфигурация
 
@@ -51,21 +51,19 @@ PgWire session использует один application attachment, прина�
 
 Host проверяет UTF8 и byte limits: database/user/application_name до 255 bytes, нормализованный Srp256 login до 63 bytes, protocol endpoint alias до 63 bytes. Host password input имеет явную длину до 4096 bytes без NUL; PgWire Password body ограничен 4096 bytes вместе с framing NUL. Пароль затирается после использования. Внутренние локальные security DB attachments разрешены. Remote security database и шифрованная база, требующая ключ от native клиента, не входят в начальный профиль. Наличие native db-crypt callback не означает, что PostgreSQL-драйвер умеет передать этот ключ.
 
-## 5. Engine metadata: минимум M0 и расширение M1
+## 5. Plugin-local descriptor и существующие engine interfaces
 
-Существующих `IStatement::getType/getFlags` недостаточно. Публичный SELECT включает DML RETURNING; MERGE и UPDATE OR INSERT могут выглядеть как INSERT; RETAIN неотличим от полного COMMIT/ROLLBACK; session commands выглядят как DDL. Число колонок не восстанавливает исходную операцию.
+SQL передаётся в engine prepare целиком, с исходной byte length и без изменения текста. Ограниченный lexer внутри PgWire определяет вид команды, command tag, профиль transaction/session controls и признак tokenless EMPTY. Он учитывает comments, строки и quoted identifiers, но не проверяет grammar, имена объектов, privileges или типы. Общий wire host SQL не анализирует.
 
-Для M0 достаточно одного дополнительного нейтрального info item через `IStatement::getInfo`, различающего SELECT, DML RETURNING и SELECT_BLOCK по данным движка. Coarse `getType == SELECT` вместе с `FLAG_HAS_CURSOR` этого не обеспечивает: все три формы могут иметь одинаковые публичные признаки. M0 выполняет заявленный SELECT-профиль, остальные пока не реализованные категории получают 0A000 до исполнения по engine metadata. Это временная граница этапа, не постоянный SQL allowlist M1. Происхождение SELECT не означает отсутствие эффектов у вызываемой им функции.
+После успешного engine prepare плагин сочетает lexical descriptor с существующими `getType()`, `getFlags()`, input/output metadata и affected records. `FLAG_HAS_CURSOR` выбирает cursor/fetch; output metadata определяет singleton output и codecs. RETURNING не превращает DML в SELECT. Неподдержанный control либо UNKNOWN, включая USING wrapper, получает 0A000 до execution; ошибка самого prepare сохраняет приоритет. Новые публичные DSQL getInfo items, AST annotations и parser diagnostics для PgWire не добавляются.
 
-Полный descriptor добавляется в P4/P5 до CRUD/transaction приёмки M1. Он содержит нейтральный результат от **существующего engine parser/DSQL**:
+Запрещены SQL rewriting, удаление comments из передаваемого текста, разбиение batches, замена `$n` на `?`, подстановка параметров SQL-литералами и эмуляция успешного SET/BEGIN. Совместимость синтаксиса и реальное исполнение определяет только Firebird. Неподдержанный batch передаётся parser целиком и отвергается без частичных эффектов.
 
-- исходная операция и разновидность DDL/session command, сохранённые до DSQL transformations;
-- transaction action, retaining, разновидность savepoint command и native transaction characteristics, включая AUTO COMMIT / NO AUTO UNDO;
-- способ получения результата и metadata input/output.
+EMPTY определяется ограниченным lexer только для нулевой строки, whitespace и полностью закрытых comments без SQL tokens. Даже такой текст передаётся в обычный engine prepare неизменённым. Только сочетание этого признака с engine syntax error 42601 после успешного cleanup преобразуется в EmptyQueryResponse; permission, cancellation, resource и другие ошибки не маскируются. Незаконченные строка/comment/statement и отдельный `;` остаются parser errors. Native parser diagnostics и `isql -autoterm` не меняются.
 
-Использовать дополнительные info items через `IStatement::getInfo`; старые statement types и значения не переопределяются. PostgreSQL tags формирует plugin по metadata успешно подготовленного statement. Для E используется обычный prepare с существующей native transaction и приоритет ошибок из раздела 8. Отдельный API анализа до prepare не является обязательной частью плана. Prepare не выполняет подготовленный DML/DDL, но может читать metadata, брать locks, менять caches, вызывать trace и external routine initialization; ошибочно обещать полное отсутствие каких-либо эффектов подготовки.
+Coarse getType не различает все MERGE/UPDATE OR INSERT/RETURNING/DDL forms, поэтому исходный tag дополняется ограниченной lexical classification после успешного prepare. Наличие output columns не служит классификацией операции; getFlags и output metadata выбирают API исполнения. Плагин не расширяет AST, публичный getInfo или diagnostics движка ради этой задачи.
 
-В P4 EMPTY различается небольшим расширением diagnostics существующего engine lexer/parser: отдельный marker выдаётся только при чистом EOF без SQL tokens, включая настоящий пустой текст и whitespace/comment-only. Незаконченный SELECT, строка или block comment остаются syntax error; отсутствие tokens перед ошибкой комментария не является EMPTY. Учесть нулевую длину, которая сейчас отсекается до parser. Сохранить legacy `isc_command_end_err2` и поведение `isql -autoterm`: marker можно добавить в status vector, сохранив прежний wrapper, либо включить opt-in prepare flag; выбранный вариант проверяется native regression. Один общий `isc_command_end_err2` никогда не переводится в EmptyQueryResponse. Новый публичный analysis API, второй scanner и новые PostgreSQL SQL конструкции для этого не нужны.
+В P5 control descriptor остаётся локальным для PgWire: начало/полное завершение/retaining, savepoint action, session reset и явно указанные transaction characteristics. После исполнения учитываются фактические изменения native handle и session state. Descriptor не обещает PostgreSQL isolation/DDL semantics и не подменяет native execution.
 
 ## 6. Startup и framing
 
@@ -85,23 +83,27 @@ Host проверяет UTF8 и byte limits: database/user/application_name до
 
 Полный неизменённый SQL проходит обычный engine prepare с явной byte length и dialect 3. `SQL_DIALECT_V6` исторически обозначает dialect 3, а не версию сервера. Текущая grammar принимает один statement с необязательной конечной точкой с запятой; batches отвергает parser до выполнения любой их части.
 
-M1 не вводит список разрешённых SQL keywords. Принимаются совместимые команды, для которых engine interfaces и codecs обеспечивают реальное выполнение и корректное состояние; parser/backend ошибки и ограничения API возвращаются явно. Совместимый DDL не ограничивается CREATE/DROP TABLE. DML RETURNING выполняется с теми же codecs, что SELECT; presence cursor не меняет семантику DML.
+Текущий `Execute.cpp` реализует Simple Query на существующих engine interfaces. Одна implicit READ COMMITTED/write/nowait transaction используется для prepare/execute/openCursor/fetchNext. После успешного prepare проверяются plugin-local descriptor и input/output metadata. Cursor flag выбирает openCursor/fetch, иначе execute выдаёт singleton output при наличии output columns. RowDescription/DataRow передаются потоком; отсутствие output не создаёт RowDescription. Handles закрываются до commit; CommandComplete и ReadyForQuery I отправляются после успешного завершения. Ошибка вызывает rollback; ошибка cleanup, неопределённый commit или fatal engine error завершают session. Повторная целевая Linux/Super loopback приёмка этого пути прошла; результаты и ограничения находятся в VALIDATION.
+
+Текущие text results: SMALLINT/INTEGER/BIGINT, BOOLEAN, CHAR/VARCHAR, NUMERIC/DECIMAL в SHORT/LONG/INT64 и NULL. OID соответственно 21/23/20, 16, 1042/1043 и 1700; table OID/attribute number 0, typmod=-1, alias из engine metadata. CHAR читается через varying fetch metadata с сохранением logical CHAR OID и пробелов. Поддержаны UTF8/NONE/ASCII с проверкой результата на valid UTF8; OCTETS и другие неподдержанные charsets/types получают 0A000 по metadata до исполнения. Входные parameters в Simple Query получают 0A000 по input metadata. IOTimeout передаётся в engine statement timeout; prepare и другие синхронные callbacks не имеют обещания hard preemption сетевым deadline.
+
+Принимаются совместимые команды, для которых plugin-local descriptor, штатные engine interfaces и codecs обеспечивают правильный tag, реальное исполнение и корректное состояние. Совместимый DDL не ограничивается CREATE/DROP TABLE. Неописанный command/control получает явный отказ после prepare, без исполнения. DML RETURNING использует те же codecs, что SELECT; cursor не меняет семантику DML.
 
 После prepare `getFlags() & FLAG_HAS_CURSOR` определяет `openCursor/fetchNext`, иначе используется execute и output metadata. Prepare flags и statement flags не смешиваются. `RESULT_OK`, `RESULT_NO_DATA` и error различаются. Fetch error исключает успешный CommandComplete. Unbound input parameters в Simple Query отвергаются по metadata, без поиска `?` в тексте.
 
-CommandComplete строится по исходной операции из engine metadata и фактическому результату: SELECT — отправленные строки, DML — affected records, DDL/session/control — соответствующая операция. RETURNING, MERGE, UPDATE OR INSERT и DDL подвиды имеют собственные тесты. Не выводить INSERT tag из coarse statement type. Команды без прямого PostgreSQL аналога получают документированный tag, а не ложную семантику другой команды.
+CommandComplete использует plugin-local command descriptor и фактический результат: SELECT — отправленные строки, DML — affected records, DDL/session/control — определённый tag. RETURNING, MERGE, UPDATE OR INSERT и DDL modifiers имеют отдельные tests. Coarse INSERT type сам по себе не определяет tag. Команды без PostgreSQL аналога сохраняют tags UPDATE OR INSERT n, EXECUTE BLOCK/PROCEDURE без count, RECREATE/CREATE OR ALTER/DECLARE с объектом, SET GENERATOR/SET STATISTICS без count. Transaction/session commands и UNKNOWN в P4 получают 0A000 после prepare до execution.
 
-С P4 отдельный engine EMPTY diagnostic даёт EmptyQueryResponse и ReadyForQuery с прежним I/T/E. Он распознаётся до общего преобразования syntax errors, в том числе в E; один старый incomplete-command code не является таким diagnostic. Whitespace/comments определяет engine parser; в M0 эта поддержка ещё не заявляется. Fixtures DDL коммитятся до DML; PostgreSQL DDL semantics не обещаются.
+EMPTY определяется ограниченным lexer только для нулевой строки, whitespace и полностью закрытых comments без SQL tokens. Даже такой текст передаётся в обычный engine prepare неизменённым. Только сочетание этого признака с engine syntax error 42601 после успешного cleanup преобразуется в EmptyQueryResponse; permission, cancellation, resource и другие ошибки не маскируются. Незаконченные строка/comment/statement и отдельный `;` остаются parser errors. Native parser diagnostics и `isql -autoterm` не меняются. В P5 EmptyQueryResponse должен сохранять прежнее I/T/E. Fixtures DDL коммитятся до DML; PostgreSQL DDL semantics не обещаются.
 
 ## 8. Транзакции
 
-Plugin ведёт PostgreSQL `I/T/E`, используя engine-derived category и реальный transaction handle. Explicit transaction начинается совместимым `SET TRANSACTION`; BEGIN до расширения grammar возвращает parser error. Результат `IStatement::execute` может создать, заменить или освободить transaction handle и должен учитываться.
+В P3/P4 наружу выдаётся I после законченного implicit cycle; explicit controls/session пока получают 0A000. Следующий контракт M1 ведёт PostgreSQL `I/T/E`, используя plugin-local control descriptor после engine prepare и реальный transaction handle. Explicit transaction начинается совместимым `SET TRANSACTION`; BEGIN до расширения grammar возвращает parser error. Результат `IStatement::execute` может создать, заменить или освободить transaction handle и должен учитываться.
 
 **Одна PgWire session управляет не более чем одной текущей application transaction на своём attachment.** В неё входит либо implicit cycle, либо explicit transaction. Parse, Describe, prepared statements и portals не создают собственных application transactions. Prepare использует текущий handle либо NULL, при котором движок может использовать внутреннюю system transaction. Внутренние system/security/autonomous transactions не входят в этот счёт. Инвариант относится к PgWire, а не к native protocol или любому будущему plugin общего host.
 
-В E выполнять обычный prepare на сохранённом действительном handle. После успешной подготовки metadata разрешает только recovery из таблицы ниже; остальные statements освобождаются без execute/openCursor и получают 25P02. Lexer/parser errors возвращаются как 42601 с сохранением E. Известные обычные semantic prepare errors, например отсутствующий объект, можно переводить в 25P02 только по явно заданной таблице кодов. Shutdown/fatal, cancellation/timeout, недействительный transaction/attachment, resource exhaustion и I/O errors сохраняют реальную диагностику и соответствующий cleanup/close; неизвестную ошибку также не скрывать за 25P02. Поэтому правило 25P02 ниже не означает замену любой ошибки prepare. Отдельно проверить отсутствие пользовательского DML/DDL execution при отвергнутом statement и освобождение его compile resources.
+В E выполнять обычный prepare на сохранённом действительном handle. После успешной подготовки plugin-local control descriptor разрешает только recovery из таблицы ниже; остальные statements освобождаются без execute/openCursor и получают 25P02. Lexer/parser errors возвращаются как 42601 с сохранением E. Известные обычные semantic prepare errors, например отсутствующий объект, можно переводить в 25P02 только по явно заданной таблице кодов. Shutdown/fatal, cancellation/timeout, недействительный transaction/attachment, resource exhaustion и I/O errors сохраняют реальную диагностику и соответствующий cleanup/close; неизвестную ошибку также не скрывать за 25P02. Поэтому правило 25P02 ниже не означает замену любой ошибки prepare. Отдельно проверить отсутствие пользовательского DML/DDL execution при отвергнутом statement и освобождение его compile resources.
 
-| Состояние и операция по engine metadata | Результат |
+| Состояние и операция по plugin-local descriptor после prepare | Результат |
 |---|---|
 | I + обычный исполнимый SQL | Implicit native transaction на Query; настоящий commit/rollback; I |
 | I + начало explicit transaction | Выполнить engine control; сохранить возвращённый handle; T |
@@ -116,23 +118,25 @@ Plugin ведёт PostgreSQL `I/T/E`, используя engine-derived category
 | E + успешный ROLLBACK TO | Откат до savepoint, сохранить предыдущие изменения; T |
 | E + ROLLBACK RETAIN | Реальный rollback retaining; T |
 | E + COMMIT RETAIN/SAVEPOINT/RELEASE | 25P02; E, никаких изменений |
-| I + полный COMMIT/ROLLBACK | Parser-derived no-op, соответствующий tag; I, возможен notice |
+| I + полный COMMIT/ROLLBACK | Подготовленный native control: no-op, соответствующий tag; I, возможен notice |
 | I + retaining control | 25000: активной transaction нет; I |
 | T + повторный SET TRANSACTION | 25001; сохранить существующий handle, E |
 
 Native transaction сохраняется в E, пока она остаётся действительной. Неверный savepoint или другая ошибка recovery сохраняет E; обычный SQL не возобновляется автоматически. Автоматический откат всей transaction на любой SQL error несовместим с ROLLBACK TO и не используется. Отдельно проверить ошибки prepare/fetch/commit и случаи, когда движок уже уничтожил handle: такой сбой требует явного завершения session либо доказанной recovery policy, а не ложного T. Ни один путь COMMIT в E не должен зафиксировать ещё незафиксированные изменения failed transaction; успешный recovery подтверждается реальным эффектом движка.
 
-Явный native `SET TRANSACTION AUTO COMMIT` сохраняет семантику Firebird: движок может уже зафиксировать предыдущие изменения через retaining, сохранив живой handle. Последующий rollback не отменяет уже зафиксированные изменения. Это документированное отличие native SQL от PostgreSQL transaction block; wire-слой не отключает флаг и не обещает атомарность такого блока. AUTO COMMIT и NO AUTO UNDO отражаются в engine-derived metadata и проверяются отдельными visibility/error/savepoint tests против native API. Для NO AUTO UNDO не предполагать гарантии cleanup/savepoints без проверки соответствующего engine path. Таблица I/T/E описывает состояние текущего handle, а не возможность отмены ранее совершённых engine commits.
+Явный native `SET TRANSACTION AUTO COMMIT` сохраняет семантику Firebird: движок может уже зафиксировать предыдущие изменения через retaining, сохранив живой handle. Последующий rollback не отменяет уже зафиксированные изменения. Это документированное отличие native SQL от PostgreSQL transaction block; wire-слой не отключает флаг и не обещает атомарность такого блока. AUTO COMMIT и NO AUTO UNDO учитываются локальным control descriptor после engine prepare и проверяются отдельными visibility/error/savepoint tests против native API. Для NO AUTO UNDO не предполагать гарантии cleanup/savepoints без проверки соответствующего engine path. Таблица I/T/E описывает состояние текущего handle, а не возможность отмены ранее совершённых engine commits.
 
 Implicit TPB: READ WRITE, READ COMMITTED READ CONSISTENCY, WAIT с конечным lock timeout. Explicit `SET TRANSACTION` применяет поддержанные parser характеристики реально. Не использовать `isc_tpb_autocommit` или retaining как замену завершению implicit transaction. Simple Query CommandComplete отправляется после успешного implicit commit. При неопределённом состоянии после ошибки commit/cleanup connection закрывается без ложного ReadyForQuery I.
 
-`ALTER SESSION RESET` — отдельный session effect от engine metadata. Он может откатить transaction и создать новую, переиспользовав тот же `ITransaction` interface; равенства указателей недостаточно для определения её lifetime. После успешного reset в T сохранить T для новой transaction, инвалидировать portals/savepoint bookkeeping и обновить session metadata/ParameterStatus согласно реальным сброшенным настройкам. В I reset без создания explicit transaction остаётся I; в E он блокируется как обычный SQL до разрешённого recovery. Если ошибка reset закрыла attachment, завершить connection через FATAL. Отдельно проверить prepared statements, зависящие от сброшенных role/settings/temp objects: старые metadata нельзя использовать без подтверждения их действительности.
+`ALTER SESSION RESET` — отдельный session effect локального control descriptor после engine prepare. Он может откатить transaction и создать новую, переиспользовав тот же `ITransaction` interface; равенства указателей недостаточно для определения её lifetime. После успешного reset в T сохранить T для новой transaction, инвалидировать portals/savepoint bookkeeping и обновить session metadata/ParameterStatus согласно реальным сброшенным настройкам. В I reset без создания explicit transaction остаётся I; в E он блокируется как обычный SQL до разрешённого recovery. Если ошибка reset закрыла attachment, завершить connection через FATAL. Отдельно проверить prepared statements, зависящие от сброшенных role/settings/temp objects: старые metadata нельзя использовать без подтверждения их действительности.
 
 Disconnect/EOF закрывает cursor/statement, откатывает transaction и detach. Cleanup имеет независимый status и сохраняет первичную ошибку.
 
 ## 9. Типы и codecs
 
-| Firebird logical type в M1 | PG OID | PG typlen |
+P4 использует приведённые ниже text output codecs. Повторные execution/classification/codec tests прошли в Linux/Super loopback профиле; evidence записаны в VALIDATION. Исторический P3 subset ограничивался тремя integer-типами без scale/subtype и NULL.
+
+| Firebird logical type в P4 | PG OID | PG typlen |
 |---|---:|---:|
 | SMALLINT | 21 | 2 |
 | INTEGER | 23 | 4 |
@@ -142,11 +146,11 @@ Disconnect/EOF закрывает cursor/statement, откатывает transac
 | VARCHAR | 1043 | -1 |
 | NUMERIC/DECIMAL в SHORT/LONG/INT64 | 1700 | -1 |
 
-M1 выдаёт text format 0, table OID/attribute number 0, typmod -1. Alias берётся из metadata с сохранением quoted names. NULL передаётся длиной -1, пустая строка — 0; UTF8 lengths — bytes.
+P4 выдаёт text format 0, table OID/attribute number 0, typmod -1. Alias берётся из metadata с сохранением quoted names. NULL передаётся длиной -1, пустая строка — 0; UTF8 lengths — bytes.
 
 BOOLEAN кодируется `t/f`; числа — locale-independent decimal. Type/subtype/scale рассматриваются вместе: scale 0 не превращает NUMERIC в INTEGER. Exact decimal не проходит через floating point; INT64_MIN обрабатывается без signed overflow.
 
-Native buffers читаются по getMessageLength/getOffset/getNullOffset с учётом alignment, VARCHAR prefix, NULL indicator и lifetime. Для изменения fetch metadata используется IMetadataBuilder. Для CHAR сохраняется исходный logical type/OID 1042, а transport fetch metadata переводится в varying, чтобы движок выполнил преобразование фиксированного буфера. Проверить, что полученная длина сохраняет логическую CHAR-добивку и не выдаёт лишние пробелы от UTF8 byte capacity. Не применять безусловный `rstrip`. Если metadata недостаточно, до приёмки дополнить engine-derived character length; тесты включают ASCII, multibyte, пустую строку и значимые конечные пробелы.
+Native buffers читаются по getMessageLength/getOffset/getNullOffset с учётом alignment, VARCHAR prefix, NULL indicator и lifetime. Для изменения fetch metadata используется IMetadataBuilder. Для CHAR сохраняется исходный logical type/OID 1042, а transport fetch metadata переводится в varying, чтобы движок выполнил преобразование фиксированного буфера. Проверить, что полученная длина сохраняет логическую CHAR-добивку и не выдаёт лишние пробелы от UTF8 byte capacity. Не применять безусловный `rstrip`. Преобразование проверяется через существующий metadata builder; тесты включают ASCII, multibyte, пустую строку и значимые конечные пробелы.
 
 U+0000 в text output даёт 22021 без усечения; LF/TAB разрешены. Неподдержанный тип даёт 0A000 до execute/openCursor, если metadata уже известна. Не подменять unknown types строками и не выдавать всем колонкам OID text.
 
@@ -155,6 +159,8 @@ M2 добавляет FLOAT/DOUBLE, DATE/TIME/TIMESTAMP без TZ и INT128/NUME
 ## 10. Ошибки и внешнее завершение
 
 ErrorResponse содержит S, V, C, M и конечный NUL. Поле P, если есть, — 1-based character position, не UTF8 byte offset. Targeted SQLSTATE mapping: syntax 42601, unknown relation 42P01, unique 23505, permission 42501, credentials 28P01; alias 3D000, unsupported feature 0A000, framing 08P01, failed transaction 25P02, encoding/NUL 22021.
+
+Внутренний `ErrorStatus.cpp` сопоставляет parser errors с 42601, unknown relation с 42P01 и permission с 42501 по полному структурированному status vector. Валидный explicit SQLSTATE учитывается как fallback; native shutdown/cancellation/permission причины имеют приоритет. Diagnostics не включают SQL/credentials или сырой server status text. Error mapping unit tests и реальная commit failure повторно проверены на текущем execution path; результаты записаны в VALIDATION. Отдельное истечение engine execution timeout и инъекции close/free failures пока не приняты.
 
 Обрабатывать **весь структурированный status vector**, включая вложенные коды после `isc_dsql_error`/`isc_sqlerr`, типы аргументов и приоритет конкретной причины. Использовать проверенные helpers и fallback `fb_sqlstate`; локализованный error text не классифицируется. В E не маскировать реальные fatal/cancel/invalid-handle/resource/I/O ошибки правилом 25P02; precedence определён в разделе 8. Startup SQLSTATE проверяется raw wire, поскольку psycopg2 connect exception может не иметь pgcode.
 
@@ -176,7 +182,7 @@ Simple Query error завершается ErrorResponse и корректным 
 - После ошибки обрабатывается discard-until-Sync; поступившие execution messages не выполняются. Sync возвращает корректное I/E. Повреждённый frame остаётся fatal.
 - Unnamed replacement, Close, transaction end и session close освобождают соответствующие ресурсы; portals не оставляют открытые cursors.
 
-Pipeline mode — отдельный профиль. Будущая поддержка `$n`, повторных индексов и параметрического inference реализуется в engine parser/metadata; plugin получает готовые binding descriptors и не выделяет SQL tokens.
+Pipeline mode — отдельный профиль. Будущая поддержка `$n`, повторных индексов и параметрического inference реализуется в engine parser/metadata; plugin получает engine binding descriptors и не ищет или переписывает parameter references.
 
 ## 12. Lifecycle и приёмка
 

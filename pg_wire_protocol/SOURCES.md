@@ -126,7 +126,7 @@ BOOLEAN output t/f и встроенные идентификаторы типо
 
 [Jaybird metadata API](https://www.firebirdsql.org/docs/drivers/java/latest/docs/org.firebirdsql.jaybird/org/firebirdsql/jdbc/FBDatabaseMetaData.html)
 
-SQL fixtures учитывают требования parser и native DDL semantics; RETURNING и PSQL требуют соответствующей engine metadata и управления результатами. Поведение сверяется с выбранным SHA Firebird 6.
+SQL fixtures учитывают требования parser и native DDL semantics; RETURNING и PSQL используют штатные output metadata/cursor flags и соответствующий способ получения результата. Поведение сверяется с выбранным SHA Firebird 6.
 
 ## Закреплённая карта исходников Firebird
 
@@ -165,11 +165,13 @@ Native server обращается к dispatcher с configured providers. Host �
 - [Parser.cpp](../src/dsql/Parser.cpp): `yyerror_detailed`/`yyerrorIncompleteCmd`, около строк 1243–1277; `isc_command_end_err2` не различает EMPTY и незавершённую непустую команду.
 - [jrd.cpp](../src/jrd/jrd.cpp): `JAttachment::prepare`, около строки 5759; отдельное использование nested `isc_command_end_err2` при `PREPARE_REQUIRE_SEMICOLON` подтверждает необходимость сохранять этот legacy contract.
 
-Parser получает целый SQL без модификаций. Структура native API сводит RETURNING к SELECT/EXEC_PROCEDURE, MERGE/UPDATE OR INSERT к INSERT, session management к DDL, retaining и non-retaining commit к одному публичному kind. Поэтому command semantics/transaction effects требуют расширения нейтральной metadata движка. Поиск первого слова, SQL allowlist, split по `;` и wire-замена `$n` не являются решением. Будущие `BEGIN`/`$n` относятся к parser/parameter metadata.
+Parser получает целый SQL без модификаций. Структура native API сводит RETURNING к SELECT/EXEC_PROCEDURE, MERGE/UPDATE OR INSERT к INSERT, session management к DDL, retaining и non-retaining commit к одному публичному kind. Эти факты остаются ограничениями coarse getType; текущее проектное решение дополняет его ограниченным lexer в PgWire для tags/control profile. getFlags/input/output metadata и affected records сохраняют роль в execution и codecs. SQL rewriting, splitting по `;`, wire-замена `$n` и эмуляция успешных commands запрещены. Будущие BEGIN/$n относятся к parser/parameter metadata.
 
-Первый этап публикации metadata — минимальный дополнительный info item через существующий `IStatement::getInfo`, различающий исходный SELECT, DML RETURNING и SELECT_BLOCK. Полный operation/DDL/session/transaction contract появляется в P4/P5. M0 не требует нового публичного pre-prepare analysis API. В E допускается обычный prepare с последующим metadata guard перед execute; только известные semantic errors преобразуются в 25P02, syntax остаётся 42601, приоритетные fatal/cancel/timeout/invalid handle/resource/I/O и неизвестные diagnostics сохраняются по CODEX_CONTEXT.
+Новые публичные info items, engine origin/operation metadata, AST annotations или parser observer не требуются и удаляются из текущего дизайна. P4 использует plugin-local command descriptor; P5 добавит локальный control descriptor, сохраняя реальные engine effects/handles. В E используется обычный prepare и последующий guard перед execute; только известные semantic errors преобразуются в 25P02, syntax остаётся 42601, приоритетные fatal/cancel/timeout/invalid handle/resource/I/O и неизвестные diagnostics сохраняются по CODEX_CONTEXT. Исторические результаты предыдущих реализаций записаны отдельно в VALIDATION.
 
-EMPTY требует отдельного parser-specific nested diagnostic либо opt-in prepare flag. Нельзя выводить пустоту из `isc_command_end_err2` или глобально заменять прежний prepare error успехом. Существующая внутренняя auto-terminator обработка DSQL сохраняется; bytes не переписываются именно на wire/host boundary.
+EMPTY не требует изменения parser diagnostics или prepare flags. Сам `isc_command_end_err2` не доказывает пустоту: нужен tokenless-признак ограниченного plugin lexer и syntax error 42601 от реального engine prepare исходного SQL. Только это сочетание после cleanup даёт EmptyQueryResponse; другие ошибки не маскируются. Незаконченные tokens/comments/strings, vertical tab и отдельный `;` остаются errors. Штатные auto-terminator/continuation paths DSQL сохраняются.
+
+Текущая реализация ограниченного descriptor расположена в [SqlInfo.h](../src/plugins/wire/pg/SqlInfo.h) и [SqlInfo.cpp](../src/plugins/wire/pg/SqlInfo.cpp); её применение после prepare — в [Execute.cpp](../src/plugins/wire/pg/Execute.cpp). Это код plugin, а не новое публичное API движка. Наличие кода само по себе не является результатом приёмки; команды и результаты повторного прогона записываются в VALIDATION.
 
 ### F5 — типы, CHAR и полный status vector
 

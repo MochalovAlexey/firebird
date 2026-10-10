@@ -2,19 +2,19 @@
 
 База — `master` Firebird 6, ветка `pg_wire_protocol`: [BASELINE.md](BASELINE.md). Обязательные границы задают [ARCHITECTURE.md](ARCHITECTURE.md) и [CODEX_CONTEXT.md](CODEX_CONTEXT.md); возможности и проверки — [COMPATIBILITY.md](COMPATIBILITY.md), [TEST_PLAN.md](TEST_PLAN.md).
 
-PostgreSQL grammar/functions отложены. Все этапы передают SQL существующему parser без wire-классификации и переписывания. Расширение нейтральных parser/DSQL metadata входит в реализацию протокола; принятие нового SQL-синтаксиса — отдельная будущая работа.
+PostgreSQL grammar/functions отложены. Ограниченная plugin-local classification задаёт command tags, control profile и EMPTY; SQL не переписывается и не делится. Полную проверку и реальное исполнение выполняет неизменённый parser/DSQL; новые публичные statement metadata не добавляются.
 
-Состояние на 9 октября 2026: начальный Linux/Super host P1 со штатным getPluginConfig прошёл повторную проверку; результаты и границы покрытия записаны в [VALIDATION.md](VALIDATION.md). Целевые Linux/Super проверки P2 прошли: отдельный PgWire module, framing, host authentication и локальный attachment. SQL execution отсутствует, каждый корректный Query получает 0A000. Следующий функциональный этап — P3 и M0 SELECT. Windows и другие server modes этим срезом не принимаются.
+P4 с ограниченным lexer внутри плагина и существующими engine interfaces принят в целевом Linux/Super loopback профиле. Сборка, unit tests и повторные SQL/lifecycle/startup/native проверки прошли; evidence и исторические результаты находятся в [VALIDATION.md](VALIDATION.md). Следующий этап — P5: explicit I/T/E и session controls. TLS, Windows и другие server modes требуют отдельной реализации и приёмки.
 
 ## P0. База, зависимости и проектирование
 
 Проверить HEAD, правила репозитория и штатный Linux build workflow. Собрать сервер, подготовить отдельную UTF8/dialect 3 базу с alias и пользователями. Проверить native connect → SELECT → commit/rollback. Зафиксировать реальные AuthServer/AuthClient, локальную security database и Srp256 profile.
 
-Записать `IMPLEMENTATION_NOTES.md`: versioned plugin ABI через CLOOP, ownership interfaces, ограниченные workers/queues, deadlines, lifecycle и источники command tags. Для M0 определить только минимальный engine-origin kind через существующий `getInfo`; полный descriptor относится к P4/P5. Отдельный публичный API анализа до prepare не является обязательным. Сразу выбрать TLS-библиотеку, optional build flag и упаковку Linux/Windows; текущий `TLS_OPTIONS` относится к thread-local storage. TLS реализуется в P10, но зависимость не оставлять неизвестной до этого этапа.
+Записать `IMPLEMENTATION_NOTES.md`: versioned plugin ABI через CLOOP, ownership interfaces, ограниченные workers/queues, deadlines, lifecycle и источники command tags. Зафиксировать границы plugin-local SQL descriptor и использование существующих statement interfaces. Новый публичный API анализа/metadata не вводится. Сразу выбрать TLS-библиотеку, optional build flag и упаковку Linux/Windows; текущий `TLS_OPTIONS` относится к thread-local storage. TLS реализуется в P10, но зависимость не оставлять неизвестной до этого этапа.
 
 Начать профиль целевого приложения: driver/version, startup, служебные SQL, placeholders, каталоги и транзакции. Если приложение пока не выбрано, оставить это открытым условием M3; host и протокол от выбора не зависят. Не добавлять SQL compatibility в wire-слой по результатам трассы.
 
-**Готово:** native baseline воспроизводим; решения о ABI/engine metadata/TLS и команды сборки записаны. Недоступная зависимость обозначена конкретно, успех сборки не предполагается.
+**Готово:** native baseline воспроизводим; решения о ABI/SQL boundary/TLS и команды сборки записаны. Недоступная зависимость обозначена конкретно, успех сборки не предполагается.
 
 ## P1. Общий host, конфигурация и plugin ABI
 
@@ -36,7 +36,7 @@ Host владеет listeners, transport, workers, registry и shutdown. Реа�
 
 ## P2. PgWire framing, authentication и attachment
 
-**Статус: целевые Linux/Super проверки P2 — PASS; команды и границы покрытия в [VALIDATION.md](VALIDATION.md).** В отдельном `src/plugins/wire/pg` реализованы protocol 3.0 StartupMessage, отказ SSLRequest/GSSENCRequest одним N, PasswordMessage, Query, Terminate и serializers. Production module добавлен в POSIX/CMake build definitions. Любой корректный Query получает 0A000 + ReadyForQuery I без SQL-разбора; parser execution начинается в P3.
+**Статус: целевые Linux/Super проверки P2 — PASS; команды и границы покрытия в [VALIDATION.md](VALIDATION.md).** В отдельном `src/plugins/wire/pg` реализованы protocol 3.0 StartupMessage, отказ SSLRequest/GSSENCRequest одним N, PasswordMessage, Query, Terminate и serializers. Production module добавлен в POSIX/CMake build definitions. Зафиксированный P2 отвечал всем корректным Query одинаковым 0A000 + ReadyForQuery I без engine prepare; начиная с P3 эта временная заглушка заменена execution через parser.
 
 `IWireServerHost` расширен версионированными attachDatabase/detachDatabase. Attachment принадлежит host и выдаётся plugin как borrowed до detach/end of run; после detach он недействителен даже при ошибке. Child interfaces закрываются до detach. Общий helper `Authentication.cpp` выполняет in-memory Srp256 exchange без изменения EDS. Прямой вызов `EDS::validatePassword` до attach неприменим: он требует текущий attachment.
 
@@ -46,45 +46,37 @@ Codec tests и startup harness проверяют: partial/coalesced frames, lit
 
 **Критерий приёмки:** правильный/неправильный пароль, неизвестные user/alias, default database=user с allowlist, plugin policy, RemoteAccess, раздельные identities через native monitoring, ON CONNECT failure до AuthenticationOk, cleanup и отсутствие вторичного сетевого attach. Результаты фиксируются отдельно; вычисляемый SELECT остаётся условием P3/M0. Ключ шифрования от native клиента не поддерживается; серверный key holder проверяется отдельно.
 
-## P3. Первый запрос и минимальная metadata — M0
+## P3. Первый запрос — исторический M0
 
-Добавить минимальный info item исходного вида операции через существующий `IStatement::getInfo`, сохранив legacy `getType()`/flags. До execution он должен различать обычный SELECT, DML RETURNING и selectable EXECUTE BLOCK: публичные SELECT type/FLAG_HAS_CURSOR для этого недостаточны. M0 выполняет поддержанный SELECT, остальные виды дают 0A000 по metadata. Это временная граница первого smoke, которая снимается в P4/P5.
+M0 проверил вычисляемый SELECT, настоящие C libpq/Psycopg2, authentication, recovery, native coexistence и lifecycle. Результаты сохранены в VALIDATION. Прежний SELECT-only фильтр и дополнительные engine metadata не являются текущим контрактом; они удалены при переносе классификации в плагин. SQL всегда передаётся engine целиком. BEGIN/$n остаются native parser errors.
 
-Полный descriptor DML/DDL/control/session и EMPTY не входят в M0. До P4 пустой ввод может получать существующую parser error; его нельзя фиктивно считать успешно разобранным. E/recovery появляется в P5. Wire SQL lexer не вводится ни для временного M0, ни для полного контракта.
+## P4. Simple Query, базовые codecs и ограниченная классификация
 
-Выполнить через engine prepare/execute/fetch:
+**Статус: целевая Linux/Super loopback приёмка — PASS.** Full make, четыре unit executable, 12 Simple Query групп с trace и lifecycle/startup/native regressions прошли. Прежние ревизии остаются историей; новые evidence и ограничения — в [VALIDATION.md](VALIDATION.md). Следующий этап — P5.
 
-```sql
-SELECT CAST(40 + 2 AS INTEGER) AS "answer" FROM RDB$DATABASE
-```
+SQL передаётся в engine prepare целиком, с исходной byte length и без изменения текста. Ограниченный lexer внутри PgWire определяет вид команды, command tag, профиль transaction/session controls и признак tokenless EMPTY. Он учитывает comments, строки и quoted identifiers, но не проверяет grammar, имена объектов, privileges или типы. Общий wire host SQL не анализирует.
 
-Прямой C libpq `PQexec` и psycopg2 с `autocommit=True` получают 42, OID 23 и alias `answer`. Psycopg2 connection context не использовать: он может отправлять `BEGIN`. Проверить другое выражение/данные, SQL error → успешный query на той же сессии, настоящий implicit commit/rollback и освобождение attachment при disconnect.
+После успешного engine prepare плагин сочетает lexical descriptor с существующими `getType()`, `getFlags()`, input/output metadata и affected records. `FLAG_HAS_CURSOR` выбирает cursor/fetch; output metadata определяет singleton output и codecs. RETURNING не превращает DML в SELECT. Неподдержанный control либо UNKNOWN, включая USING wrapper, получает 0A000 до execution; ошибка самого prepare сохраняет приоритет. Новые публичные DSQL getInfo items, AST annotations и parser diagnostics для PgWire не добавляются.
 
-**M0:** обязательные M0 checks из TEST_PLAN, включая SELECT/RETURNING/SELECT_BLOCK distinction; native работает одновременно, endpoint принадлежит `firebird`, backend network hop отсутствует. Минимальная metadata проверена независимо от wire. `BEGIN` и `$n` получают ошибки существующего parser.
+Запрещены SQL rewriting, удаление comments из передаваемого текста, разбиение batches, замена `$n` на `?`, подстановка параметров SQL-литералами и эмуляция успешного SET/BEGIN. Совместимость синтаксиса и реальное исполнение определяет только Firebird. Неподдержанный batch передаётся parser целиком и отвергается без частичных эффектов.
 
-## P4. Simple Query, базовые codecs и diagnostics
+EMPTY определяется ограниченным lexer только для нулевой строки, whitespace и полностью закрытых comments без SQL tokens. Даже такой текст передаётся в обычный engine prepare неизменённым. Только сочетание этого признака с engine syntax error 42601 после успешного cleanup преобразуется в EmptyQueryResponse; permission, cancellation, resource и другие ошибки не маскируются. Незаконченные строка/comment/statement и отдельный `;` остаются parser errors. Native parser diagnostics и `isql -autoterm` не меняются.
 
-Расширить нейтральный engine descriptor исходными DML/DDL subtype, result kind и metadata для точных command tags; controls/session effects завершить в P5. Сохранить вид операции до DSQL transformations. MERGE/UPDATE OR INSERT/RETURNING не классифицируются по coarse SELECT/INSERT type.
+Сохранить SELECT/DML/DDL/RETURNING, EXECUTE BLOCK/PROCEDURE, affected-record counts, singleton/cursor output и реальные implicit commit/rollback. Поддержанные text codecs: integer, BOOLEAN, CHAR/VARCHAR, exact numeric в SHORT/LONG/INT64 и NULL. CHAR fetch использует varying metadata, logical CHAR OID и значимые пробелы сохраняются.
 
-Различать EMPTY посредством отдельного engine diagnostic marker для чистого EOF без SQL tokens. Учесть нулевую длину до parser, whitespace/comments и незаконченные строки/комментарии. Сохранить legacy `isc_command_end_err2`-совместимость, в частности isql AUTOTERM; дополнительный marker/opt-in проверяется native regression. Новый standalone analysis API не нужен.
+Обязательные проверки: ограниченный lexer unit tests; raw TCP comments/mixed-case/CTE/quoted identifiers/literals/DDL modifiers/RETURNING; неизвестные wrappers и controls после prepare получают 0A000 без side effects; malformed SQL/batches сохраняют parser error. Штатные native isql AUTOTERM и diagnostics не меняются. C libpq и psycopg2 autocommit, cross-visibility, real commit failure, lifecycle/startup/native regressions прошли на этой реализации. Зависимость от отдельного native metadata executable удалена.
 
-Реализовать integers, boolean, CHAR/VARCHAR, точный numeric до INT64 и NULL. Сохранять исходные type/subtype/scale/alias; проверять диапазоны, UTF8 byte lengths, NULL/empty и locale-independent formatting. Для CHAR предпочесть engine fetch conversion в SQL_VARYING, сохраняя внешние CHAR metadata: не обрезать значимые пробелы и не передавать физическую UTF8-добивку.
-
-Выполнять совместимые DML/DDL и RETURNING без лексического allowlist. Проверять поддержку входных/выходных metadata до side effects. Форма запроса определяется parser, количество строк — engine result, command tag — нейтральными metadata. Не ограничивать DDL только CREATE/DROP TABLE.
-
-Сопоставлять ошибки по полному структурированному ISC status vector и приоритету конкретных причин. Не использовать текст сообщения или только `status[1]`. Ошибки fetch/commit не завершаются ложным CommandComplete.
-
-**Готово:** базовые codec/DML/DDL/RETURNING/error cases; несовместимый синтаксис отвергается движком без исполнения части batch. Неподдержанный тип даёт ошибку, а не подмену на text/NULL.
+**Критерий завершения:** сборка и соответствующая текущему SQL boundary integration suite прошли, реальные команды/версии/ограничения записаны в VALIDATION. Close/free fault injection и engine execution timeout отдельно отмечаются как выполненные либо not-run.
 
 ## P5. Транзакции и состояние сессии
 
-Реализовать I/T/E по CODEX_CONTEXT с parser-derived действиями `SET TRANSACTION`, `COMMIT`, `ROLLBACK`, retaining и savepoints. SQL управления транзакцией проходит движок; после execute учитывать возвращённый `ITransaction*`, который может измениться или стать NULL. Implicit transaction имеет настоящий commit/rollback.
+Реализовать I/T/E по CODEX_CONTEXT с plugin-local control descriptor после engine prepare для действий `SET TRANSACTION`, `COMMIT`, `ROLLBACK`, retaining и savepoints. SQL управления транзакцией проходит движок; после execute учитывать возвращённый `ITransaction*`, который может измениться или стать NULL. Implicit transaction имеет настоящий commit/rollback.
 
 Только PgWire-сессия управляет не более чем одной текущей application transaction; последовательных транзакций за жизнь соединения может быть сколько угодно. Это не ограничение generic host, родного API или других plugins. Parse/Describe/statements/portals используют текущую transaction либо prepare с NULL, без отдельного handle; внутренние system/security/autonomous transactions не входят в инвариант.
 
-В E использовать обычный prepare с живой native transaction и подробные metadata. После успешного prepare исполнять только разрешённые recovery commands, прочие освобождать с 25P02. Синтаксические ошибки сохраняют 42601; ожидаемые semantic errors могут отображаться в 25P02 по явной таблице. Shutdown, cancellation/timeout, invalid handle, resource/I/O errors сохраняют собственную диагностику и cleanup/close. Prepare не выполняет подготовленный DML/DDL, но может компилировать, загружать metadata/external routines и брать locks; это не отдельный чистый parser API.
+В E использовать обычный prepare с живой native transaction, штатные metadata и plugin-local control descriptor. После успешного prepare исполнять только разрешённые recovery commands, прочие освобождать с 25P02. Синтаксические ошибки сохраняют 42601; ожидаемые semantic errors могут отображаться в 25P02 по явной таблице. Shutdown, cancellation/timeout, invalid handle, resource/I/O errors сохраняют собственную диагностику и cleanup/close. Prepare не выполняет подготовленный DML/DDL, но может компилировать, загружать metadata/external routines и брать locks; это не отдельный чистый parser API.
 
-После statement error в explicit block сохранять native transaction и логический E; обычные команды получают 25P02. Полный COMMIT из E завершает текущую transaction rollback. Допустимый ROLLBACK TO восстанавливает T без потери изменений до savepoint. Retaining, AUTO COMMIT / NO AUTO UNDO и ошибки control commands следуют контракту CODEX_CONTEXT: native AUTO COMMIT сохраняет собственную семантику, уже совершённые commits не отменяются. Не перехватывать PostgreSQL `BEGIN`, `SET` и другие несовместимые формы.
+После statement error в explicit block сохранять native transaction и логический E; обычные команды получают 25P02. Полный COMMIT из E завершает текущую transaction rollback. Допустимый ROLLBACK TO восстанавливает T без потери изменений до savepoint. Retaining, AUTO COMMIT / NO AUTO UNDO и ошибки control commands следуют контракту CODEX_CONTEXT: native AUTO COMMIT сохраняет собственную семантику, уже совершённые commits не отменяются. Не эмулировать успешный PostgreSQL `BEGIN`, `SET` и другие несовместимые формы.
 
 **Готово:** native transaction SQL, visibility, I/T/E и `PQtransactionStatus`, unique violation/recovery, savepoints/retaining, disconnect rollback и `ALTER SESSION RESET`, способный заменить native transaction при том же interface pointer. Автоматический `BEGIN` psycopg2 остаётся отрицательной проверкой синтаксиса до отдельного расширения grammar.
 

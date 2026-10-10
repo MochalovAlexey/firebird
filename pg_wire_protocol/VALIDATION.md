@@ -1,8 +1,8 @@
 # Проверки реализации
 
-Дата: 9 октября 2026 года. HEAD до текущего среза P2: `69712ca686`, baseline master Firebird 6 `bf94598f8deefeb7cc4a8217ee43b3040d5d6650`. Предыдущие разделы сохраняют историю проверок.
+Дата: 12 октября 2026 года. HEAD до текущего рефакторинга P4: `26d4cc3704`, baseline master Firebird 6 `bf94598f8deefeb7cc4a8217ee43b3040d5d6650`. Предыдущие разделы сохраняют историю проверок, включая впоследствии удалённые engine metadata и native metadata executable.
 
-Текущий этап: P2 — production PgWire plugin, framing, Startup, проверка credentials через Srp256 и локальный attachment. Целевые проверки Linux/Super прошли: codec, 52 проверки настоящего PostgreSQL TCP endpoint, libpq 14.24, регрессия host/plugin и native coexistence. Host использует существующий `IConfigManager::getPluginConfig`, интерфейс ConfigManager не расширяется. Query пока возвращает `0A000` и ReadyForQuery `I`; SQL execution начинается с P3, M0–M3 не приняты. Исходные Python acceptance cases не запускались против Firebird и требуют миграции по TEST_PLAN.md. Результаты P2 приведены в последнем разделе.
+Текущий этап: **рефакторинг P4 принят для Linux/Super, IPv4 loopback**. Ограниченная классификация SQL перенесена в PgWire; origin/command/result/DDL additions и EMPTY diagnostic удалены из движка. Полный SQL передаётся штатному prepare без изменений. Прошли полная сборка, четыре unit executables (включая 284 проверки SqlInfo), 12 групп Simple Query, 7 lifecycle, 52 startup и 9 native checks. Прямые драйверы — C libpq 14.24 и psycopg2 2.9.11/libpq 17.6. Результаты текущего рефакторинга приведены в последнем разделе. Следующий этап — P5: explicit transactions и session controls; M1–M3 не приняты.
 
 ## Окружение и сборка
 
@@ -307,3 +307,246 @@ PASS. Real-plugin regression проверил loading/errors/ownership/stop/rele
 Результат относится к Linux/Super и IPv4 loopback без TLS. Psycopg 2/3 в окружении отсутствуют; проверен именно runtime libpq через ctypes, C development headers для будущего harness по-прежнему отсутствуют. Windows, другие server modes и полная CMake сборка не проверялись. Security database должна быть локальной и иметь Engine14 среди Providers. Синхронный auth/attach до получения handle не имеет жёсткого прерывания по сетевому IOTimeout: helper проверяет stop между callbacks, а protocol повторно проверяет deadline перед AuthenticationOk. Проверки transport shutdown не доказывают preemption произвольного auth plugin.
 
 P2 не выполняет engine prepare/execute. SELECT, типы результатов, транзакции, Extended Query, Cancel и TLS остаются в следующих этапах; M0 ожидает P3.
+
+## P3/M0: настоящий SELECT через движок — исторический Linux/Super PASS
+
+9 октября 2026 года, HEAD до изменений `d072686153`. `Execute.cpp` передаёт исходные SQL bytes и длину в `IAttachment::prepare`, затем использует `IStatement::openCursor` и `IResultSet::fetchNext`. Одну implicit READ COMMITTED/write/nowait transaction разделяют prepare/open/fetch. После EOF закрываются cursor/statement и выполняется commit; только затем отправляется CommandComplete. Ошибка приводит к rollback, ошибка cleanup или commit — к завершению сессии. SQL lexer/splitter/rewriter в plugin не добавлен.
+
+Новый `isc_info_sql_stmt_origin=34` сохраняет исходный AST category до DSQL transformations: SELECT=1, OTHER=0. В сочетании с прежними type/flags это позволяет отклонять DML RETURNING и selectable EXECUTE BLOCK до исполнения. Сам origin не означает read-only: SELECT может вызывать routines с эффектами. Legacy type/flags и ABI интерфейсов не меняются; Pascal constants перегенерированы.
+
+Начальный result profile: SMALLINT/INTEGER/BIGINT при scale=0/subtype=0, NULL, text format, OID 21/23/20, engine aliases. Прочие output types и input parameters отвергаются по metadata до openCursor. RowDescription/DataRow/CommandComplete проверяют sizes/UTF8 до allocation и записи. Ошибка частичной записи завершает transport без дописывания нового frame. `ErrorStatus.cpp` рассматривает полный структурированный status vector, включая explicit SQLSTATE; строки и числовые аргументы не считаются кодами ошибок.
+
+### Сборка и самостоятельные unit tests
+
+```sh
+cd /tmp/firebird-pgwire-build
+./config.status --file=gen/Makefile:builds/posix/Makefile.in --file=gen/make.shared.variables:builds/posix/make.shared.variables
+make -j2 > p3-final-build.log 2>&1
+make -C gen -j2 TARGET=Debug pgwire_tests statement_origin_tests > p3-tests-build.log 2>&1
+LD_LIBRARY_PATH=/tmp/firebird-pgwire-build/gen/Debug/firebird/lib \
+  gen/Debug/firebird/tests/pgwire_protocol_test > p3-codec-tests.log 2>&1
+LD_LIBRARY_PATH=/tmp/firebird-pgwire-build/gen/Debug/firebird/lib \
+  gen/Debug/firebird/tests/pgwire_error_test > p3-error-tests.log 2>&1
+```
+
+Все команды PASS, exit 0. Полная пересборка после public header change записана в `p3-build-retry.log`; финальный проход и тестовые targets — в логах выше. Первый `make -j4` остановился из-за внутреннего compiler error GCC 13.4.0 в неизменённом `TimeZoneUtil.cpp`/`<atomic>`. Повторный `make -j2` прошёл без изменения этого кода.
+
+Codec unit tests включают независимые literal bytes metadata/rows/tags, NULL/empty/UTF8, integer text, partial writes, signed metadata, exact bounds/field counts и обрыв DataRow по deadline. Error-status unit tests проверяют nested cause и explicit SQLSTATE за пределами первых 20 элементов, `cstring`, ложные code values внутри аргументов и приоритеты shutdown/cancel/permission. Оба executable сообщили PASS.
+
+Production PgWire содержит отдельные Execute/ErrorStatus objects. POSIX build проверен; CMake definitions обновлены, полная CMake сборка не выполнялась. Pascal constants сгенерированы штатным `updateCloopInterfaces`; Pascal compiler отсутствует.
+
+### Клиенты и изолированный runtime
+
+Для прямого C test использованы настоящие headers из Ubuntu `libpq-dev 14.24-0ubuntu0.22.04.1`, извлечённого в `/tmp/firebird-pgwire-p3-deps/libpq-dev` без системной установки. Системный libpq — 14.24. В отдельном venv `/tmp/firebird-pgwire-p3-deps/venv` установлен psycopg2-binary 2.9.11, который использует свой libpq 17.6. Версии, SHA headers/source и build command фиксирует harness; ctypes-only smoke не подменяет C gate.
+
+```sh
+cd /home/aleksey/dev/my_firebird/firebird
+python3 -B pg_wire_protocol/tools/pgwire_query_smoke.py \
+  --firebird-dir /tmp/firebird-pgwire-build/gen/Debug/firebird \
+  --work-dir /tmp/firebird-pgwire-p3-query-02 \
+  --libpq-include-dir /tmp/firebird-pgwire-p3-deps/libpq-dev/usr/include/postgresql \
+  --libpq-library /lib/x86_64-linux-gnu/libpq.so.5 \
+  --driver-python /tmp/firebird-pgwire-p3-deps/venv/bin/python \
+  --statement-origin-test /tmp/firebird-pgwire-build/gen/Debug/firebird/tests/statement_origin_test
+```
+
+PASS: **13 групп проверок**, все четыре server phases завершились exit 0 без forced kill. Shutdown — 0.114–0.164 секунды, включая остановку с выполняющимся SELECT. Результаты и sanitized logs: `/tmp/firebird-pgwire-p3-query-02/summary.json` и соседние файлы. Использованы отдельные runtime/security DB/application databases/locks и временные TCP ports. Сетевые тесты и strace запускались с разрешением вне sandbox; рабочие экземпляры пользователя не менялись.
+
+| Проверка | Свидетельство |
+|---|---|
+| Независимая engine metadata | `statement-origin.log`: 21 SQL case × 2 прохода prepare/free, SELECT/WITH/UNION, RETURNING, BLOCK, DDL/controls; legacy type/flags, cache, combined/single/truncated getInfo и отсутствие execution — PASS |
+| Прямой C libpq | `libpq-direct-c.log`: compile headers/runtime 140024, PQexec, 42/OID23/alias answer, 49, integer limits/NULL, 0/many rows, command tags, errors/recovery — PASS |
+| psycopg2 | `psycopg2.log`: 2.9.11, compile/runtime libpq 170006, explicit autocommit=True без connection context, значения/типы/NULL/rows/errors/recovery — PASS |
+| Raw results и SQL boundary | 0/1/257 rows, UTF8/quoted aliases, integer metadata, partial/coalesced Query, comments/literals с BEGIN/$1/semicolon, batch parser refusal — PASS |
+| Identity и права | CURRENT_USER подтверждён integer predicate; второй пользователь получает 42501 на таблицу и затем успешно выполняет свой SELECT — PASS |
+| Refusal до execution | INSERT SELECT/UPDATE RETURNING с legacy SELECT cursor, INSERT VALUES RETURNING, selectable BLOCK и unsupported output — 0A000 без RowDescription; sequences не изменились, поэтому rollback не скрывает исполнения |
+| Implicit commit/rollback | SELECT над процедурой сохраняет insert после успеха; division error после уже отправленной DataRow откатывает insert, CommandComplete отсутствует, следующий SELECT работает |
+| Disconnect/active shutdown | Streaming SELECT действительно исполнился по sequence marker; disconnect откатывает insert и удаляет attachment. Долгий SELECT виден в MON$STATEMENTS и оставляет sequence marker; server shutdown отменяет работу и откатывает insert |
+| Ошибки endpoint | Отсутствующий production PgWire module и занятый дополнительный порт диагностируются; native SQL продолжает работать; при bind failure модуль ещё не загружен |
+| Локальный engine route | Trace успешного auth/SELECT, неуспешного auth/policy и native observer: 0 backend connects; 51 OS/NSS Unix вызов по тем же двум точным разрешённым путям |
+
+После query/error native monitoring подтверждает отсутствие оставшейся application transaction; после disconnect — отсутствие session attachment. Подготовленный SQL выполняется только после проверки origin/type/flags/input/output metadata. Batch с GEN_ID отвергнут parser до изменения sequence.
+
+Первый запуск `p3-query-01` остановился при C connect: harness ожидал только готовности native listener. Перед driver suite добавлено ожидание успешного PgWire login/Terminate/cleanup и информативная диагностика libpq с удалением пароля. Полный повторный `p3-query-02` прошёл; production binaries между этими попытками не менялись. Первый неуспешный запуск не входит в PASS.
+
+### Регрессия и итог M0
+
+```sh
+python3 -B pg_wire_protocol/tools/pgwire_startup_smoke.py \
+  --firebird-dir /tmp/firebird-pgwire-build/gen/Debug/firebird \
+  --work-dir /tmp/firebird-pgwire-p3-startup-01
+python3 -B pg_wire_protocol/tools/native_baseline.py \
+  --firebird-dir /tmp/firebird-pgwire-build/gen/Debug/firebird \
+  --work-dir /tmp/firebird-pgwire-p3-native-01
+```
+
+PASS: startup regression — 52 checks, теперь с реальным SELECT/recovery; native baseline при отключённых wire plugins — 9 checks, прежние SQL/auth/commit/rollback. Все серверы остановлены с exit 0. Native также работал параллельно с PgWire во время query/startup suites. Python AST, локальные Markdown links и `git diff --check` прошли.
+
+M0-01…08 закрыты для указанного Linux/Super loopback profile. Это не приёмка M1: DML/DDL/control statements, дополнительные codecs, EMPTY marker, Extended Query, PostgreSQL grammar, TLS и удалённый bind остаются последующим этапам.
+
+Границы проверки: runtime Windows/Classic/SuperClassic и полная CMake сборка отсутствуют; ошибки close/free/commit не инъецировались, их порядок и consuming ownership проверены review. Истечение engine statement timeout отдельно не измерялось; проверены network deadlines и cancellation при active SQL shutdown. IOTimeout передаётся в IStatement::setTimeout после prepare и не является hard deadline для startTransaction/prepare/auth/cleanup/commit. C++/C tests и actual clients подтверждают текущий профиль, а не прозрачную работу произвольного PostgreSQL-приложения.
+
+## Консольный SQL-клиент для ручной проверки — Linux PASS
+
+9 октября 2026 года, HEAD `0d9546336f`. Добавлен `tools/pgwire_client.py`: Python stdlib/ctypes и настоящая libpq, Simple Query по TCP, повторные `-c`/`-f` на одном соединении и интерактивный ввод с отдельной командой `\g`. Ввод UTF8 передаётся целиком, включая CRLF внутри SQL literals. Клиент показывает результаты, OID, NULL, SQLSTATE и transaction state. Инструкция настройки и совместной проверки с native isql находится в [MANUAL_TESTING.md](MANUAL_TESTING.md). Production-код и серверные возможности этим изменением не расширяются.
+
+Временный integration harness использует существующий `StartupHarness`, отдельную копию runtime/security DB, тестовую application database и свободные TCP ports:
+
+```sh
+python3 -B /tmp/pgwire_manual_client_smoke.py \
+  --repository /home/aleksey/dev/my_firebird/firebird \
+  --firebird-dir /tmp/firebird-pgwire-build/gen/Debug/firebird \
+  --work-dir /tmp/firebird-pgwire-manual-client-02
+```
+
+PASS: **15 проверок**, результат — `/tmp/firebird-pgwire-manual-client-02/summary.json`. Проверены результат 42/OID23/NULL, сохранение attachment между запросами, восстановление после SQL-ошибки, порядок смешанных `-c`/`-f`, UTF8 и сохранение CRLF в file/stdin, отсутствие разбиения SQL, `--stop-on-error`, ошибки authentication/file, интерактивные `\g`/`\p`/`\r`/`\q`. Унаследованные `PGHOSTADDR`/`PGSERVICE` не меняют выбранный endpoint; `PGTARGETSESSIONATTRS` не вызывает дополнительных SQL-проверок.
+
+Через отдельное native TCP-подключение подтверждены тот же server PID и двусторонняя видимость committed changes: native INSERT читается PgWire-клиентом; INSERT внутри selectable procedure, вызванной через PgWire SELECT, виден native observer. Это проверяет implicit commit, а не поддержку прямого INSERT через PgWire. Сервер завершился exit 0 за 0.164 секунды без forced kill. Рабочая БД пользователя не изменялась.
+
+Первый запуск `manual-client-01` прошёл 12 проверок; финальный `manual-client-02` повторил их после исправлений и добавления CRLF/environment cases. Python syntax, `--help`, локальные Markdown links и `git diff --check` также прошли. Новая проверка относится к утилите на Linux/Super loopback; серверная приёмка M0 и её ограничения приведены выше.
+
+По запросу пользователя скрытый ввод пароля заменён на `-P PASSWORD` / `--password PASSWORD` (`-W PASSWORD` — дополнительное короткое имя). Аргумент имеет приоритет перед `PGPASSWORD`; отсутствие обоих даёт ошибку аргументов до подключения. `-d` / `--database` передаёт имя или путь буквально, однако production PgWire по-прежнему принимает только разрешённые alias. Прямое подключение по пути этим изменением не реализуется.
+
+Повторный запуск той же команды с `--work-dir /tmp/firebird-pgwire-manual-client-03` — **18 проверок PASS**. Добавлены успешный вход с аргументом пароля при неверном `PGPASSWORD`, отказ неверному аргументу при правильном `PGPASSWORD` и отказ при отсутствии пароля без интерактивного prompt или загрузки libpq. Пароли не записываются в отчёт; тестовые argv credentials используются согласно выбранному интерфейсу клиента. Результат — `/tmp/firebird-pgwire-manual-client-03/summary.json`. Все прежние CLI/native checks повторены; рабочий экземпляр пользователя не менялся.
+
+## P4 — Simple Query DML/DDL, codecs и EMPTY: исторический Linux/Super PASS
+
+12 октября 2026 года, HEAD до изменений `03be167a24`. Полная POSIX Debug сборка выполнена в `/tmp/firebird-pgwire-build`; рабочий сервер пользователя и его базы не изменялись. Проверенный профиль — Linux x86_64, Super, IPv4 loopback, UTF8/dialect 3, отдельный production PgWire module и локальный Engine14. Публичные metadata items 35–38 и EMPTY diagnostic реализованы движком; SQL lexer/splitter/rewrite во frontend отсутствуют. Generated Pascal constants обновлены штатной сборкой.
+
+### Сборка и unit tests
+
+```sh
+cd /tmp/firebird-pgwire-build
+./config.status --file=gen/Makefile:builds/posix/Makefile.in \
+  --file=gen/make.shared.variables:builds/posix/make.shared.variables
+make -j2 > p4-build.log 2>&1
+make -C gen -j2 TARGET=Debug pgwire_tests statement_origin_tests > p4-tests-build.log 2>&1
+LD_LIBRARY_PATH=gen/Debug/firebird/lib gen/Debug/firebird/tests/pgwire_protocol_test
+LD_LIBRARY_PATH=gen/Debug/firebird/lib gen/Debug/firebird/tests/pgwire_error_test
+LD_LIBRARY_PATH=gen/Debug/firebird/lib gen/Debug/firebird/tests/pgwire_result_test
+```
+
+PASS: full build и все три executable unit tests. Protocol test сверяет EmptyQueryResponse с независимыми literal bytes; ErrorStatus test проверяет UNIQUE/FK/CHECK, полные status vectors и приоритет fatal/cancel/permission; ResultCodec test проверяет native buffer layout/bounds, integer limits, точное scaled numeric/INT64_MIN, boolean, NULL, CHAR/VARCHAR, UTF8/NUL и отказ неподдержанным metadata. Новая test link rule включает COMMON_LIB, поскольку internal UTF8/status helpers не экспортируются libfbclient.
+
+Первый build выявил два использования запрещённого copy constructor StatusVector в новых engine diagnostics. Исправлено отдельным созданием и наполнением vector; полный повторный build прошёл. После успешной полной сборки production-код не менялся. Последующие изменения затрагивали ожидания тестов и документацию; финальный native test пересобран через `statement_origin_tests`, лог `p4-metadata-build.log`.
+
+### Полная P4 приёмка
+
+```sh
+cd /home/aleksey/dev/my_firebird/firebird
+python3 -B pg_wire_protocol/tools/pgwire_simple_query_smoke.py \
+  --firebird-dir /tmp/firebird-pgwire-build/gen/Debug/firebird \
+  --work-dir /tmp/firebird-pgwire-p4-simple-02 \
+  --libpq-include-dir /tmp/firebird-pgwire-p3-deps/libpq-dev/usr/include/postgresql \
+  --libpq-library /lib/x86_64-linux-gnu/libpq.so.5 \
+  --driver-python /tmp/firebird-pgwire-p3-deps/venv/bin/python \
+  --statement-origin-test /tmp/firebird-pgwire-build/gen/Debug/firebird/tests/statement_origin_test
+```
+
+PASS: **12 групп**, результат `/tmp/firebird-pgwire-p4-simple-02/summary.json`. Harness создаёт копию runtime, отдельные security/application databases, пользователей, locks и свободные TCP ports. Использованы настоящие headers/runtime C libpq 14.24 и psycopg2 2.9.11 с libpq 17.6; Python connection работает с `autocommit=True`, без connection context. Сетевые проверки/strace выполнялись с разрешением вне sandbox.
+
+| Проверка | Фактический результат |
+|---|---|
+| Native metadata | 31 DML/control/session + 46 DDL statements, два прохода: origin/command/result/DDL, legacy type/flags, cache reuse, single/combined/truncated getInfo, отсутствие execution при prepare — PASS |
+| Native EMPTY | Пустой текст, whitespace/comments, explicit length; сохранение isc_dsql_error/isc_sqlerr/isc_command_end_err2, отсутствие marker у неполного SQL и `;`; PREPARE_REQUIRE_SEMICOLON и отдельный native isql AUTOTERM — PASS |
+| Scalar codecs | Integer limits, BOOLEAN, CHAR с ASCII/кириллицей/пробелами, VARCHAR UTF8/emoji/пустая строка, NULL, exact scaled NUMERIC/DECIMAL, OID/size/typmod — PASS |
+| DML и RETURNING | INSERT/UPDATE/DELETE, MERGE, UPDATE OR INSERT, 0/1/many affected records, singleton/cursor RETURNING, исходные tags; trigger effects не увеличивают внешний affected count — PASS |
+| DDL и PSQL | CREATE/ALTER/DROP, RECREATE, CREATE OR ALTER, таблицы/индексы/views/domains/sequences/procedures/exceptions, EXECUTE BLOCK с/без результата и EXECUTE PROCEDURE — PASS |
+| Native cross-visibility | Committed DML/DDL из PgWire видны отдельному native observer; после обычной ошибки записи откатываются, transaction не остаётся — PASS |
+| Отказ до execution | Unsupported DOUBLE/BLOB/INT128, input parameters и controls, batch refusal; GEN_ID не меняется, поэтому rollback не скрывает исполнения — PASS |
+| Ошибки и recovery | UNIQUE 23505, CHECK 23514, общий NOT NULL/domain 23000, parser 42601, продолжение того же соединения; division error после DataRow без CommandComplete и с rollback — PASS |
+| Реальная ошибка commit | ON TRANSACTION COMMIT trigger вызывает exception после выдачи DataRow: FATAL XX000 → EOF, без CommandComplete/ReadyForQuery; native observer подтверждает rollback, новое PgWire соединение успешно — PASS |
+| EMPTY по wire | EmptyQueryResponse/Ready I и следующий SELECT; незавершённый SQL и вложенный block comment получают parser error — PASS |
+| Настоящие драйверы | C PQexec и psycopg2: DDL/DML/RETURNING, преобразование новых типов, tags, ошибки/recovery, EMPTY в C — PASS |
+| Локальное исполнение | Syscall trace всех server threads от startup до shutdown: 0 backend connect attempts; 49 OS/NSS Unix calls по двум прежним явно разрешённым путям — PASS |
+
+Обе server phases завершились exit 0 без forced kill; shutdown около 0.164 секунды. Логи metadata/C/Python/native AUTOTERM и trace находятся рядом с summary. Ранний `p4-simple-01` остановился на неверном ожидании native CALL: без output targets он имеет result NONE. В тестах также исправлены native syntax `CREATE OR ALTER SEQUENCE ... START WITH` и ожидание внешнего status prefix isc_dsql_error. SQL debug attempts обнаружили только неверное положительное ожидание вложенного block comment: текущий Firebird parser его не поддерживает. После исправлений отдельный debug run прошёл 10 SQL-групп; он не заменяет приведённый полный `simple-02` PASS. Production binaries для этих повторов не менялись.
+
+### Lifecycle, startup и native regression
+
+```sh
+python3 -B pg_wire_protocol/tools/pgwire_lifecycle_smoke.py \
+  --firebird-dir /tmp/firebird-pgwire-build/gen/Debug/firebird \
+  --work-dir /tmp/firebird-pgwire-p4-lifecycle-02
+python3 -B pg_wire_protocol/tools/pgwire_startup_smoke.py \
+  --firebird-dir /tmp/firebird-pgwire-build/gen/Debug/firebird \
+  --work-dir /tmp/firebird-pgwire-p4-startup-01
+python3 -B pg_wire_protocol/tools/native_baseline.py \
+  --firebird-dir /tmp/firebird-pgwire-build/gen/Debug/firebird \
+  --work-dir /tmp/firebird-pgwire-p4-native-01
+```
+
+PASS: **7 lifecycle groups**, **52 startup checks**, **9 native checks**. Lifecycle runner повторно использует прежние P3 fixtures/methods: 0/1/257 rows, права второго пользователя, implicit commit/rollback, реальные streaming disconnect и active-query shutdown с rollback, cleanup attachments, missing module/occupied port при работающем native. Исторический полный `pgwire_query_smoke.py` содержит SELECT-only отказы P3; его запуск не выдаётся за регрессию текущего P4. Эти устаревшие отказы заменены успешными P4 cases в новом Simple Query harness.
+
+Все server phases завершились exit 0 без forced kill, shutdown 0.114–0.164 секунды. Startup trace: 0 backend connects, 51 учтённый OS/NSS Unix call. Python syntax, локальные Markdown links и `git diff --check` прошли. MANUAL_TESTING обновлён двусторонним PgWire/native CRUD сценарием и примерами новых типов.
+
+P4 принят для описанного профиля; **следующий этап P5 — explicit transactions I/T/E и session controls**. Сейчас каждый Query автоматически commit/rollback, а явные SET TRANSACTION/COMMIT/ROLLBACK/savepoints получают 0A000. BEGIN и `$n` остаются ограничениями grammar. Это ещё не M1: P5/P6 не завершены. Extended Query, расширенные codecs, TLS, Windows/другие server modes и full CMake build не проверены. Ошибки close/free не инъецировались, отдельное истечение engine statement timeout не измерялось. FK SQLSTATE проверен unit status vectors, отдельный TCP FK fixture не запускался. IOTimeout не является hard deadline для prepare/auth/cleanup/commit. Для рабочего экземпляра пользователя изменения вступят в силу после его пересборки и перезапуска.
+
+## Рефакторинг P4: классификация внутри PgWire — Linux/Super PASS
+
+12 октября 2026 года, HEAD до изменений `26d4cc3704`. Удалены дополнительные origin/command/result/DDL info items, поля и методы DSQL/AST, изменения grammar/lexer и `isc_dsql_empty_statement`. Pascal constants перегенерированы штатным CLOOP. Удалены `StatementOriginTest.cpp`, его build targets и зависимость Python harness от этого executable. Проверка ниже завершилась exit 0: затронутые файлы движка, public constants и их документация совпадают с состоянием до этих дополнений.
+
+```sh
+git diff --exit-code d072686153 -- src/dsql \
+  src/include/firebird/impl/inf_pub.h src/include/firebird/impl/msg/jrd.h \
+  src/include/gen/Firebird.pas doc/README.isc_info_xxx
+```
+
+Plugin-only `SqlInfo` определяет command tag, способ подсчёта строк и поддержанный профиль по ограниченному начальному префиксу. Полный неизменённый SQL всегда проходит штатный prepare первым. Выбор cursor/singleton execution использует существующие `getFlags()` и output metadata; affected records берутся из существующего API. EMPTY получается только при реальной синтаксической ошибке prepare и полностью tokenless тексте. Остальные ошибки движка сохраняют приоритет перед capability checks.
+
+### Сборка и unit tests
+
+```sh
+cd /tmp/firebird-pgwire-build
+./config.status --file=gen/Makefile:builds/posix/Makefile.in \
+  --file=gen/make.shared.variables:builds/posix/make.shared.variables
+make -C gen TARGET=Debug updateCloopInterfaces > p4-lex-cloop.log 2>&1
+make -j2 > p4-lex-build.log 2>&1
+make -C gen -j2 TARGET=Debug pgwire_tests > p4-lex-tests-final-build.log 2>&1
+LD_LIBRARY_PATH=gen/Debug/firebird/lib gen/Debug/firebird/tests/pgwire_protocol_test
+LD_LIBRARY_PATH=gen/Debug/firebird/lib gen/Debug/firebird/tests/pgwire_error_test
+LD_LIBRARY_PATH=gen/Debug/firebird/lib gen/Debug/firebird/tests/pgwire_result_test
+LD_LIBRARY_PATH=gen/Debug/firebird/lib gen/Debug/firebird/tests/pgwire_sql_test
+```
+
+PASS: полная POSIX Debug сборка и все четыре executable. Новый SqlInfo test — **284 проверки**: comments/whitespace, quotes, границы keywords/identifiers, CTE и скобочный SELECT, DML/DDL modifiers, PACKAGE BODY против package с именем BODY, EMPTY и malformed input, отказ controls/unknown wrappers. Отдельная сборка этого чистого C++ теста с `-Wall -Wextra -Werror` также прошла. Первоначальная test link rule ошибочно включала общие LINK_LIBS с decFloat без его search path; ненужная для этого теста зависимость удалена, финальный build прошёл. Production binaries после успешной полной сборки не менялись.
+
+### Повторная сетевая приёмка
+
+```sh
+cd /home/aleksey/dev/my_firebird/firebird
+python3 -B pg_wire_protocol/tools/pgwire_simple_query_smoke.py \
+  --firebird-dir /tmp/firebird-pgwire-build/gen/Debug/firebird \
+  --work-dir /tmp/firebird-pgwire-p4-lex-simple-02 \
+  --libpq-include-dir /tmp/firebird-pgwire-p3-deps/libpq-dev/usr/include/postgresql \
+  --libpq-library /lib/x86_64-linux-gnu/libpq.so.5 \
+  --driver-python /tmp/firebird-pgwire-p3-deps/venv/bin/python
+python3 -B pg_wire_protocol/tools/pgwire_lifecycle_smoke.py \
+  --firebird-dir /tmp/firebird-pgwire-build/gen/Debug/firebird \
+  --work-dir /tmp/firebird-pgwire-p4-lex-lifecycle-01
+python3 -B pg_wire_protocol/tools/pgwire_startup_smoke.py \
+  --firebird-dir /tmp/firebird-pgwire-build/gen/Debug/firebird \
+  --work-dir /tmp/firebird-pgwire-p4-lex-startup-01
+python3 -B pg_wire_protocol/tools/native_baseline.py \
+  --firebird-dir /tmp/firebird-pgwire-build/gen/Debug/firebird \
+  --work-dir /tmp/firebird-pgwire-p4-lex-native-01
+```
+
+PASS: **12 Simple Query groups**, **7 lifecycle groups**, **52 startup checks**, **9 native checks**. Для каждого запуска сохранён `summary.json` и sanitized logs в соответствующем work directory. Настоящие C headers/runtime — libpq 14.24; psycopg2 2.9.11 использует libpq 17.6 и explicit autocommit. Все запуски выполнялись на отдельных runtime/security/application databases/locks и свободных TCP ports в `/tmp`, с разрешённым TCP/strace вне sandbox.
+
+| Проверка | Результат |
+|---|---|
+| SELECT, CRUD, MERGE/upsert, RETURNING, DDL, PSQL и scalar codecs | PASS: прежние значения, tags, row counts, native cross-visibility и implicit commit/rollback сохранены |
+| Ограниченная классификация | PASS: mixed case/comments, keywords в quoted names/literals, CTE, скобочный SELECT, GTT/index modifiers; PACKAGE с именем BODY и настоящий PACKAGE BODY различаются |
+| Приоритет native prepare | PASS: malformed controls/batches дают 42601, семантически неверный USING сохраняет 42000; SQL не делится и не исполняется частично |
+| Отказ до execution | PASS: valid unknown autonomous USING и session controls дают 0A000; sequence guard остаётся 0, ALTER SESSION RESET не сбрасывает USER_SESSION context |
+| EMPTY и native parser | PASS: whitespace/comments дают EmptyQueryResponse, `;`, vertical tab, незакрытые quotes/comments и неполный SQL дают 42601; native isql AUTOTERM continuation сохранён |
+| Commit/fetch failures, disconnect, shutdown | PASS: настоящий rollback, отсутствие ложного CommandComplete, cleanup transactions/attachments; real commit failure закрывает session через FATAL |
+| Драйверы и native protocol | PASS: C PQexec и psycopg2, concurrent native observer, native protocol с отключёнными wire plugins |
+| Локальное исполнение | PASS: оба syscall trace содержат 0 backend connect attempts; Simple Query — 49, startup — 51 OS/NSS Unix calls по ранее разрешённым двум путям |
+
+Все server phases завершились exit 0 без forced kill; shutdown в Simple Query/lifecycle/startup — около 0.114–0.164 секунды. Python AST, локальные Markdown links и `git diff --check` прошли.
+
+Первый `simple-01` остановился на неверной fixture `USING DO INSERT ...`: native USING требует parameters, local declarations или autonomous clause и правильно выдал 42000 при prepare. Положительный unsupported case заменён на `USING IN AUTONOMOUS TRANSACTION DO INSERT ...`, исходный оставлен отрицательной проверкой native semantic error. Отдельный SQL-only debug подтвердил исправление; приведённый полный `simple-02` повторил все группы и trace. Production-код для исправления fixture не менялся.
+
+Текущая приёмка относится к Linux/Super loopback и Simple Query. Следующий этап — P5: explicit transactions/session controls; явные COMMIT/ROLLBACK пока получают 0A000, а implicit commit/rollback работают. Extended Query, TLS, Windows/другие server modes и полная CMake сборка не проверены. Close/free fault injection и отдельное истечение engine statement timeout не выполнялись. Рабочий сервер пользователя и его базы не изменялись; для использования текущих исходников в нём нужна пересборка и перезапуск.

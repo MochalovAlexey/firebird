@@ -19,6 +19,7 @@
 #include <chrono>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -51,6 +52,16 @@ struct Startup
 	std::string database; // Defaults to user when the startup field is absent.
 	std::string applicationName;
 	std::string clientEncoding = "UTF8";
+};
+
+// Wire metadata supplied by the executor. Table identity is not advertised;
+// all columns use text format. No engine types or SQL text enter this codec.
+struct Column
+{
+	std::string name;
+	std::uint32_t oid;
+	std::int16_t typeSize;
+	std::int32_t typeModifier = -1;
 };
 
 // No copies of password frames. Wipe storage before clearing/reusing/freeing it.
@@ -98,6 +109,15 @@ public:
 	void ready(char transaction = 'I', Deadline deadline = Deadline::max());
 	void error(std::string_view sqlState, std::string_view message, bool fatal,
 		Deadline deadline = Deadline::max());
+	// Preflight the complete message before allocating its buffer or writing.
+	// At most 32767 result fields are supported. Limits produce 0A000; invalid
+	// UTF8/NUL produces 22021. These checks
+	// emit no partial message, allowing the executor to report a query error.
+	void rowDescription(const std::vector<Column>& columns, Deadline deadline = Deadline::max());
+	void dataRow(const std::vector<std::optional<std::string>>& values,
+		Deadline deadline = Deadline::max());
+	void commandComplete(std::string_view tag, Deadline deadline = Deadline::max());
+	void emptyQuery(Deadline deadline = Deadline::max());
 
 private:
 	struct DisposeStatus { void operator()(IStatus* status) const { status->dispose(); } };
