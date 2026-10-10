@@ -721,7 +721,7 @@ $(NBACKUP):		$(NBACKUP_Objects) $(COMMON_LIB)
 # plugins - some of them are required to build examples, use separate entry for them
 #
 
-.PHONY:	udr legacy_user_management legacy_auth_server trace auth_debug udf_compat chacha profiler
+.PHONY:	udr legacy_user_management legacy_auth_server trace auth_debug udf_compat chacha profiler pgwire
 UDR_PLUGIN = $(call makePluginName,udr_engine)
 LEGACY_USER_MANAGER = $(call makePluginName,Legacy_UserManager)
 LEGACY_AUTH_SERVER = $(call makePluginName,Legacy_Auth)
@@ -732,13 +732,20 @@ UDF_BACKWARD_COMPATIBILITY_BASENAME = $(LIB_PREFIX)udf_compat.$(SHRLIB_EXT)
 UDF_BACKWARD_COMPATIBILITY ?= $(call buildSubDirectory,plugins/udr)/$(UDF_BACKWARD_COMPATIBILITY_BASENAME)
 CHACHA = $(call makePluginName,ChaCha)
 PROFILER = $(call makePluginName,Default_Profiler)
+PGWIRE = $(call makePluginName,PgWire)
 
 BUILD_DEBUG:=
 ifeq ($(TARGET),Debug)
 	BUILD_DEBUG:=auth_debug
 endif
 
-plugins: udr legacy_user_management legacy_auth_server srp_user_management trace $(BUILD_DEBUG) udf_compat chacha profiler
+plugins: udr legacy_user_management legacy_auth_server srp_user_management trace $(BUILD_DEBUG) udf_compat chacha profiler pgwire
+
+pgwire: $(PGWIRE)
+
+$(PGWIRE): $(PgWire_Objects) $(COMMON_LIB)
+	$(LINK_PLUGIN) $(call LIB_LINK_SONAME,$(notdir $@).0) -o $@ $^ $(LINK_PLUG_LIBS) $(FIREBIRD_LIBRARY_LINK)\
+ $(call LIB_LINK_DARWIN_INSTALL_NAME,plugins/libPgWire.$(SHRLIB_EXT))
 
 udr:	$(UDR_PLUGIN) $(PLUGINS)/udr_engine.conf
 
@@ -921,9 +928,20 @@ run_tests_process: tests_process
 WIRE_TEST_PLUGIN = $(FB_TESTS_DIR)/$(LIB_PREFIX)WireTestPlugin.$(SHRLIB_EXT)
 WIRE_TEST_SMOKE = $(FB_TESTS_DIR)/wire_plugin_smoke$(EXEC_EXT)
 WIRE_SOCKET_TEST = $(FB_TESTS_DIR)/wire_socket_test$(EXEC_EXT)
+PGWIRE_PROTOCOL_TEST = $(FB_TESTS_DIR)/pgwire_protocol_test$(EXEC_EXT)
 PYTHON ?= python3
 
 .PHONY: wire_tests wire_tests_process run_wire_tests run_wire_tests_process
+.PHONY: pgwire_tests pgwire_tests_process
+
+pgwire_tests:
+	$(MAKE) TARGET?=$(DefaultTarget) pgwire_tests_process
+
+pgwire_tests_process: $(PGWIRE_PROTOCOL_TEST)
+
+$(PGWIRE_PROTOCOL_TEST): $(PgWire_Test_Objects) $(call makeObjects,plugins/wire/pg,Protocol.cpp) | $(LIBFIREBIRD_BASENAME)
+	@mkdir -p $(dir $@)
+	$(EXE_LINK) $(EXE_LINK_OPTIONS) $^ -o $@ $(FIREBIRD_LIBRARY_LINK) $(LINK_LIBS)
 
 wire_tests:
 	$(MAKE) TARGET?=$(DefaultTarget) wire_tests_process
@@ -938,8 +956,7 @@ $(WIRE_TEST_SMOKE): $(Wire_Test_Objects) $(Wire_Server_Objects) $(COMMON_LIB) | 
 	@mkdir -p $(dir $@)
 	$(EXE_LINK) $(EXE_LINK_OPTIONS) $^ -o $@ $(FIREBIRD_LIBRARY_LINK) $(LINK_LIBS)
 
-$(WIRE_SOCKET_TEST): $(Wire_Socket_Test_Objects) $(call dirOs,remote/server/wire) $(COMMON_LIB) \
-		$(call makeObjects,remote/server/wire,ProtocolPlugin.cpp) | $(LIBFIREBIRD_BASENAME)
+$(WIRE_SOCKET_TEST): $(Wire_Socket_Test_Objects) $(filter %/SocketConnection.o,$(Wire_Server_Objects)) $(COMMON_LIB) | $(LIBFIREBIRD_BASENAME)
 	@mkdir -p $(dir $@)
 	$(EXE_LINK) $(EXE_LINK_OPTIONS) $^ -o $@ $(FIREBIRD_LIBRARY_LINK) $(LINK_LIBS)
 

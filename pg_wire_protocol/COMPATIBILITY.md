@@ -1,6 +1,14 @@
 # Матрица совместимости PostgreSQL wire plugin
 
-Матрица задаёт планируемые границы этапов, а не реализованную поддержку. База — `master` Firebird 6, SQL dialect 3, UTF8, PostgreSQL wire 3.0. Архитектура plugins определена в [ARCHITECTURE.md](ARCHITECTURE.md), execution contract — в [CODEX_CONTEXT.md](CODEX_CONTEXT.md).
+Матрица M0–M3 задаёт планируемые границы этапов. Целевые Linux/Super проверки реализованного P2 прошли; результаты и ограничения записаны в [VALIDATION.md](VALIDATION.md). База — `master` Firebird 6, SQL dialect 3, UTF8, PostgreSQL wire 3.0. Архитектура plugins определена в [ARCHITECTURE.md](ARCHITECTURE.md), execution contract — в [CODEX_CONTEXT.md](CODEX_CONTEXT.md).
+
+## Текущий P2: startup/authentication, Linux/Super PASS
+
+Отдельный PgWire module добавлен в production POSIX/CMake build definitions. На Linux/Super IPv4 loopback он реализует protocol 3.0 Startup, SSL/GSS refusal N, cleartext Password exchange с настоящим Firebird Srp256 и локальный engine attachment. AuthClient/AuthServer policy, RemoteAccess и точный DatabaseAliases allowlist сохраняются; локальная security DB требует Engine14 в Providers; пустой allowlist запрещает attachments. Host attachment borrowed, plugin закрывает его через host detach. Identity и peer проверены native observer: MON$REMOTE_PROTOCOL=TCPv4, MON$REMOTE_VERSION=configured endpoint alias.
+
+User обязателен, database по умолчанию равен user; явно пустой database отвергается. Допустимы application_name и отсутствующий/точный UTF8 client_encoding; иные startup keys/options/replication явно отклоняются. Startup ограничен 16 KiB, typed frame 1 MiB, Password body 4096 bytes с NUL. IOTimeout ограничивает whole frame и общий startup network budget; синхронный auth/attach callback до handle не получает hard preemption этим timeout.
+
+AuthenticationOk отправляется после attach, затем ParameterStatus и ReadyForQuery I. Version token — `16.0 (Firebird pgwire prototype)`, DateStyle — `ISO, MDY`. Каждый корректный Query, включая SELECT, BEGIN, пустой текст и произвольный SQL, пока получает 0A000 + ReadyForQuery I без разбора SQL. Extended, SQL execution, TLS и BackendKeyData/cancel отсутствуют. Первый SELECT и M0 требуют P3; startup не является приёмкой M0. PASS относится к записанным в VALIDATION Linux/Super startup/authentication checks, не к полной матрице M0–M3 ниже.
 
 ## Главная граница
 
@@ -80,7 +88,7 @@ EMPTY определяется при чистом EOF без SQL tokens сущ�
 - Simple Query batches, COPY, libpq pipeline mode, SQL named cursors, large-object API, LISTEN/NOTIFY и replication — отдельные wire/session contracts.
 - BLOB/bytea, ARRAY, OCTETS, DECFLOAT, типы с часовыми поясами и PostgreSQL custom types — отдельные codecs. Firebird BLOB handle не выдаётся за bytea.
 - Remote security database и базы, требующие ключ шифрования от native клиента, не входят в начальный authentication profile.
-- Начальная платформа — Linux/Super. SuperClassic проверяется на общем process lifecycle и не отклоняется только по названию режима. Windows и Classic получают отдельную интеграционную приёмку; `.dll` входит в архитектуру plugin ABI, но не доказывает готовность Windows build.
+- Текущая платформа — Linux/Super. SuperClassic/Classic пока диагностируются с сохранением native; для них требуется отдельная работа и приёмка. Windows host wiring/runtime отсутствуют; `.dll` входит в архитектуру plugin ABI, но не доказывает готовность Windows build.
 
 Неподдержанный тип или интерфейсный режим возвращает явную диагностическую ошибку до side effects, когда metadata позволяет это определить. Ограничения не скрываются фиктивными SET, успешными пустыми ответами или coercion всех результатов в text.
 

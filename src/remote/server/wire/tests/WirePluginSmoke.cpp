@@ -78,6 +78,13 @@ public:
 	{
 		observations.logs.emplace_back(text, length);
 	}
+	IAttachment* attachDatabase(CheckStatusWrapper* status, const char*, const char*,
+		unsigned, const void*, const char*) override
+	{
+		fail(status);
+		return nullptr;
+	}
+	void detachDatabase(CheckStatusWrapper* status, IAttachment*) override { fail(status); }
 	unsigned references() const { return refs; }
 
 private:

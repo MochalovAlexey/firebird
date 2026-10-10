@@ -8064,7 +8064,7 @@ namespace Firebird
 		}
 	};
 
-#define FIREBIRD_IWIRE_SERVER_HOST_VERSION 3u
+#define FIREBIRD_IWIRE_SERVER_HOST_VERSION 4u
 
 	class IWireServerHost : public IReferenceCounted
 	{
@@ -8073,6 +8073,8 @@ namespace Firebird
 		{
 			FB_BOOLEAN (CLOOP_CARG *isStopping)(IWireServerHost* self) CLOOP_NOEXCEPT;
 			void (CLOOP_CARG *log)(IWireServerHost* self, unsigned level, unsigned length, const char* message) CLOOP_NOEXCEPT;
+			IAttachment* (CLOOP_CARG *attachDatabase)(IWireServerHost* self, IStatus* status, const char* database, const char* user, unsigned passwordLength, const void* password, const char* applicationName) CLOOP_NOEXCEPT;
+			void (CLOOP_CARG *detachDatabase)(IWireServerHost* self, IStatus* status, IAttachment* attachment) CLOOP_NOEXCEPT;
 		};
 
 	protected:
@@ -8101,6 +8103,33 @@ namespace Firebird
 		void log(unsigned level, unsigned length, const char* message)
 		{
 			static_cast<VTable*>(this->cloopVTable)->log(this, level, length, message);
+		}
+
+		template <typename StatusType> IAttachment* attachDatabase(StatusType* status, const char* database, const char* user, unsigned passwordLength, const void* password, const char* applicationName)
+		{
+			if (cloopVTable->version < 4)
+			{
+				StatusType::setVersionError(status, "IWireServerHost", cloopVTable->version, 4);
+				StatusType::checkException(status);
+				return 0;
+			}
+			StatusType::clearException(status);
+			IAttachment* ret = static_cast<VTable*>(this->cloopVTable)->attachDatabase(this, status, database, user, passwordLength, password, applicationName);
+			StatusType::checkException(status);
+			return ret;
+		}
+
+		template <typename StatusType> void detachDatabase(StatusType* status, IAttachment* attachment)
+		{
+			if (cloopVTable->version < 4)
+			{
+				StatusType::setVersionError(status, "IWireServerHost", cloopVTable->version, 4);
+				StatusType::checkException(status);
+				return;
+			}
+			StatusType::clearException(status);
+			static_cast<VTable*>(this->cloopVTable)->detachDatabase(this, status, attachment);
+			StatusType::checkException(status);
 		}
 	};
 
@@ -23252,6 +23281,8 @@ namespace Firebird
 					this->release = &Name::cloopreleaseDispatcher;
 					this->isStopping = &Name::cloopisStoppingDispatcher;
 					this->log = &Name::clooplogDispatcher;
+					this->attachDatabase = &Name::cloopattachDatabaseDispatcher;
+					this->detachDatabase = &Name::cloopdetachDatabaseDispatcher;
 				}
 			} vTable;
 
@@ -23280,6 +23311,35 @@ namespace Firebird
 			catch (...)
 			{
 				StatusType::catchException(0);
+			}
+		}
+
+		static IAttachment* CLOOP_CARG cloopattachDatabaseDispatcher(IWireServerHost* self, IStatus* status, const char* database, const char* user, unsigned passwordLength, const void* password, const char* applicationName) CLOOP_NOEXCEPT
+		{
+			StatusType status2(status);
+
+			try
+			{
+				return static_cast<Name*>(self)->Name::attachDatabase(&status2, database, user, passwordLength, password, applicationName);
+			}
+			catch (...)
+			{
+				StatusType::catchException(&status2);
+				return static_cast<IAttachment*>(0);
+			}
+		}
+
+		static void CLOOP_CARG cloopdetachDatabaseDispatcher(IWireServerHost* self, IStatus* status, IAttachment* attachment) CLOOP_NOEXCEPT
+		{
+			StatusType status2(status);
+
+			try
+			{
+				static_cast<Name*>(self)->Name::detachDatabase(&status2, attachment);
+			}
+			catch (...)
+			{
+				StatusType::catchException(&status2);
 			}
 		}
 
@@ -23324,6 +23384,8 @@ namespace Firebird
 
 		virtual FB_BOOLEAN isStopping() = 0;
 		virtual void log(unsigned level, unsigned length, const char* message) = 0;
+		virtual IAttachment* attachDatabase(StatusType* status, const char* database, const char* user, unsigned passwordLength, const void* password, const char* applicationName) = 0;
+		virtual void detachDatabase(StatusType* status, IAttachment* attachment) = 0;
 	};
 };
 

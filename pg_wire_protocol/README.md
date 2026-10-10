@@ -5,14 +5,30 @@
 Дополнительные протоколы реализуются загружаемыми библиотеками `.so`/`.dll`; первый плагин — `PgWire`. Ядро управляет listeners, соединениями, workers, authentication и локальным attachment. Плагин реализует framing, сообщения, состояние своего протокола и codecs. Архитектура и конфигурация определены в [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ```ini
-# firebird.conf — пример для будущего production-плагина PgWire
+# firebird.conf — PgWire P2: startup/authentication, без SQL execution
 WireProtocolPlugins = PgWire
 WireProtocolPorts = 15432
+```
+
+```ini
+# plugins.conf; pgwire_test заранее определён в databases.conf
+Plugin = PgWire {
+    Module = $(dir_plugins)/PgWire
+    RegisterName = PgWire
+    Config = PgWireConfig
+}
+Config = PgWireConfig {
+    BindAddress = 127.0.0.1
+    DatabaseAliases = pgwire_test
+    IOTimeout = 30000
+}
 ```
 
 Списки позиционные, разделитель — запятая. Имя `PgWire` разрешается существующим PluginManager в библиотеку через `plugins.conf`; пути, расширения и registered factory описаны в ARCHITECTURE. По умолчанию оба списка пусты. Native endpoint в эти списки не включается. Ошибка загрузки дополнительного endpoint диагностируется без остановки native. Плагины работают в одном процессе: разделение модулей не защищает сервер от аварии внутри библиотеки.
 
 ## Граница SQL
+
+Текущий P2 реализует Startup, Firebird authentication и локальный attachment; целевые Linux/Super проверки этого среза прошли, см. [VALIDATION.md](VALIDATION.md). Каждый корректный Query пока получает `0A000` и ReadyForQuery `I`, независимо от текста. SQL execution и обязательный M0 SELECT добавляются в P3.
 
 Wire-слой разбирает сетевые сообщения и передаёт SQL в парсер движка без изменения текста. В нём нет SQL-лексера, поиска ключевых слов, разбиения statements, перехвата `BEGIN` или замены `$n` на `?`. Команды, транзакционные действия и результаты определяются по метаданным parser/DSQL. Для этого потребуется расширить нейтральные метаданные движка: существующего `IStatement::getType()` недостаточно.
 
@@ -36,11 +52,15 @@ M0 получает лишь минимальную metadata через суще
 
 ## Документы и состояние
 
-База — `master` Firebird 6, рабочая ветка — `pg_wire_protocol`; точный SHA и исходники см. [BASELINE.md](BASELINE.md). Добавлены конфигурационные списки, CLOOP ABI, загрузка wire plugins, Linux/Super listeners, workers/queues, socket transport и shutdown integration. Host использует штатный конфигурационный API. Текущие изменения требуют повторной проверки; результаты в [VALIDATION.md](VALIDATION.md) относятся к записанным там ревизиям. P1 для всех платформ/режимов ещё не закрыт. Auth bridge, SQL execution, production PgWire и TLS остаются последующими этапами.
+База — `master` Firebird 6, рабочая ветка — `pg_wire_protocol`; точный SHA и исходники см. [BASELINE.md](BASELINE.md). Linux/Super host P1 со штатным ConfigManager прошёл проверки, записанные в разделе о ConfigManager в [VALIDATION.md](VALIDATION.md). В P2 добавлены host auth/attachment service и отдельная библиотека PgWire; целевые Linux/Super проверки P2 прошли. Production build definitions POSIX и CMake включают PgWire, его SQL execution и TLS ещё отсутствуют. Windows wiring/runtime и другие server modes не приняты; переносимый ABI не означает готовую Windows DLL.
 
 Host читает настройки через существующий `getPluginConfig(name)` до bind/load со штатным named Config / module `.conf` fallback; NULL означает ошибку endpoint. Конфигурация подготавливается до запуска; named Config рекомендуется для разных aliases. Начальные limits: Workers 1–16 (default 4), QueueSize 1–64 (default 16), IOTimeout 1–300000 ms (default 30000); всего до 16 endpoints и 64 workers. BindAddress допускает только `127.0.0.1`, Port/TLS в host settings отвергаются. Проверка native-конфликта использует фактический bound socket, включая `-p`. После provider shutdown workers получают общий deadline 5 секунд. Полный контракт — [ARCHITECTURE.md](ARCHITECTURE.md), решения — [IMPLEMENTATION_NOTES.md](IMPLEMENTATION_NOTES.md), ABI — [UsingWireProtocolPlugins.md](../doc/UsingWireProtocolPlugins.md).
 
+`DatabaseAliases` — comma-separated allowlist локальных aliases для endpoint; пустое значение запрещает все attachments. P2 использует Srp256 только при разрешении AuthClient/AuthServer базы, сохраняет RemoteAccess и настоящую identity. Локальная security DB должна разрешать Engine14 в Providers. Startup принимает user, database (по умолчанию user), application_name и UTF8; остальные параметры явно отклоняются. SSL/GSS получают `N`, BackendKeyData не выдаётся. Whole-frame и общий startup network deadline равны IOTimeout; синхронный auth/attach callback не имеет принудительного прерывания по этому deadline до появления handle. Ограничения и проверяемый startup profile описаны в COMPATIBILITY.
+
 Тестовая библиотека реализует различимый byte echo через два aliases; она не выполняет SQL и не понимает PostgreSQL. `wire_host_smoke.py` проверяет её TCP listeners рядом с настоящим native SQL на изолированной копии runtime. Наличие такого harness не является результатом M0.
+
+`ProtocolTest.cpp` и `tools/pgwire_startup_smoke.py` добавлены для P2: framing, auth, monitoring и cleanup настоящего PgWire. Целевой startup harness прошёл 52 проверки с libpq 14.24; результаты и границы покрытия записаны в [VALIDATION.md](VALIDATION.md). SQL execution и M0 остаются за P3.
 
 | Файл | Назначение |
 |---|---|

@@ -2025,8 +2025,7 @@ interface WireConnection : ReferenceCounted
 	boolean isEncrypted();
 }
 
-// Per-connection host services. Authentication/attachment and TLS are added in
-// later interface versions; this initial ABI does not grant database access.
+// Per-connection host services. TLS upgrade is added in a later version.
 interface WireServerHost : ReferenceCounted
 {
 	const uint LOG_INFO = 1;
@@ -2037,4 +2036,17 @@ interface WireServerHost : ReferenceCounted
 	// The host bounds/escapes messages and adds endpoint/session identity.
 	// Plugins must never include credentials, auth payloads or SQL parameter values.
 	void log(uint level, uint length, const string message);
+
+version: // Local authentication and attachment services.
+	// Called only by the session worker. Inputs are borrowed for this call;
+	// password is never retained. The host checks its database alias allowlist,
+	// authenticates credentials and attaches through a local engine provider.
+	// Returns a BORROWED attachment owned by this host, valid until detachDatabase
+	// or the end of run(). Use it only on the session worker; do not release,
+	// detach or drop it directly. Child interfaces retain their usual ownership.
+	Attachment attachDatabase(Status status, const string database, const string user,
+		uint passwordLength, const void* password, const string applicationName);
+	// Close child interfaces before calling. Invalidates the borrowed attachment
+	// even on error. The host also closes remaining attachments after run().
+	void detachDatabase(Status status, Attachment attachment);
 }

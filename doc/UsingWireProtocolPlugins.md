@@ -10,10 +10,12 @@ The initial host implementation starts additional TCP listeners on Linux in
 queues, socket transport, session ownership and server shutdown integration.
 SuperClassic and Classic are diagnosed without starting additional listeners;
 their native frontend remains available. Other platforms need separate wiring
-and acceptance. Database authentication, attachments, TLS and a production
-PostgreSQL protocol plugin remain subsequent steps. Recorded checks and coverage
-limits are in `pg_wire_protocol/VALIDATION.md`; earlier runs describe their
-recorded revisions. The current configuration changes require a fresh run.
+and acceptance. P2 adds host authentication and local attachments, and a separate
+`PgWire` production module providing PostgreSQL startup. The targeted
+Linux/Super P2 checks passed; SQL execution and TLS remain subsequent steps.
+Recorded checks and coverage limits are in `pg_wire_protocol/VALIDATION.md`,
+including the completed P1 run using the existing configuration API. Those P1
+results are separate from the recorded P2 startup/authentication checks.
 
 The interface definitions are in
 [`FirebirdInterface.idl`](../src/include/firebird/FirebirdInterface.idl). The
@@ -103,6 +105,7 @@ documented default.
 | `Workers` | `4` | Decimal integer from 1 to 16 |
 | `QueueSize` | `16` | Decimal integer from 1 to 64 |
 | `IOTimeout` | `30000` | Decimal milliseconds from 1 to 300000 |
+| `DatabaseAliases` | Empty | Comma-separated local aliases explicitly allowed for this endpoint |
 
 Repeated host settings are errors. Any `Port` entry is rejected: the positional
 list is the only port source. Any `TLS` entry is rejected in this initial
@@ -124,7 +127,9 @@ Configuration is applied at startup. There is no hot reload. A full accepted
 connection queue closes new connections; queued sockets do not create plugin
 sessions until a worker is available. `IOTimeout` bounds queue wait and each
 transport operation. Protocol plugins must additionally bound complete frames
-and startup sequences across partial operations.
+and startup sequences across partial operations. PgWire uses this value for
+whole-frame deadlines and one shared startup network deadline, including the
+encryption refusals, password exchange and startup replies.
 
 ## Interface responsibilities
 
@@ -133,19 +138,18 @@ and startup sequences across partial operations.
 | `IWireProtocol` | Plugin | Create sessions for one configured endpoint |
 | `IWireSession` | Plugin | Execute one session on a host worker and accept stop requests |
 | `IWireConnection` | Host | Byte transport, deadlines, shutdown and peer information |
-| `IWireServerHost` | Host | Per-connection stopping state and bounded diagnostic logging |
+| `IWireServerHost` | Host | Per-connection stopping state, diagnostics, authentication and local attachments |
 
-The initial generated versions are 4 for `IWireProtocol` and 3 for the other
-three interfaces. These numbers include their inherited interface versions.
-The host verifies the required interface version before invoking its methods.
-Authentication and TLS upgrade methods will be appended in later CLOOP interface
-versions after their contracts are established.
+The generated versions are 4 for `IWireProtocol` and `IWireServerHost`, and 3 for
+`IWireSession` and `IWireConnection`. These numbers include inherited interface
+versions. P2 appends `attachDatabase` and `detachDatabase` to the host interface;
+PgWire checks its version before calling them. TLS upgrade requires a later
+transport interface version.
 
-`IWireServerHost` grants no database access in this revision. Plugins must not
-create a secondary native network connection as a substitute for the future
-host authentication and local attachment service. Any SQL executor added later
-must pass SQL unchanged to the Firebird parser; this interface is not a SQL
-rewriting or classification layer.
+Database access uses the host's authentication and local attachment service.
+Plugins must not create a secondary native network connection. Any SQL executor
+added later must pass SQL unchanged to the Firebird parser; these interfaces are
+not a SQL rewriting or classification layer.
 
 ## Session creation and lifetime
 
@@ -211,10 +215,14 @@ The caller must not hold a registry lock across callbacks, object destruction or
 plugin release. Copy or retain the necessary owners under the lock, then perform
 those operations after releasing it.
 
-Future engine cancellation is a host responsibility with separately protected
-attachment ownership. It must not turn `stop()` into a blocking cancellation or
-detach operation. Server shutdown must allow providers to terminate active SQL;
-an unconditional join before provider shutdown can deadlock that process.
+Engine cancellation is a host responsibility with separately protected
+attachment ownership. It must not turn plugin `stop()` into a blocking
+cancellation or detach operation. Server shutdown must allow providers to
+terminate engine operations; an unconditional join before provider shutdown can
+deadlock that process. The synchronous authentication and attach callbacks cannot
+be forcibly preempted by the startup network deadline, particularly before an
+attachment handle exists. Stop checks between callbacks and provider shutdown
+remain necessary; the codec's deadline is not a hard upper bound on those calls.
 
 The Linux host registers `preproviders` and `postproviders` shutdown callbacks.
 The first stops accept, wakes connections and requests session stop without
@@ -267,6 +275,43 @@ during session execution and reports when the host is terminating that context.
 The host's explicit stop and transport shutdown remain necessary to wake a
 blocked call.
 
+`attachDatabase(status, database, user, passwordLength, password, applicationName)`
+is called only by the session worker. Inputs are borrowed for the call. The host
+checks the endpoint's exact alias allowlist and local database configuration,
+authenticates the supplied credentials and creates an engine-only attachment.
+An empty `DatabaseAliases` setting permits no databases. Aliases must resolve
+through `databases.conf` to local files; client paths, URIs and provider settings
+are not accepted. Per-database `RemoteAccess`, authentication policy and local
+security database configuration remain effective. The local security database
+must include the current local engine (`Engine14`) in its `Providers` list; the
+helper rejects other profiles before invoking Srp256.
+
+The return value is **borrowed**, owned by the host until `detachDatabase` or the
+end of `run()`. Use it only on the session worker. Do not directly release,
+detach or drop it. Child statement, transaction and other interfaces retain
+their usual ownership rules. Close child interfaces before
+`detachDatabase(status, attachment)`, which invalidates the borrowed handle even
+on error. The host also closes attachments left after `run()` returns. Neither
+this API nor the generic host imposes PgWire's future single-transaction rule on
+other plugins.
+
+The P2 helper exchanges `Srp256` client/server plugin messages in memory, provided
+both are allowed by the database's `AuthClient` and `AuthServer` policy. It allows
+at most 16 rounds and 64 KiB per authentication payload. It builds a fresh DPB
+containing the verified auth block, UTF8/dialect 3, engine-only providers and
+actual peer information. Raw credentials or client-supplied trusted/config DPB
+fields are not forwarded. Password buffers are wiped after use. The helper
+does not require or modify the EDS attachment context.
+
+The host bounds UTF8 database aliases and input user/application names to 255
+bytes; the normalized Srp256 login is at most 63 bytes. Its explicit password
+input is at most 4096 bytes and contains no NUL. PgWire imposes the narrower wire
+limit of 4096 bytes **including** the framing NUL. Monitoring records the actual
+peer, `MON$REMOTE_PROTOCOL = TCPv4` and the configured endpoint alias in
+`MON$REMOTE_VERSION` (normally `PgWire`). The endpoint alias passed as protocol
+metadata is limited to 63 bytes. Remote security databases and native-client
+database-encryption keys are outside the initial profile.
+
 `log(level, length, message)` accepts `LOG_INFO`, `LOG_WARNING` or `LOG_ERROR`.
 The byte buffer is borrowed for the call; the length is explicit. The initial
 host bounds messages to 512 input bytes, replaces nonprintable bytes and adds
@@ -309,3 +354,53 @@ checks target listeners, queue limits, timeout and shutdown. The test module is
 built under `tests`, is not installed as a production plugin and performs no SQL.
 Only separately recorded successful runs establish acceptance; these fixtures
 do not establish PostgreSQL or authentication support on the additional ports.
+
+## PgWire startup profile (P2, Linux/Super checks passed)
+
+POSIX and CMake production build definitions include a separate `PgWire` shared
+module. Its code is not linked into the native daemon frontend. Windows server
+wiring and runtime acceptance remain pending. Configure an existing local alias
+and Firebird user before enabling the endpoint:
+
+```ini
+# firebird.conf
+WireProtocolPlugins = PgWire
+WireProtocolPorts = 15432
+
+# plugins.conf
+Plugin = PgWire {
+    Module = $(dir_plugins)/PgWire
+    RegisterName = PgWire
+    Config = PgWireConfig
+}
+Config = PgWireConfig {
+    BindAddress = 127.0.0.1
+    DatabaseAliases = pgwire_test
+    IOTimeout = 30000
+}
+```
+
+Startup accepts protocol 3.0. SSLRequest and GSSENCRequest each receive exactly
+one `N`; repeats are rejected. User is required. An absent database defaults to
+the user name and is still subject to the alias allowlist; an explicitly empty
+database is rejected. `client_encoding` must be absent or exactly `UTF8`;
+`application_name` is accepted. Other startup parameters, including options and
+replication, are explicitly rejected. Version negotiation, TLS and cancellation
+are not implemented; no placeholder BackendKeyData is sent.
+
+Startup frames are limited to 16 KiB, typed frame lengths to 1 MiB and password
+bodies to 4096 bytes including NUL. Length checks precede allocation; string
+boundaries and UTF8 are validated. AuthenticationOk follows successful engine
+attach. Startup then reports encoding, DateStyle, application name and the
+compatibility token `16.0 (Firebird pgwire prototype)`, and ends with ReadyForQuery
+`I`. Every structurally valid Query receives `0A000` and ReadyForQuery `I`,
+including empty or incompatible SQL. No SQL text is parsed or classified by the
+wire layer. P3 adds execution through the Firebird parser and the first M0 SELECT.
+
+`ProtocolTest.cpp` tests framing and literal response bytes with partial I/O.
+`pgwire_startup_smoke.py` exercises the loaded module, raw PostgreSQL startup,
+authentication, native monitoring and session cleanup on an isolated runtime.
+The targeted Linux/Super run passed all 52 startup harness checks using libpq
+14.24. Results, commands and remaining coverage limits are recorded in
+[`VALIDATION.md`](../pg_wire_protocol/VALIDATION.md). Startup and the test echo do
+not constitute M0; engine SQL execution starts in P3.

@@ -1,8 +1,8 @@
 # Проверки реализации
 
-Дата: 9 октября 2026 года. HEAD до изменений: `d533d51ad2`, baseline master Firebird 6 `bf94598f8deefeb7cc4a8217ee43b3040d5d6650`.
+Дата: 9 октября 2026 года. HEAD до текущего среза P2: `69712ca686`, baseline master Firebird 6 `bf94598f8deefeb7cc4a8217ee43b3040d5d6650`. Предыдущие разделы сохраняют историю проверок.
 
-Текущий этап: P0 и начальный Linux/Super срез P1 — конфигурация, ABI/loader/session ownership, TCP listeners/transport, workers/queues и server lifecycle. Host использует существующий `IConfigManager::getPluginConfig`, интерфейс ConfigManager не расширяется. PgWire endpoint пока отсутствует; M0–M3 не приняты. Исходные Python acceptance cases не запускались против Firebird и требуют миграции по TEST_PLAN.md. Ниже сохранена история проверок; результаты упрощения конфигурации приведены в последнем разделе.
+Текущий этап: P2 — production PgWire plugin, framing, Startup, проверка credentials через Srp256 и локальный attachment. Целевые проверки Linux/Super прошли: codec, 52 проверки настоящего PostgreSQL TCP endpoint, libpq 14.24, регрессия host/plugin и native coexistence. Host использует существующий `IConfigManager::getPluginConfig`, интерфейс ConfigManager не расширяется. Query пока возвращает `0A000` и ReadyForQuery `I`; SQL execution начинается с P3, M0–M3 не приняты. Исходные Python acceptance cases не запускались против Firebird и требуют миграции по TEST_PLAN.md. Результаты P2 приведены в последнем разделе.
 
 ## Окружение и сборка
 
@@ -230,3 +230,80 @@ python3 -B pg_wire_protocol/tools/wire_host_smoke.py \
 Все команды PASS, exit 0. Plugin smoke подтвердил загрузку/ошибки/ownership и порядок stop/release с настоящей библиотекой. TCP host smoke: 11 checks PASS, включая file fallback для host и factory, named Config второго alias, native SQL/auth/transactions, queue/worker limits, timeouts, конфигурационные ошибки endpoint, конфликт фактического native-порта и shutdown. Оба тестовых сервера завершились с exit 0 без forced kill; summary/logs сохранены в указанных work directories. Сетевой запуск выполнен с разрешённым локальным TCP на изолированном runtime под `/tmp`.
 
 Python AST оставшихся трёх tools, ссылки документации и `git diff --check` — PASS. Интерфейс ConfigManager, его реализация и сгенерированные C++/Pascal bindings в текущем рабочем дереве не отличаются от HEAD до среза TCP host.
+
+## P2: PgWire Startup, authentication и локальный attachment
+
+9 октября 2026 года, HEAD до изменений `69712ca686`. Новый production модуль `libPgWire.so` загружается через существующий wire plugin host. PgWire разбирает сообщения протокола; SQL не классифицирует и не изменяет. Host проверяет `DatabaseAliases` и per-database policy, выполняет обмен между Srp256 auth plugins в памяти и создаёт attachment через локальный Engine14. Новые методы добавлены только в `IWireServerHost` (version 4). `IConfigManager` остаётся version 3; его IDL и `PluginManager.cpp` не изменены.
+
+### Сборка и codec
+
+В прежней POSIX Debug build directory выполнены штатная генерация CLOOP и полная пересборка:
+
+```sh
+cd /tmp/firebird-pgwire-build
+./config.status --file=gen/Makefile:builds/posix/Makefile.in --file=gen/make.shared.variables:builds/posix/make.shared.variables
+make -C gen TARGET=Debug updateCloopInterfaces
+make -j4 > p2-build.log 2>&1
+make -C gen -j4 TARGET=Debug wire_tests pgwire_tests > p2-tests-final-build.log 2>&1
+```
+
+PASS. Последующие исправления auth helper пересобраны полной `make -j4`, финальный production build — `p2-auth-pool-build.log`, exit 0. Исходный `wire_socket_test` target захватывал лишний `Server.o`; его зависимости ограничены `SocketConnection.o` и общими объектами. Production PgWire входит в стандартный plugins target; codec test остаётся отдельным opt-in target.
+
+```sh
+LD_LIBRARY_PATH=/tmp/firebird-pgwire-build/gen/Debug/firebird/lib \
+  /tmp/firebird-pgwire-build/gen/Debug/firebird/tests/pgwire_protocol_test \
+  > /tmp/firebird-pgwire-build/p2-codec-tests.log 2>&1
+```
+
+PASS: golden bytes, fragmented/coalesced input, partial writes, EOF/transport errors, limits, NUL/UTF8, SSL/GSS отказ, сохранение SQL bytes и общие deadlines. Password buffer очищается после использования. Startup и Password используют один сетевой deadline; прогресс отдельными байтами не продлевает его.
+
+Generated C API проверен `gcc -std=c11 -Wall -Wextra -Werror -fsyntax-only`: `/tmp/firebird-pgwire-build/p2_host_abi_c_check.c` и прежний `wire_abi_c_check.c`. PASS, включая версии ConfigManager/host и новые attachment methods. Pascal binding сгенерирован, Pascal compiler отсутствует. Проверка CMake source lists (`cmake -P /tmp/firebird-p2-cmake-check.cmake`) подтверждает server-only размещение host/authentication; это не полная сборка CMake.
+
+### Настоящий PostgreSQL TCP endpoint
+
+```sh
+cd /home/aleksey/dev/my_firebird/firebird
+python3 -B pg_wire_protocol/tools/pgwire_startup_smoke.py \
+  --firebird-dir /tmp/firebird-pgwire-build/gen/Debug/firebird \
+  --work-dir /tmp/firebird-pgwire-p2-startup-04
+```
+
+PASS: **52 checks**, exit 0. Использованы изолированные runtime, security database, application databases и временные loopback ports. Пароли генерируются тестом и не включаются в command line или отчёт. Сетевой запуск разрешён вне sandbox. Свидетельство — `/tmp/firebird-pgwire-p2-startup-04/summary.json`, sanitized logs и `server-connect.trace` рядом.
+
+| Проверка | Результат |
+|---|---|
+| Настоящий libpq через ctypes в отдельном процессе | PASS: libpq 14.24 (`140024`), protocol 3, connect, два Query с `0A000`, transaction status IDLE |
+| Raw Startup/authentication и две identities | PASS: native observer видит разных пользователей, Srp256, тот же server PID, TCPv4/peer port, UTF8 и application name |
+| AuthenticationOk только после успешного attach | PASS: ON CONNECT trigger может отклонить вход после проверки credentials; AuthenticationOk в этом случае отсутствует |
+| Неверный пароль, неизвестный/inactive user | PASS: отказ до AuthenticationOk, следующий допустимый connect работает |
+| Alias allowlist, unknown alias, path/URI | PASS: только разрешённые локальные aliases; отсутствие database означает user, explicit empty database отклонён |
+| RemoteAccess, AuthServer policy, remote security DB | PASS: отказ; клиентские параметры не меняют выбранную конфигурацию |
+| Application Providers=Remote,Loopback | PASS: host всё равно создаёт локальный engine attachment |
+| SSLRequest/GSSENCRequest и malformed packets | PASS: `N`, отказ повторного negotiation, bounds до payload allocation, version/options/keys/NUL/UTF8/EOF |
+| Общие startup/password/query deadlines | PASS: частичные чтения с прогрессом не обновляют timeout; проверено с IOTimeout=1000 ms |
+| Query recovery | PASS: `0A000` + Ready `I`, следующий Query обработан; SQL execution не заявляется |
+| Cleanup и shutdown | PASS: session attachments закрыты; idle authenticated, password wait и incomplete startup не мешают остановке |
+| Native protocol вместе с PgWire | PASS: SQL, credentials, commit и rollback |
+
+Все три запуска сервера (основной, deadlines, syscall trace) завершились exit 0 без forced kill; shutdown занял около 0.165 секунды.
+
+`strace` наблюдал `connect()` сервера и всех threads от запуска до shutdown, включая успешный/неуспешный auth, проверку policy и native probe. Backend network connects: **0**. Обнаружен 51 вызов к службам ОС через Unix sockets: 46 к `/run/systemd/userdb/io.systemd.DynamicUser` и 5 к `/var/run/nscd/socket`. Auditor разрешает только эти два точных NSS-пути и учитывает их отдельно; TCP/IPv6, другие Unix sockets, abstract addresses и нераспознанные sockaddr дают FAIL. Сохранённый trace и семь отрицательных синтетических примеров проверили это различие.
+
+В предварительных запусках исправлены: использование stack-only default memory pool в heap `ClientBlock`, активация роли native observer через `SET ROLE`, классификация обращений к NSS в trace auditor. Итоговый PASS относится к полному повторному запуску после исправлений, а не к частично прошедшим попыткам.
+
+### Регрессия и границы результата
+
+```sh
+python3 -B pg_wire_protocol/tools/wire_plugin_smoke.py \
+  --firebird-dir /tmp/firebird-pgwire-build/gen/Debug/firebird \
+  --work-dir /tmp/firebird-pgwire-p2-plugin-regression-20261009
+python3 -B pg_wire_protocol/tools/wire_host_smoke.py \
+  --firebird-dir /tmp/firebird-pgwire-build/gen/Debug/firebird \
+  --work-dir /tmp/firebird-pgwire-p2-host-regression-20261009
+```
+
+PASS. Real-plugin regression проверил loading/errors/ownership/stop/release. TCP host regression: 11 checks, включая module `.conf` fallback, named Config второго alias, native auth/transactions, positional ports, queues/workers/timeouts, native-port conflict до module load и shutdown. Оба сервера host regression завершились exit 0 без forced kill. Python AST, локальные Markdown links и `git diff --check` также прошли.
+
+Результат относится к Linux/Super и IPv4 loopback без TLS. Psycopg 2/3 в окружении отсутствуют; проверен именно runtime libpq через ctypes, C development headers для будущего harness по-прежнему отсутствуют. Windows, другие server modes и полная CMake сборка не проверялись. Security database должна быть локальной и иметь Engine14 среди Providers. Синхронный auth/attach до получения handle не имеет жёсткого прерывания по сетевому IOTimeout: helper проверяет stop между callbacks, а protocol повторно проверяет deadline перед AuthenticationOk. Проверки transport shutdown не доказывают preemption произвольного auth plugin.
+
+P2 не выполняет engine prepare/execute. SELECT, типы результатов, транзакции, Extended Query, Cancel и TLS остаются в следующих этапах; M0 ожидает P3.

@@ -816,6 +816,8 @@ type
 	IWireConnection_isEncryptedPtr = function(this: IWireConnection): Boolean; cdecl;
 	IWireServerHost_isStoppingPtr = function(this: IWireServerHost): Boolean; cdecl;
 	IWireServerHost_logPtr = procedure(this: IWireServerHost; level: Cardinal; length: Cardinal; message: PAnsiChar); cdecl;
+	IWireServerHost_attachDatabasePtr = function(this: IWireServerHost; status: IStatus; database: PAnsiChar; user: PAnsiChar; passwordLength: Cardinal; password: Pointer; applicationName: PAnsiChar): IAttachment; cdecl;
+	IWireServerHost_detachDatabasePtr = procedure(this: IWireServerHost; status: IStatus; attachment: IAttachment); cdecl;
 
 	VersionedVTable = class
 		version: NativeInt;
@@ -4321,16 +4323,20 @@ type
 	WireServerHostVTable = class(ReferenceCountedVTable)
 		isStopping: IWireServerHost_isStoppingPtr;
 		log: IWireServerHost_logPtr;
+		attachDatabase: IWireServerHost_attachDatabasePtr;
+		detachDatabase: IWireServerHost_detachDatabasePtr;
 	end;
 
 	IWireServerHost = class(IReferenceCounted)
-		const VERSION = 3;
+		const VERSION = 4;
 		const LOG_INFO = Cardinal(1);
 		const LOG_WARNING = Cardinal(2);
 		const LOG_ERROR = Cardinal(3);
 
 		function isStopping(): Boolean;
 		procedure log(level: Cardinal; length: Cardinal; message: PAnsiChar);
+		function attachDatabase(status: IStatus; database: PAnsiChar; user: PAnsiChar; passwordLength: Cardinal; password: Pointer; applicationName: PAnsiChar): IAttachment;
+		procedure detachDatabase(status: IStatus; attachment: IAttachment);
 	end;
 
 	IWireServerHostImpl = class(IWireServerHost)
@@ -4340,6 +4346,8 @@ type
 		function release(): Integer; virtual; abstract;
 		function isStopping(): Boolean; virtual; abstract;
 		procedure log(level: Cardinal; length: Cardinal; message: PAnsiChar); virtual; abstract;
+		function attachDatabase(status: IStatus; database: PAnsiChar; user: PAnsiChar; passwordLength: Cardinal; password: Pointer; applicationName: PAnsiChar): IAttachment; virtual; abstract;
+		procedure detachDatabase(status: IStatus; attachment: IAttachment); virtual; abstract;
 	end;
 
 {$IFNDEF NO_FBCLIENT}
@@ -10648,6 +10656,29 @@ end;
 procedure IWireServerHost.log(level: Cardinal; length: Cardinal; message: PAnsiChar);
 begin
 	WireServerHostVTable(vTable).log(Self, level, length, message);
+end;
+
+function IWireServerHost.attachDatabase(status: IStatus; database: PAnsiChar; user: PAnsiChar; passwordLength: Cardinal; password: Pointer; applicationName: PAnsiChar): IAttachment;
+begin
+	if (vTable.version < 4) then begin
+		FbException.setVersionError(status, 'IWireServerHost', vTable.version, 4);
+		Result := nil;
+	end
+	else begin
+		Result := WireServerHostVTable(vTable).attachDatabase(Self, status, database, user, passwordLength, password, applicationName);
+	end;
+	FbException.checkException(status);
+end;
+
+procedure IWireServerHost.detachDatabase(status: IStatus; attachment: IAttachment);
+begin
+	if (vTable.version < 4) then begin
+		FbException.setVersionError(status, 'IWireServerHost', vTable.version, 4);
+	end
+	else begin
+		WireServerHostVTable(vTable).detachDatabase(Self, status, attachment);
+	end;
+	FbException.checkException(status);
 end;
 
 var
@@ -18689,6 +18720,25 @@ begin
 	end
 end;
 
+function IWireServerHostImpl_attachDatabaseDispatcher(this: IWireServerHost; status: IStatus; database: PAnsiChar; user: PAnsiChar; passwordLength: Cardinal; password: Pointer; applicationName: PAnsiChar): IAttachment; cdecl;
+begin
+	Result := nil;
+	try
+		Result := IWireServerHostImpl(this).attachDatabase(status, database, user, passwordLength, password, applicationName);
+	except
+		on e: Exception do FbException.catchException(status, e);
+	end
+end;
+
+procedure IWireServerHostImpl_detachDatabaseDispatcher(this: IWireServerHost; status: IStatus; attachment: IAttachment); cdecl;
+begin
+	try
+		IWireServerHostImpl(this).detachDatabase(status, attachment);
+	except
+		on e: Exception do FbException.catchException(status, e);
+	end
+end;
+
 var
 	IWireServerHostImpl_vTable: WireServerHostVTable;
 
@@ -19825,11 +19875,13 @@ initialization
 	IWireConnectionImpl_vTable.isEncrypted := @IWireConnectionImpl_isEncryptedDispatcher;
 
 	IWireServerHostImpl_vTable := WireServerHostVTable.create;
-	IWireServerHostImpl_vTable.version := 3;
+	IWireServerHostImpl_vTable.version := 4;
 	IWireServerHostImpl_vTable.addRef := @IWireServerHostImpl_addRefDispatcher;
 	IWireServerHostImpl_vTable.release := @IWireServerHostImpl_releaseDispatcher;
 	IWireServerHostImpl_vTable.isStopping := @IWireServerHostImpl_isStoppingDispatcher;
 	IWireServerHostImpl_vTable.log := @IWireServerHostImpl_logDispatcher;
+	IWireServerHostImpl_vTable.attachDatabase := @IWireServerHostImpl_attachDatabaseDispatcher;
+	IWireServerHostImpl_vTable.detachDatabase := @IWireServerHostImpl_detachDatabaseDispatcher;
 
 finalization
 	IVersionedImpl_vTable.destroy;

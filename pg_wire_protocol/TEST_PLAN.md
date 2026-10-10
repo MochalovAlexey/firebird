@@ -2,7 +2,7 @@
 
 База — `master` Firebird 6, SHA из [BASELINE.md](BASELINE.md). Архитектура и SQL boundary определены в [ARCHITECTURE.md](ARCHITECTURE.md), transaction contract — в [CODEX_CONTEXT.md](CODEX_CONTEXT.md), заявляемые возможности — в [COMPATIBILITY.md](COMPATIBILITY.md).
 
-Исходный Python scaffold содержит 20 тестовых функций / 56 параметризованных случаев и требует миграции. Начальные проверки находятся в `src/common/tests/WireProtocolConfigTest.cpp`, `src/remote/server/wire/tests` и изолированных harness в `tools`. Plugin runner проверяет loading/ownership с mock transport; отдельные socket tests используют POSIX sockets. `wire_host_smoke.py` запускает Linux/Super с native SQL и двумя TCP echo endpoints из настоящей тестовой библиотеки: проверяются конфигурация, workers/queues, timeout и server shutdown. PostgreSQL raw-wire/engine suites ещё предстоит реализовать; перечисление проверки в этом документе не означает, что она выполнена. Результаты в VALIDATION.md относятся к указанным там ревизиям; после перехода host на штатный getPluginConfig требуется повторный прогон. Driver-only probe на синтетическом сервере и pytest collection не являются приёмкой Firebird.
+Исходный Python scaffold содержит 20 тестовых функций / 56 параметризованных случаев и требует миграции. Начальные проверки находятся в `src/common/tests/WireProtocolConfigTest.cpp`, `src/remote/server/wire/tests` и изолированных harness в `tools`. Plugin runner проверяет loading/ownership с mock transport; отдельные socket tests используют POSIX sockets. `wire_host_smoke.py` запускает Linux/Super с native SQL и двумя TCP echo endpoints из настоящей тестовой библиотеки: проверяются конфигурация, workers/queues, timeout и server shutdown. Для P2 добавлены codec ProtocolTest.cpp и tools/pgwire_startup_smoke.py: настоящий PgWire Startup/authentication, raw-wire errors, monitoring и cleanup. Целевые Linux/Super проверки P2 прошли по [VALIDATION.md](VALIDATION.md); engine SQL suites относятся к P3 и следующим этапам. Перечисление проверки не означает её выполнения. P1 со штатным getPluginConfig уже повторно проверен в разделе VALIDATION «Упрощение конфигурации: существующий ConfigManager»; P2 имеет отдельный отчёт startup/authentication. Driver-only probe на синтетическом сервере и pytest collection не являются приёмкой Firebird.
 
 ## Этапы и обязательный минимум M0
 
@@ -31,6 +31,23 @@
 Пример M0 SQL: `SELECT CAST(6 * 7 AS INTEGER) AS "answer" FROM RDB$DATABASE`. Второе выражение с другим результатом либо запрос к тестовой таблице исключает hardcoded answer.
 
 Полная DML/DDL/control metadata, E-state и EMPTY относятся к P4/P5 и M1. Фильтр только `getType == SELECT` плюс `FLAG_HAS_CURSOR` не проходит M0-08: RETURNING/SELECT_BLOCK могут иметь те же признаки. Ограниченный M0 не превращается в постоянный SQL allowlist M1.
+
+## Текущий срез P2 — проверки до M0
+
+P2 реализован; целевой Linux/Super startup harness прошёл 52 проверки с libpq 14.24, см. [VALIDATION.md](VALIDATION.md). Его successful startup не закрывает M0-04/05/08: все корректные Query пока получают 0A000 + ReadyForQuery I без engine prepare, независимо от SQL. Проверки execution ниже активируются начиная с P3.
+
+| ID | Проверка и критерий |
+|---|---|
+| P2-01 | Production PgWire загружен отдельной библиотекой в Linux/Super; native продолжает выполнять SQL. POSIX/CMake definitions не включают PG objects в daemon/Remote_Common; Windows runtime не заявляется |
+| P2-02 | Raw startup и реальный libpq/psycopg2 connect: AuthenticationOk только после attach, ожидаемые ParameterStatus/Ready I, без фиктивного BackendKeyData. Query SELECT/BEGIN/произвольный и пустой SQL получают одинаковый 0A000/I; следующий Query остаётся синхронизирован |
+| P2-03 | Правильные credentials, неверный пароль/unknown user 28P01, unknown/disallowed alias 3D000, RemoteAccess=false и запрещённый Srp256 policy; native observer подтверждает реальные раздельные identities и peer |
+| P2-04 | ON CONNECT trigger отклоняет вход даже с правильным паролем: ErrorResponse до AuthenticationOk, attachment освобождён; следующий разрешённый connect работает |
+| P2-05 | Неполные/coalesced frames, SSL/GSS N, duplicate/unknown startup keys, неправильная version, lengths/NUL/UTF8, границы 16 KiB startup / 1 MiB typed frame / 4096 bytes Password с NUL; bounds проверены до payload allocation |
+| P2-06 | User обязателен; absent database=user проходит лишь при разрешённом alias, explicit empty database отвергается. Empty DatabaseAliases запрещает attachment; клиентский path/URI/config не меняет provider route |
+| P2-07 | Unit golden bytes, short writes/reads и slow progress: whole-frame и общий startup network deadline не обновляются каждым chunk; Password и startup replies используют исходный budget |
+| P2-08 | EOF, Terminate, failed auth, idle и incomplete startup при shutdown: attachments/FDs освобождены, module жив до возврата callbacks. MON$REMOTE_PROTOCOL=TCPv4, MON$REMOTE_VERSION=endpoint alias; password отсутствует в diagnostics |
+
+Auth helper отдельно ограничен 16 rounds и 64 KiB на payload. Проверяются UTF8 и host bounds alias/user/application_name 255 bytes, нормализованный Srp256 login 63 bytes; Password codec limit включает NUL. Не объявлять сетевой IOTimeout hard deadline для синхронного auth/attach callback до получения handle. Такой вызов проверяется с provider shutdown и fault-injection отдельно; PASS idle transport не доказывает preemption auth plugin. Наряду с live harness выполнить code review engine-only provider route и наблюдение server connect(), чтобы исключить дополнительный backend hop.
 
 ## Fixtures и свидетельства
 
@@ -65,7 +82,7 @@
 
 Strict positional validation проверяется отдельно от PluginManager iterator: optional module skipping не должен менять mapping. Конфигурационные ошибки не проверяют изоляцию от segfault в доверенном плагине: весь код работает в одном процессе.
 
-Для A04 дополнительно проверяется отказ implicit Config::getPlugins(TYPE_WIRE_PROTOCOL) и direct loader name с запятой до module entrypoint. Для native-conflict части A06 нужны startup cases с явным RemoteServicePort, override `-p`, RemoteServiceName, отключённым TCP и пересекающимися bind/dual-stack адресами; конфликтный endpoint не должен вызывать module entrypoint, native продолжает работать. Результаты прежнего IPv4 loopback smoke с override `-p` записаны в VALIDATION для соответствующей ревизии; текущий вариант требует повторной проверки, остальные варианты — отдельных запусков.
+Для A04 дополнительно проверяется отказ implicit Config::getPlugins(TYPE_WIRE_PROTOCOL) и direct loader name с запятой до module entrypoint. Для native-conflict части A06 нужны startup cases с явным RemoteServicePort, override `-p`, RemoteServiceName, отключённым TCP и пересекающимися bind/dual-stack адресами; конфликтный endpoint не должен вызывать module entrypoint, native продолжает работать. Повторный IPv4 loopback smoke с override `-p` и штатным getPluginConfig записан в VALIDATION; остальные варианты требуют отдельных запусков.
 
 Конфигурация подготавливается до запуска через стандартные средства Firebird. Для разных aliases рекомендуется named Config. Приёмка host не вводит отдельную проверку структуры Plugin/Config blocks или новых правил разрешения конфигурации; она проверяет настройки, возвращённые существующим getter, их defaults и совместную работу endpoint/native.
 
@@ -74,11 +91,11 @@ Strict positional validation проверяется отдельно от Plugin
 | ID | Сценарий | Критерий |
 |---|---|---|
 | S01 | Правильный/неправильный пароль, неизвестный пользователь | Правильный вход либо startup `28P01`; AuthenticationOk только после attach; нет рабочего user attachment после отказа |
-| S02 | Auth rounds и ошибочные plugin statuses | Ограниченный обмен в памяти, cleanup, без trusted/OS/service-account fallback |
-| S03 | Srp256 запрещён per-database policy или security DB недоступна | Диагностируемый отказ; native auth configuration не подменяется |
+| S02 | Auth rounds и ошибочные plugin statuses | Не более 16 rounds и 64 KiB на payload, cleanup, без trusted/OS/service-account fallback |
+| S03 | Srp256 запрещён per-database policy, security DB недоступна или не имеет Engine14 в Providers | Диагностируемый отказ; native auth configuration не подменяется |
 | S04 | CURRENT_USER, concurrent users, denied SELECT | Реальные разные identities; `42501` без GRANT; credentials/auth blocks не переходят между sessions |
 | S05 | Alias allowlist, неизвестный alias, paths/URIs/options | Только server-authorized local database; неизвестный alias `3D000`; клиент не внедряет DPB/config/trusted identity |
-| S06 | RemoteAccess=false и peer metadata | Отказ удалённому клиенту; внутренний attachment не маскирует TCP origin как embedded |
+| S06 | RemoteAccess=false и peer metadata | Отказ удалённому клиенту; реальный peer, MON$REMOTE_PROTOCOL=TCPv4 и MON$REMOTE_VERSION=endpoint alias не маскируют TCP origin как embedded |
 | S07 | Native auth и затронутые EDS paths | Native regression обязательна; при выделении helper из EDS сохранить его positive/negative/precondition cases |
 
 Startup SQLSTATE проверять raw ErrorResponse field `C`: `psycopg2.connect()` может бросить OperationalError без `pgcode`. Внутренние security attachments/caches учитывать отдельно от session-owned application attachments.

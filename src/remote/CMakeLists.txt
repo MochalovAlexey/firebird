@@ -53,6 +53,7 @@ add_src_unix(fbserver_src
     server/server.cpp
     # Additional wire transport belongs to the server, not the client library.
     server/wire/ProtocolPlugin.cpp
+    server/wire/Authentication.cpp
     server/wire/os/posix/Server.cpp
     server/wire/os/posix/SocketConnection.cpp
 

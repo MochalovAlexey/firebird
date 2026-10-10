@@ -4,7 +4,7 @@
 
 PostgreSQL grammar/functions отложены. Все этапы передают SQL существующему parser без wire-классификации и переписывания. Расширение нейтральных parser/DSQL metadata входит в реализацию протокола; принятие нового SQL-синтаксиса — отдельная будущая работа.
 
-Состояние на 9 октября 2026: добавлены global parameters, начальный CLOOP ABI, loader/session ownership и Linux/Super TCP host с ограниченными workers/queues и startup/shutdown. Host использует существующий getPluginConfig; после изменения конфигурационного пути нужны повторные проверки. Прежние результаты и границы покрытия в [VALIDATION.md](VALIDATION.md) относятся к указанным там ревизиям. P1 не объявляется завершённым для всех платформ/режимов, M0 ещё не реализован. Следующий функциональный этап после приёмки host — P2: PgWire framing, authentication и локальный attachment.
+Состояние на 9 октября 2026: начальный Linux/Super host P1 со штатным getPluginConfig прошёл повторную проверку; результаты и границы покрытия записаны в [VALIDATION.md](VALIDATION.md). Целевые Linux/Super проверки P2 прошли: отдельный PgWire module, framing, host authentication и локальный attachment. SQL execution отсутствует, каждый корректный Query получает 0A000. Следующий функциональный этап — P3 и M0 SELECT. Windows и другие server modes этим срезом не принимаются.
 
 ## P0. База, зависимости и проектирование
 
@@ -36,13 +36,15 @@ Host владеет listeners, transport, workers, registry и shutdown. Реа�
 
 ## P2. PgWire framing, authentication и attachment
 
-В plugin реализовать protocol 3.0 StartupMessage, SSLRequest/GSSENCRequest, PasswordMessage, Query, Terminate и serializers ответов. До TLS профиль loopback-only; handshake корректно отказывает в неподдержанном шифровании. Проверить partial/coalesced frames, lengths, UTF8, short writes, EOF, deadlines и backpressure.
+**Статус: целевые Linux/Super проверки P2 — PASS; команды и границы покрытия в [VALIDATION.md](VALIDATION.md).** В отдельном `src/plugins/wire/pg` реализованы protocol 3.0 StartupMessage, отказ SSLRequest/GSSENCRequest одним N, PasswordMessage, Query, Terminate и serializers. Production module добавлен в POSIX/CMake build definitions. Любой корректный Query получает 0A000 + ReadyForQuery I без SQL-разбора; parser execution начинается в P3.
 
-В общем host реализовать authentication service для дополнительных протоколов на базе in-memory client/server auth exchange Firebird plugins. Прямой вызов `EDS::validatePassword` до attach невозможен: он требует текущий attachment и входит в Engine14. На первом этапе EDS можно сохранить; при выделении helper из EDS нужна его регрессия. Не дублировать authentication в каждом wire plugin.
+`IWireServerHost` расширен версионированными attachDatabase/detachDatabase. Attachment принадлежит host и выдаётся plugin как borrowed до detach/end of run; после detach он недействителен даже при ошибке. Child interfaces закрываются до detach. Общий helper `Authentication.cpp` выполняет in-memory Srp256 exchange без изменения EDS. Прямой вызов `EDS::validatePassword` до attach неприменим: он требует текущий attachment.
 
-Host проверяет alias/policy и credentials, создаёт проверенный auth block, очищает клиентские DPB поля и указывает настоящий peer. После очистки задаёт engine-only Providers; остальные политики базы сохраняются. Нет attach через Remote/Loopback. `AuthenticationOk` отправляется после успешного attach.
+Host проверяет comma-separated DatabaseAliases (default empty запрещает attachments), локальные alias/security DB с Engine14 в её Providers, AuthClient/AuthServer Srp256 и RemoteAccess. Helper ограничен 16 rounds и 64 KiB на auth payload, строит новый доверенный DPB с engine-only Providers, реальным peer и endpoint alias в MON$REMOTE_VERSION; MON$REMOTE_PROTOCOL остаётся TCPv4. AuthenticationOk отправляется после успешного attach. Пароли затираются, клиент не задаёт DPB/provider route.
 
-**Готово:** правильный/неправильный пароль, неизвестные user/alias, plugin policy, RemoteAccess, раздельные identities и отсутствие вторичного сетевого attach. Ключ шифрования от native клиента не поддерживается; серверный key holder проверяется отдельно.
+Codec tests и startup harness проверяют: partial/coalesced frames, literal response bytes, UTF8/NUL/length errors, пределы 16 KiB startup / 1 MiB frame / 4096 bytes password body с NUL. Общий startup network budget включает SSL/GSS, Password и ответы; short I/O не обновляет deadline. IOTimeout не прерывает принудительно синхронный auth/attach callback до handle; shutdown должен оставлять provider возможность завершить такие вызовы.
+
+**Критерий приёмки:** правильный/неправильный пароль, неизвестные user/alias, default database=user с allowlist, plugin policy, RemoteAccess, раздельные identities через native monitoring, ON CONNECT failure до AuthenticationOk, cleanup и отсутствие вторичного сетевого attach. Результаты фиксируются отдельно; вычисляемый SELECT остаётся условием P3/M0. Ключ шифрования от native клиента не поддерживается; серверный key holder проверяется отдельно.
 
 ## P3. Первый запрос и минимальная metadata — M0
 

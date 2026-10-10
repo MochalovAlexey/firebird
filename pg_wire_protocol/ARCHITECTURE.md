@@ -2,7 +2,7 @@
 
 Дополнительные wire-протоколы реализуются динамическими плагинами внутри процесса `firebird`. Первый плагин — PostgreSQL. Общая серверная инфраструктура управляет TCP listeners, соединениями и workers; плагин реализует конкретный протокол и обращается к локальному движку через интерфейсы Firebird. Родной frontend сохраняет свой путь запуска, настройки, XDR и обработку запросов.
 
-Документ описывает целевую архитектуру и границы текущего среза. Реализованы списки endpoints, начальный CLOOP ABI, загрузка одного alias, Linux/Super listeners, bounded workers/queues, POSIX socket transport и server shutdown integration. Host получает конфигурацию через существующий getPluginConfig; текущие изменения требуют повторной проверки. Результаты прежних запусков в VALIDATION относятся к указанным там ревизиям. Authentication/attachment bridge, TLS и плагин PgWire ещё не реализованы. Требование пользователя об отсутствии SQL-разбора во frontend применяется ко всем этапам.
+Документ описывает целевую архитектуру и границы текущего среза. Linux/Super host P1 со штатным ConfigManager прошёл проверки, записанные в VALIDATION. В P2 добавлены общий authentication/attachment bridge и отдельный PgWire module со Startup/framing; целевые Linux/Super проверки этого среза прошли, см. [VALIDATION.md](VALIDATION.md). SQL execution начинается в P3, каждый корректный Query пока получает 0A000. TLS, Windows wiring/runtime и другие server modes не приняты. Требование пользователя об отсутствии SQL-разбора во frontend применяется ко всем этапам.
 
 ## Разделение ответственности
 
@@ -34,7 +34,7 @@ Native не включается в список дополнительных п
 
 ## SQL целиком разбирается движком
 
-После проверки структуры wire-сообщения плагин передаёт SQL движку с явной длиной, без изменения SQL bytes. Завершающий NUL сообщения PostgreSQL является частью wire framing и не входит в текст SQL. UTF8 проверяется как encoding, а не как SQL grammar.
+Начиная с P3, после проверки структуры wire-сообщения плагин передаёт SQL движку с явной длиной, без изменения SQL bytes. Завершающий NUL сообщения PostgreSQL является частью wire framing и не входит в текст SQL. UTF8 проверяется как encoding, а не как SQL grammar.
 
 Плагин и общий host не выполняют:
 
@@ -65,17 +65,17 @@ CommandComplete и transaction transitions формируются по резу�
 | `IWireProtocol : IPluginBase` | `createSession(status, host, connection)` возвращает одну owned reference; вызовы для instance последовательны, без network I/O и engine calls. Config получает factory штатным путём |
 | `IWireSession : IReferenceCounted` | `run(status)` вызывается один раз в host worker; `stop()` — конкурентный, идемпотентный, неблокирующий запрос остановки, допустимый до `run()`, без join, engine calls и освобождения session/plugin |
 | `IWireConnection : IReferenceCounted` | Host byte stream: `read`/`write` с partial I/O и timeout, конкурентный `shutdown`, неизменные peer address/port, `isEncrypted`; socket принадлежит host |
-| `IWireServerHost : IReferenceCounted` | `isStopping()` и ограниченная host diagnostics через `log`; начальная версия не предоставляет authentication, attachment или TLS upgrade |
+| `IWireServerHost : IReferenceCounted` | `isStopping()`, ограниченные diagnostics и P2 attachDatabase/detachDatabase; версия 4 выдаёт borrowed attachment, принадлежащий host. TLS upgrade остаётся будущим расширением |
 
 В начальном ABI закреплён partial I/O contract: успешный `read` с нулевым результатом при ненулевом buffer size означает EOF; успешный `write` без прогресса недопустим; нулевой size — успешный no-op. Ошибка возвращает status и нулевой результат, ранее выполненный успешный I/O сохраняет силу. Нулевой timeout выбирает конечный host default; положительный может только сократить его. Timeout не является EOF. Один worker последовательно выполняет I/O; `shutdown()` будит ожидания и запрещает дальнейший I/O. Host ограничивает и экранирует diagnostics, plugin не передаёт туда credentials, auth payloads или значения SQL parameters.
 
 `ProtocolPlugin` в `src/remote/server/wire/ProtocolPlugin.h` загружает ровно один configured name, проверяет имя, результат factory и версии интерфейсов. Создание sessions сериализовано. `ProtocolSession` удерживает plugin, host и connection до последнего release session; plugin освобождается через `IPluginManager::releasePlugin()`. Wrapper не отдаёт raw session вызывающему коду и запрещает повторный `run()`. Worker/registry обязаны завершить `run()` и все `stop()` до уничтожения wrapper. Bind/listen, очередь, workers и callbacks остановки реализованы отдельно в `wire/os/posix/Server.cpp`.
 
-Frame sizes, количество сессий и buffers должны ограничиваться при реализации host и протокола. Authentication/attachment и TLS добавляются последующими версиями интерфейсов после согласования их policy и lifetime. Async cancellation получает отдельное синхронизированное владение attachment.
+Host ограничивает workers/queue; codec P2 ограничивает startup 16 KiB, typed frame 1 MiB и password body 4096 bytes с NUL. Attach вызывается только session worker; plugin закрывает child interfaces перед host detach и не вызывает detach/drop/release borrowed attachment напрямую. Detach инвалидирует его даже при ошибке, оставленные attachments закрывает host после run. Cancellation использует отдельно защищённое host ownership; транспортный TLS потребует новой версии ABI.
 
 Одна активная application transaction на PostgreSQL session — правило PgWire, соответствующее его transaction model. Общий plugin ABI не ограничивает любой будущий протокол одной транзакцией или одним attachment. Host отслеживает все выданные ресурсы для cancellation/shutdown; ограничения конкретного протокола и серверные resource limits задаются отдельно.
 
-Authentication bridge размещается в общем серверном коде. `ValidatePassword.cpp` служит образцом in-memory обмена auth plugins; первоначальный host helper может быть реализован без изменения EDS. Если общая часть выделяется из EDS, сохранить его guards и проверить регрессию. Плагин передаёт credentials по внутреннему интерфейсу; host проверяет policy, формирует auth block и remote metadata и создаёт attachment через локальный engine provider. Плагин не получает способ выбирать `Remote`/`Loopback` fallback или передавать client-controlled trusted DPB.
+Authentication bridge реализован в `wire/Authentication.cpp`, без изменения EDS. Host проверяет DatabaseAliases, локальные database/security paths, наличие Engine14 в Providers security DB, RemoteAccess и разрешение Srp256 в AuthClient/AuthServer базы. In-memory exchange ограничен 16 rounds и 64 KiB на auth payload. Новый DPB содержит проверенный auth block, UTF8/dialect 3, реальный peer и engine-only Providers. В MON$REMOTE_PROTOCOL записывается TCPv4, в MON$REMOTE_VERSION — configured endpoint alias (обычно PgWire). Клиент не выбирает Remote/Loopback fallback и не передаёт trusted/config DPB. Полные byte limits и исключения профиля описаны в CODEX_CONTEXT и ABI contract.
 
 ## Конфигурация endpoints
 
@@ -101,6 +101,8 @@ Plugin = PgWire {
 
 Config = PgWireConfig {
     BindAddress = 127.0.0.1
+    DatabaseAliases = pgwire_test
+    IOTimeout = 30000
 }
 ```
 
@@ -143,6 +145,7 @@ Plugin = PgRemote {
 
 Config = PgLocalConfig {
     BindAddress = 127.0.0.1
+    DatabaseAliases = pgwire_test
 }
 
 Config = PgRemoteConfig {
@@ -151,7 +154,7 @@ Config = PgRemoteConfig {
 }
 ```
 
-`BindAddress` — реализованная host setting с единственным допустимым значением `127.0.0.1`. PgRemote иллюстрирует будущий удалённый профиль; текущий host отвергает его запуск, без перехода на иной адрес. Сам PgWire ещё не поставляется. Module/RegisterName совпадают, но aliases получают отдельные configurations и instances; library остаётся общей до завершения обоих endpoints.
+`BindAddress` — реализованная host setting с единственным допустимым значением `127.0.0.1`. PgRemote иллюстрирует будущий удалённый профиль; текущий host отвергает его запуск, без перехода на иной адрес. PgWire собирается отдельной production library; в P2 доступен startup/authentication, SQL execution ещё отсутствует. Module/RegisterName совпадают, но aliases получают отдельные configurations и instances; library остаётся общей до завершения обоих endpoints.
 
 Host использует существующий `IMaster::getConfigManager()->getPluginConfig(configuredName)` до bind/load и проверяет полученные transport settings. Разрешение конфигурации и fallback к module `.conf` остаются штатными. Named `Config` — обычный способ задать разные настройки aliases, а не обязательное условие загрузки. Factory получает конфигурацию через существующий `IPluginConfig::getDefaultConfig()`.
 
@@ -163,8 +166,9 @@ Host использует существующий `IMaster::getConfigManager()-
 | `Workers` | 4 | Десятичное целое 1–16 |
 | `QueueSize` | 16 | Десятичное целое 1–64 |
 | `IOTimeout` | 30000 ms | Десятичное целое 1–300000 ms |
+| `DatabaseAliases` | Пустой список | Comma-separated allowlist локальных aliases; пустой запрещает attachments |
 
-Повтор любой host setting отвергается. Любой `Port` запрещён; любой `TLS` отвергается до реализации TLS transport. Остальные настройки остаются плагину. Глобальный предел — 16 configured endpoints и суммарный budget 64 workers. Заполненная очередь закрывает новое принятое соединение; queued socket не создаёт plugin session до свободного worker. `IOTimeout` ограничивает ожидание в очереди и отдельную transport operation. Общий startup/frame deadline поверх partial reads — последующая обязанность protocol plugin.
+Повтор любой host setting отвергается. Любой `Port` запрещён; любой `TLS` отвергается до реализации TLS transport. Остальные настройки остаются плагину. Глобальный предел — 16 configured endpoints и суммарный budget 64 workers. Заполненная очередь закрывает новое принятое соединение; queued socket не создаёт plugin session до свободного worker. `IOTimeout` ограничивает ожидание в очереди и отдельную transport operation. PgWire дополнительно применяет whole-frame и единый startup network deadline, включающий Password и ответы; partial reads/writes не продлевают его.
 
 Пути, macros и module names разрешает штатный PluginManager; host не воспроизводит собственный поиск `.so`/`.dll`. Factory не открывает listener и не меняет сопоставление alias/port.
 
@@ -196,7 +200,7 @@ Host удерживает экземпляр plugin на всём протяже
 3. После остановки providers завершить оставшиеся workers и callbacks. Не выполнять новые prepare/execute/rollback/detach по уничтоженному provider; различать рабочий cleanup и освобождение оставшихся interface references.
 4. Уничтожить sessions и освободить protocol instances через `IPluginManager::releasePlugin()`. Host code не вызывает `dlclose`/`FreeLibrary` самостоятельно.
 
-В текущем host `preproviders` прекращает accept, закрывает queued transports и вызывает connection shutdown перед plugin stop; join в этом callback отсутствует. `postproviders` использует один общий deadline 5 секунд для всех acceptors/workers. После их завершения registry owners освобождаются вне lock. Если deadline истёк, callback сообщает ошибку и сохраняет owners: работающий модуль не выгружается. Этот предел относится к ожиданию threads и не изолирует зависший callback доверенного плагина. Authentication/SQL cancellation добавляются вместе с соответствующими host services.
+В текущем host `preproviders` прекращает accept, закрывает queued transports и вызывает connection shutdown перед plugin stop; join в этом callback отсутствует. `postproviders` использует один общий deadline 5 секунд для всех acceptors/workers. После их завершения registry owners освобождаются вне lock. Если deadline истёк, callback сообщает ошибку и сохраняет owners: работающий модуль не выгружается. Этот предел относится к ожиданию threads и не изолирует зависший callback доверенного плагина. P2 host services управляют зарегистрированными attachments. Синхронный auth/attach callback до получения handle нельзя принудительно прервать codec deadline: stop проверяется между вызовами, provider shutdown должен получить возможность завершить операцию. Network deadline не обещает такой же hard upper bound на callback.
 
 `PluginManager::shutdown()` запрещает новые загрузки, но не останавливает threads. Задержанная выгрузка модуля не заменяет refs и join. `releasePlugin()` освобождает owner только после возврата из plugin `release()`, предотвращая возврат в уже выгруженный код. `IPluginModule::doClean()` выполняет финальную уборку и не заменяет серверный stop protocol.
 
@@ -206,21 +210,21 @@ P0 должен установить завершённый state/ownership cont
 
 TLS реализуется поверх byte transport дополнительных endpoints. PostgreSQL SSLRequest и решение об upgrade принадлежат PgWire; безопасный transport, сертификаты и прерывание handshake должны иметь согласованное владение с host.
 
-В P0 выбран OpenSSL 3 API и необязательная сборочная зависимость; transport TLS, packaging и удалённый профиль реализуются в P10. Предлагаемый configure option ещё не реализован. Будущий PgWire до TLS отвечает `N` на SSLRequest; текущий test echo не реализует PostgreSQL Startup/SSLRequest и не объявляет совместимость с libpq.
+В P0 выбран OpenSSL 3 API и необязательная сборочная зависимость; transport TLS, packaging и удалённый профиль реализуются в P10. Предлагаемый configure option ещё не реализован. PgWire P2 отвечает `N` на SSLRequest и GSSENCRequest. Тестовый echo остаётся отдельным fixture и PostgreSQL Startup не реализует.
 
 ## Размещение кода и сборка
 
-Предлагаемое размещение:
+Размещение реализованных компонентов и дальнейшего execution scope:
 
 - `src/remote/server/wire/`: generic host, listeners, connections, workers, session registry и server lifecycle integration;
-- общая transport-neutral часть authentication/attachment bridge: серверный runtime, выбранный в P0 без зависимости от PgWire или активного EDS attachment;
+- `src/remote/server/wire/Authentication.cpp`: transport-neutral Srp256/attachment helper без зависимости от PgWire или активного EDS attachment;
 - `src/plugins/wire/pg/`: PostgreSQL messages, session, Simple/Extended exchanges, codecs и diagnostics;
 - `src/include/firebird/FirebirdInterface.idl`: новый plugin type и ABI;
 - существующие DSQL/parser файлы: только согласованные neutral metadata; будущий PostgreSQL syntax выделяется в самостоятельный scope.
 
 В `Remote_Server` входит generic host, а PgWire собирается отдельной shared library в plugins. PostgreSQL-specific objects не включаются в `Remote_Common`, libfbclient common transport или сам `FB_DAEMON`. Штатная линковка плагина с public/runtime libraries допускается и не означает вторичного сетевого подключения. Private DSQL classes и `thread_db` не становятся ABI плагина.
 
-Начальная executable приёмка — штатная POSIX сборка Linux/Super. С самого начала определить packaging плагина, генерацию интерфейсов, exported entrypoint и установку конфигурации. Поддержку CMake/Windows builds и runtime проверять отдельно; переносимый ABI сам по себе не доказывает сборку `.dll`.
+Начальная executable приёмка — штатная POSIX сборка Linux/Super. PgWire добавлен в production build definitions POSIX и CMake, генерация ABI выполняется CLOOP. Результат полной CMake-сборки проверяется отдельно; Windows host wiring/runtime ещё отсутствуют. Переносимый ABI и CMake declaration сами по себе не доказывают готовую `.dll`.
 
 ## Проверенные точки исходников
 
@@ -235,8 +239,9 @@ TLS реализуется поверх byte transport дополнительн�
 | POSIX startup | `src/remote/server/os/posix/inet_server.cpp`: registerAuthPlugins, Super initialization, SRVR_multi_thread |
 | Windows startup | `src/remote/server/os/win32/srvr_w32.cpp`: start_connections_thread |
 | Shutdown | `src/yvalve/why.cpp`: Dispatcher::shutdown; `src/remote/server/server.cpp`: set_server, pre_shutdown |
-| Auth extraction | `src/jrd/extds/ValidatePassword.cpp`; `src/remote/server/server.cpp`: DatabaseAuth::accept |
+| Auth bridge | `src/remote/server/wire/Authentication.cpp`: authenticateAndAttach; native/EDS образцы: DatabaseAuth::accept и ValidatePassword.cpp |
+| PostgreSQL module | `src/plugins/wire/pg/Protocol.{h,cpp}`: framing/codec; `PgWire.cpp`: plugin/session |
 | POSIX objects/targets | `builds/posix/make.shared.variables`: Remote_Server и plugin object sets; `builds/posix/Makefile.in`: plugins, updateCloopInterfaces |
 | Другие build paths | `src/CMakeLists.txt`; `builds/win32/make_boot.bat`; `builds/win32/msvc15` |
 
-Существующие правила PluginManager подтверждены исходниками зафиксированного baseline. ABI и Linux/Super transport/server host добавлены в рабочую реализацию; конфигурация использует штатный API. Фактическая приёмка хранится в VALIDATION и не выводится из этого описания. Authentication/attachment bridge, TLS, PgWire и остальные платформы/режимы остаются следующими этапами.
+Существующие правила PluginManager подтверждены исходниками зафиксированного baseline. ABI и Linux/Super transport/server host добавлены в рабочую реализацию; конфигурация использует штатный API. Фактическая приёмка хранится в VALIDATION и не выводится из этого описания. Authentication/attachment bridge и PgWire Startup реализованы в P2; целевые Linux/Super проверки прошли по [VALIDATION.md](VALIDATION.md). SQL execution/P3, TLS и остальные платформы/режимы остаются следующими этапами.

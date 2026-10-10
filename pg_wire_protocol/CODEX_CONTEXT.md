@@ -1,6 +1,6 @@
 # Контекст реализации wire protocol plugins в Firebird 6
 
-Контракт реализации M0–M3. Архитектура host/plugin, конфигурация и lifecycle определены в [ARCHITECTURE.md](ARCHITECTURE.md); границы приёмки — в [COMPATIBILITY.md](COMPATIBILITY.md), [PLAN.md](PLAN.md) и [TEST_PLAN.md](TEST_PLAN.md). Прямые требования пользователя имеют приоритет. Документ описывает план, а не реализованную поддержку.
+Контракт реализации M0–M3. Архитектура host/plugin, конфигурация и lifecycle определены в [ARCHITECTURE.md](ARCHITECTURE.md); границы приёмки — в [COMPATIBILITY.md](COMPATIBILITY.md), [PLAN.md](PLAN.md) и [TEST_PLAN.md](TEST_PLAN.md). Прямые требования пользователя имеют приоритет. Документ задаёт контракт этапов. Linux/Super P1 принят в пределах VALIDATION; целевые Linux/Super проверки реализованного P2 Startup/authentication прошли, см. [VALIDATION.md](VALIDATION.md). SQL execution отсутствует: каждый корректный Query пока получает 0A000 + ReadyForQuery I; engine parser подключается в P3. Планируемые M0–M3 не являются заявлением о текущей поддержке.
 
 ## 1. Цель и границы
 
@@ -16,7 +16,7 @@ Plugin вызывает серверный host API и внутренние atta
 
 - База: `master` Firebird 6, SHA `bf94598f8deefeb7cc4a8217ee43b3040d5d6650`, `6.0.0.2199 Initial`, `Engine14`, C++20; рабочая ветка `pg_wire_protocol`.
 - Зафиксированный driver-only probe: psycopg2 2.9.11, runtime libpq 17.6. Он выполнен на синтетическом сервере и не доказывает интеграцию с Firebird.
-- Первая платформа для проверки — Linux, `ServerMode=Super`. SuperClassic использует тот же процессный путь запуска; его допуск подтверждается тестом, отдельный искусственный запрет не нужен. Classic и Windows требуют своей интеграционной приёмки. Сборка и runtime-приёмка пока не выполнены.
+- Текущий host — Linux, `ServerMode=Super`; SuperClassic/Classic диагностируются с сохранением native. Их интеграция и Windows wiring/runtime требуют отдельной работы. P1 POSIX build/runtime принят по VALIDATION, production PgWire добавлен в POSIX/CMake build definitions и прошёл целевые POSIX/Linux/Super проверки P2; полная CMake/Windows acceptance этим не заявляется.
 - M0: загрузка PG plugin, настоящее TCP-подключение, authentication, вычисляемый SELECT, минимальный engine metadata item для его отличия от RETURNING/SELECT_BLOCK, SQL error/recovery, disconnect, работа native listener. Полный descriptor и EMPTY не являются условием первого SELECT.
 - M1: Simple Query на совместимом Firebird SQL, metadata, codecs, CRUD, совместимый DDL, DML RETURNING, реальные транзакции, privileges и lifecycle.
 - M2: Extended Query lifecycle, prepared statements/portals, Bind с native `?` либо без параметров, text/binary codecs. Синтаксис `$n` сюда не входит.
@@ -30,7 +30,7 @@ M0/M1 проверяются прямым C libpq `PQexec` и psycopg2 с `autoc
 
 `WireProtocolPlugins` задаёт дополнительные plugins, `WireProtocolPorts` — соответствующие им порты позиционно. Пустые списки отключают дополнительные listeners. Число элементов, порты, дубликаты, доступность plugin и коллизии проверяются до запуска endpoint; детали диагностики и изоляции отказов определены архитектурным контрактом. Пример одного PG endpoint: `WireProtocolPlugins = PgWire`, `WireProtocolPorts = 15432`. До TLS endpoint работает только на loopback.
 
-Одна библиотека/factory может обслуживать несколько configured aliases. Каждый alias создаёт отдельный endpoint instance и получает собственную секцию `Config` через штатную конфигурацию plugins. Bind address, TLS policy/certificates и protocol settings относятся к этой секции; третий позиционный список не добавляется. Host владеет transport и проверяет разрешённость настроек для текущего этапа. Два aliases одной библиотеки не должны разделять mutable session/config state.
+Одна библиотека/factory может обслуживать несколько configured aliases. Каждый alias создаёт отдельный endpoint instance и получает собственную секцию `Config` через штатную конфигурацию plugins. Bind address, TLS policy/certificates и protocol settings относятся к этой секции; третий позиционный список не добавляется. Host владеет transport и проверяет разрешённость настроек для текущего этапа. Используется существующий getPluginConfig со штатным named Config / module-file fallback, без нового API ConfigManager. Два aliases одной библиотеки не должны разделять mutable session/config state.
 
 Host управляет listeners, ограниченными ресурсами соединений, загрузкой/владением plugins, authentication/local attach и shutdown. Plugin реализует PostgreSQL codec и session state. Конкретный интерфейс transport/connection не должен передавать plugin внутренние native PACKET или XDR структуры.
 
@@ -38,16 +38,18 @@ Server host явно добавляется в `Remote_Server`: `dirObjects` н�
 
 ## 4. Authentication и local attachment
 
-1. Host сопоставляет Startup database с разрешённым локальным alias и доверенной database configuration. Произвольный клиентский path/URI/config не становится provider route.
+1. Host проверяет точное вхождение Startup database в comma-separated DatabaseAliases endpoint Config (default empty запрещает все attachments), затем разрешает локальный alias из databases.conf. Произвольный клиентский path/URI/config не становится provider route.
 2. Plugin получает пароль PostgreSQL password exchange; M0–M2 допускают это только на loopback, M3 — по проверенному TLS для удалённого клиента.
-3. Host проверяет credentials через обмен существующих Firebird client/server auth plugins в памяти. В исходном профиле используется допустимая для базы пара Srp256; соблюдаются AuthServer/security DB policy, лимиты обмена и реальные privileges.
-4. `src/jrd/extds/ValidatePassword.cpp` служит образцом. Его EDS wrapper требует уже существующий attachment и напрямую до attach неприменим. Реализовать отдельный host helper с явными inputs; рефакторинг EDS не является условием первого этапа.
+3. Host проверяет credentials через обмен Firebird client/server auth plugins в памяти. P2 требует Srp256 в обоих AuthClient/AuthServer базы, локальную security DB с Engine14 в её Providers; не более 16 rounds и 64 KiB на auth payload. Policy и реальные privileges сохраняются.
+4. `src/jrd/extds/ValidatePassword.cpp` служит образцом. Его EDS wrapper требует уже существующий attachment и напрямую до attach неприменим. Отдельный helper реализован в wire/Authentication.cpp с явными inputs, без рефакторинга EDS.
 5. Auth block создаётся успешным server auth plugin. Startup username сам по себе не становится trusted identity. Не передавать plaintext password как данные SrpServer и не включать trust fallback.
-6. По образцу `DatabaseAuth::accept` host очищает raw credentials, trusted/internal/client-config поля и добавляет проверенный auth block, UTF8, настоящие peer address и protocol metadata. `RemoteAccess` и database policy проверяются с реальным сетевым происхождением подключения.
+6. Host строит новый DPB только из доверенных полей: auth block, UTF8/dialect 3, engine-only provider route и настоящий peer. Клиентские raw credentials, trusted/internal/client-config DPB не передаются. RemoteAccess и database policy сохраняются. MON$REMOTE_PROTOCOL показывает TCPv4, MON$REMOTE_VERSION — configured endpoint alias, обычно PgWire; application_name передаётся как process name, не как identity.
 7. Host принудительно задаёт `isc_dpb_config = EMBEDDED_PROVIDERS` для application attachment. Удаления только Loopback недостаточно: Remote остаётся. Это ограничение строже native dispatcher route; database `Providers` не может направить wire attachment в Remote.
 8. AuthenticationOk отправляется только после успешного attach. Пароль удаляется после использования, не попадает в логи, DPB dumps или secret DSN.
 
-Одна wire session владеет одним application attachment. Внутренние локальные security DB attachments разрешены. Remote security database и шифрованная база, требующая ключ от native клиента, не входят в начальный профиль. Наличие native db-crypt callback не означает, что PostgreSQL-драйвер умеет передать этот ключ.
+PgWire session использует один application attachment, принадлежащий host. IWireServerHost версии 4 возвращает его borrowed до detachDatabase или конца run; plugin использует его только на session worker и не вызывает detach/drop/release напрямую. Child interfaces закрываются до host detach; borrowed handle недействителен после detach даже при ошибке. Host закрывает оставленные attachments после run. Generic ABI не навязывает другим plugins одно attachment или одну transaction.
+
+Host проверяет UTF8 и byte limits: database/user/application_name до 255 bytes, нормализованный Srp256 login до 63 bytes, protocol endpoint alias до 63 bytes. Host password input имеет явную длину до 4096 bytes без NUL; PgWire Password body ограничен 4096 bytes вместе с framing NUL. Пароль затирается после использования. Внутренние локальные security DB attachments разрешены. Remote security database и шифрованная база, требующая ключ от native клиента, не входят в начальный профиль. Наличие native db-crypt callback не означает, что PostgreSQL-драйвер умеет передать этот ключ.
 
 ## 5. Engine metadata: минимум M0 и расширение M1
 
@@ -71,12 +73,13 @@ Server host явно добавляется в `Remote_Server`: `dirObjects` н�
 - Исходный wire version — 3.0. Другие версии получают понятный FATAL; negotiation 3.2 отложен.
 - До M3 SSLRequest/GSSENCRequest получают один byte `N`, затем продолжается Startup. С M3 SSLRequest может перейти в TLS в том же endpoint.
 - Проверяются bounds до allocation, overflow, NUL terminators, UTF8 и допустимые startup keys. Query содержит ровно одну NUL-terminated SQL string; лишние bytes после terminator — protocol error.
-- `user` и `database` обязательны; `client_encoding` отсутствует либо UTF8. `application_name` можно сохранить. Начальная политика неизвестных keys/options — явный отказ; требуемые клиентом значения исследуются по ранней трассе приложения.
+- Непустой user обязателен; при отсутствии database используется user и всё равно проверяется alias allowlist. Явно пустой database отвергается. client_encoding отсутствует либо равен точному UTF8; application_name поддержан. Неизвестные keys/options/replication получают 0A000; иная encoding — 22023, invalid UTF8 — 22021. Duplicate keys, неверные lengths/terminators и хвост после NUL — 08P01.
 - Начальные ParameterStatus: `client_encoding=UTF8`, `server_encoding=UTF8`, `standard_conforming_strings=on`, `DateStyle=ISO, MDY`. Для integer-based binary temporal codecs закрепить `integer_datetimes=on`; TimeZone публиковать только с поддержанным поведением. IntervalStyle не заявлять без interval codec/session contract.
 - `server_version` — документированный compatibility token. Исходное значение из probe: `16.0 (Firebird pgwire prototype)`; его влияние на целевого клиента проверяется отдельно. Оно не обещает PostgreSQL SQL compatibility.
 - До реализации cancellation BackendKeyData не выдаётся. После startup отправляется ReadyForQuery `I`.
 - Поддерживаются partial/coalesced frames, short writes, EOF, EINTR и backpressure. Native crypt/compression/op_dummy не попадают в PG stream.
-- Лимиты централизованы и проверяются тестами; исходные ориентиры — 16 sessions, 16 KiB startup, 1 MiB frontend frame. Реальные значения, deadlines и configurable bounds фиксируются при реализации.
+- Пределы P2 фиксированы: Startup 16 KiB, typed frame 1 MiB, Password body 4096 bytes с NUL. Length включает собственные 4 bytes, typed tag не включается. Активные sessions ограничены host Workers (default 4, максимум 16 на endpoint, 64 суммарно), queued sockets — QueueSize (default 16, максимум 64).
+- IOTimeout задаёт whole-frame deadline и один общий startup network deadline для SSL/GSS, Password и всех ответов. Short reads/writes не сбрасывают budget. Синхронный auth/attach callback, особенно до появления handle, не имеет hard preemption этим deadline; stop checks и provider shutdown обеспечивают отдельную координацию. Истечение сетевого budget не является доказательством своевременного завершения engine callback.
 
 ## 7. Simple Query и результаты
 

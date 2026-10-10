@@ -1,0 +1,423 @@
+/*
+ *  The contents of this file are subject to the Initial Developer's Public
+ *  License Version 1.0 (the "License"); you may not use this file except in
+ *  compliance with the License. You may obtain a copy of the License at
+ *  http://www.ibphoenix.com/main.nfs?a=ibphoenix&page=ibp_idpl.
+ *
+ *  Software distributed under the License is distributed AS IS, WITHOUT
+ *  WARRANTY OF ANY KIND, either express or implied.
+ *
+ *  Copyright (c) 2026 Firebird Project and all contributors signed below.
+ *  All Rights Reserved.
+ */
+
+#include "../Protocol.h"
+
+#include <algorithm>
+#include <cstdio>
+#include <cstring>
+#include <initializer_list>
+#include <thread>
+#include <type_traits>
+#include <utility>
+
+using namespace Firebird;
+using namespace Firebird::PgWire;
+using namespace std::chrono_literals;
+
+namespace
+{
+
+using Bytes = std::vector<std::uint8_t>;
+
+void require(bool condition, const char* message)
+{
+	if (!condition)
+		throw std::runtime_error(message);
+}
+
+template <typename Function>
+void expectError(const char* state, Function function)
+{
+	try
+	{
+		function();
+	}
+	catch (const ProtocolError& error)
+	{
+		require(std::strcmp(error.sqlState(), state) == 0, "Unexpected SQLSTATE");
+		return;
+	}
+	throw std::runtime_error("Expected protocol error was not raised");
+}
+
+void integer(Bytes& bytes, std::uint32_t value)
+{
+	for (int shift = 24; shift >= 0; shift -= 8)
+		bytes.push_back(static_cast<std::uint8_t>(value >> shift));
+}
+
+void append(Bytes& bytes, const Bytes& other)
+{
+	bytes.insert(bytes.end(), other.begin(), other.end());
+}
+
+Bytes text(std::string_view value)
+{
+	Bytes bytes(value.begin(), value.end());
+	bytes.push_back(0);
+	return bytes;
+}
+
+Bytes frame(char tag, const Bytes& body)
+{
+	Bytes bytes{static_cast<std::uint8_t>(tag)};
+	integer(bytes, body.size() + 4);
+	append(bytes, body);
+	return bytes;
+}
+
+Bytes startup(std::initializer_list<std::pair<std::string_view, std::string_view>> values,
+	std::uint32_t version = 196608)
+{
+	Bytes body;
+	integer(body, version);
+	for (const auto& value : values)
+	{
+		append(body, text(value.first));
+		append(body, text(value.second));
+	}
+	if (version == 196608)
+		body.push_back(0);
+	Bytes result;
+	integer(result, body.size() + 4);
+	append(result, body);
+	return result;
+}
+
+// A borrowed connection, owned by each test. Partial progress and bounded waits
+// are exercised through the public ABI, just as they are by a loaded plugin.
+class Connection final : public IWireConnectionImpl<Connection, CheckStatusWrapper>
+{
+public:
+	explicit Connection(Bytes input = {}) : input(std::move(input)) {}
+	void addRef() override { ++refs; }
+	int release() override { return --refs; }
+	unsigned read(CheckStatusWrapper* status, unsigned size, void* buffer, unsigned timeout) override
+	{
+		timeouts.push_back(timeout);
+		if (failRead)
+		{
+			const ISC_STATUS errors[] = {isc_arg_gds, isc_net_read_err, isc_arg_end};
+			status->setErrors(errors);
+			return 0;
+		}
+		if (delay != 0ms)
+			std::this_thread::sleep_for(delay);
+		const unsigned count = std::min<std::size_t>({size, readChunk, input.size() - position});
+		if (count)
+			std::memcpy(buffer, input.data() + position, count);
+		position += count;
+		return excessiveRead ? size + 1 : count;
+	}
+	unsigned write(CheckStatusWrapper*, unsigned size, const void* buffer, unsigned timeout) override
+	{
+		timeouts.push_back(timeout);
+		if (delay != 0ms)
+			std::this_thread::sleep_for(delay);
+		const unsigned count = std::min(size, writeChunk);
+		const auto* bytes = static_cast<const std::uint8_t*>(buffer);
+		output.insert(output.end(), bytes, bytes + count);
+		return count;
+	}
+	void shutdown() override {}
+	const char* getPeerAddress() override { return "127.0.0.1"; }
+	unsigned getPeerPort() override { return 54321; }
+	FB_BOOLEAN isEncrypted() override { return FB_FALSE; }
+
+	Bytes input, output;
+	std::size_t position = 0;
+	unsigned readChunk = 3, writeChunk = 2;
+	std::vector<unsigned> timeouts;
+	std::chrono::milliseconds delay{0};
+	bool failRead = false, excessiveRead = false;
+	int refs = 1;
+};
+
+void verifyStartup(IMaster* master)
+{
+	Bytes input = startup({}, 80877104);
+	append(input, startup({}, 80877103));
+	append(input, startup({{"user", "alice"}, {"database", "db"},
+		{"application_name", "codec-test"}, {"client_encoding", "UTF8"}}));
+	Connection connection(std::move(input));
+	connection.readChunk = 1;
+	Protocol protocol(master, &connection);
+	Startup result;
+	require(protocol.readStartup(result), "Startup was mistaken for EOF");
+	require(result.user == "alice" && result.database == "db" &&
+		result.applicationName == "codec-test" && result.clientEncoding == "UTF8",
+		"Startup values changed");
+	require(connection.output == Bytes({'N', 'N'}), "SSL/GSS refusal is not one byte each");
+	require(connection.position == connection.input.size(), "Startup framing lost alignment");
+	for (const auto timeout : connection.timeouts)
+		require(timeout && timeout <= 30000, "Unbounded startup operation");
+	Message message;
+	require(!protocol.readMessage(message), "Clean EOF was rejected");
+
+	Connection plain(startup({{"user", "alice"}, {"database", "db"}}));
+	Protocol plainProtocol(master, &plain);
+	require(plainProtocol.readStartup(result) && result.clientEncoding == "UTF8" &&
+		result.applicationName.empty(), "Absent optional startup values did not default");
+	Connection defaultDatabase(startup({{"user", "alice"}}));
+	Protocol defaultProtocol(master, &defaultDatabase);
+	require(defaultProtocol.readStartup(result) && result.database == "alice",
+		"Absent startup database did not default to user");
+}
+
+void verifyStartupErrors(IMaster* master)
+{
+	const std::pair<const char*, Bytes> cases[] = {
+		{"0A000", startup({}, 196609)},
+		{"0A000", startup({{"user", "a"}, {"database", "d"}, {"options", "-c x=y"}})},
+		{"0A000", startup({{"user", "a"}, {"database", "d"}, {"replication", "true"}})},
+		{"0A000", startup({{"user", "a"}, {"database", "d"}, {"unknown", "x"}})},
+		{"22023", startup({{"database", "d"}})},
+		{"22023", startup({{"user", ""}, {"database", "d"}})},
+		{"22023", startup({{"user", "a"}, {"database", ""}})},
+		{"22023", startup({{"user", "a"}, {"database", "d"}, {"client_encoding", "LATIN1"}})},
+		{"08P01", startup({{"user", "a"}, {"user", "b"}, {"database", "d"}})},
+		{"08P01", {0, 0, 0, 7}},
+		{"08P01", {0xFF, 0xFF, 0xFF, 0xFF}},
+		{"08P01", {0, 0}},
+		{"08P01", {0, 0, 0, 8, 0, 3, 0, 0}},
+		{"22021", startup({{"user", "a"}, {"database", "d"}, {"application_name", "\xED\xA0\x80"}})}
+	};
+	for (const auto& item : cases)
+	{
+		Connection connection(item.second);
+		Protocol protocol(master, &connection);
+		Startup result;
+		result.user = "unchanged";
+		expectError(item.first, [&] { protocol.readStartup(result); });
+		require(result.user == "unchanged", "Invalid startup partially changed result");
+	}
+	Bytes repeated = startup({}, 80877103);
+	append(repeated, startup({}, 80877103));
+	Connection connection(repeated);
+	Protocol protocol(master, &connection);
+	Startup result;
+	expectError("08P01", [&] { protocol.readStartup(result); });
+	require(connection.output == Bytes({'N'}), "Repeated SSL request received another response");
+
+	Bytes trailing = startup({{"user", "a"}, {"database", "d"}});
+	++trailing[3];
+	trailing.push_back('x');
+	Connection extra(trailing);
+	Protocol extraProtocol(master, &extra);
+	expectError("08P01", [&] { extraProtocol.readStartup(result); });
+
+	Connection empty;
+	Protocol emptyProtocol(master, &empty);
+	require(!emptyProtocol.readStartup(result), "Startup clean EOF was rejected");
+}
+
+void verifyFrontend(IMaster* master)
+{
+	// Lexical-looking text is deliberately opaque to the codec.
+	const std::string sql = " /* ; BEGIN $1 ? */ SELECT '\xD0\xAF' FROM RDB$DATABASE;\r\n";
+	Bytes input = frame('Q', text(sql));
+	append(input, frame('p', text("s\xC3\xA9" "cret")));
+	append(input, frame('Q', text("")));
+	append(input, frame('X', {}));
+	Connection connection(input);
+	connection.readChunk = 1024;
+	Protocol protocol(master, &connection);
+	Message message;
+	require(protocol.readMessage(message) && message.type == 'Q' && message.text() == sql,
+		"Query bytes were interpreted or changed");
+	require(protocol.readMessage(message) && message.type == 'p' && message.text() == "s\xC3\xA9" "cret",
+		"Password bytes changed");
+	Message moved(std::move(message));
+	require(moved.type == 'p' && moved.text() == "s\xC3\xA9" "cret" && !message.type,
+		"Message move lost ownership");
+	moved.clear();
+	require(moved.body.empty() && !moved.type, "Message clear retained content");
+	require(protocol.readMessage(message) && message.type == 'Q' && message.text().empty(),
+		"Empty query was rejected by codec");
+	require(protocol.readMessage(message) && message.type == 'X' && message.body.empty(),
+		"Terminate was not parsed");
+	require(!protocol.readMessage(message), "Coalesced frames lost their boundary");
+	static_assert(!std::is_copy_constructible_v<Message> && !std::is_copy_assignable_v<Message>);
+}
+
+void verifyFrontendErrors(IMaster* master)
+{
+	const std::pair<const char*, Bytes> cases[] = {
+		{"08P01", {'Q', 0, 0, 0, 3}},
+		{"08P01", {'Q', 0xFF, 0xFF, 0xFF, 0xFF}},
+		{"08P01", {'Q', 0}},
+		{"08P01", {'Q', 0, 0, 0, 6, 'x'}},
+		{"08P01", frame('Q', {})},
+		{"08P01", frame('p', {'x'})},
+		{"08P01", frame('Q', {'x', 0, 'y', 0})},
+		{"08P01", frame('X', {0})},
+		{"22021", frame('Q', {0xC0, 0x80, 0})},
+		{"22021", frame('Q', {0xE2, 0x82, 0})},
+		{"22021", frame('p', {0xF4, 0x90, 0x80, 0x80, 0})},
+		{"22021", frame('p', {0x80, 0})},
+		{"22021", frame('Q', {0xED, 0xA0, 0x80, 0})}
+	};
+	for (const auto& item : cases)
+	{
+		Connection connection(item.second);
+		Protocol protocol(master, &connection);
+		Message message;
+		expectError(item.first, [&] { protocol.readMessage(message); });
+	}
+	Limits limits;
+	limits.passwordBytes = 4;
+	Connection connection(frame('p', text("1234")));
+	Protocol protocol(master, &connection, limits);
+	Message message;
+	expectError("08P01", [&] { protocol.readMessage(message); });
+	require(connection.position == 5 && message.body.empty(),
+		"Oversized password was read or allocated before checking its length");
+	Connection boundary(frame('p', text("123")));
+	Protocol boundaryProtocol(master, &boundary, limits);
+	require(boundaryProtocol.readMessage(message) && message.text() == "123",
+		"Password length at the configured boundary was rejected");
+
+	// Unsupported tags still have bounded framing; the session decides policy.
+	Connection unsupported(frame('Y', {1, 2, 3}));
+	Protocol unsupportedProtocol(master, &unsupported);
+	require(unsupportedProtocol.readMessage(message) && message.type == 'Y' &&
+		message.body == Bytes({1, 2, 3}), "Unsupported frame lost its boundary");
+}
+
+void verifyBackend(IMaster* master)
+{
+	Connection connection;
+	connection.writeChunk = 1;
+	Protocol protocol(master, &connection);
+	protocol.authenticationCleartext();
+	protocol.authenticationOk();
+	protocol.parameterStatus("client_encoding", "UTF8");
+	protocol.ready();
+	protocol.error("0A000", "Unsupported", true);
+	const Bytes expected = {
+		'R', 0, 0, 0, 8, 0, 0, 0, 3,
+		'R', 0, 0, 0, 8, 0, 0, 0, 0,
+		'S', 0, 0, 0, 25, 'c', 'l', 'i', 'e', 'n', 't', '_', 'e', 'n', 'c', 'o', 'd', 'i', 'n', 'g', 0,
+		'U', 'T', 'F', '8', 0,
+		'Z', 0, 0, 0, 5, 'I',
+		'E', 0, 0, 0, 39, 'S', 'F', 'A', 'T', 'A', 'L', 0,
+		'V', 'F', 'A', 'T', 'A', 'L', 0, 'C', '0', 'A', '0', '0', '0', 0,
+		'M', 'U', 'n', 's', 'u', 'p', 'p', 'o', 'r', 't', 'e', 'd', 0, 0
+	};
+	require(connection.output == expected, "Backend wire bytes differ from protocol layout");
+	const auto before = connection.output.size();
+	expectError("22021", [&] { protocol.parameterStatus("n", std::string_view("x\0y", 3)); });
+	require(connection.output.size() == before, "Invalid backend value was partially written");
+
+	Limits limits;
+	limits.frameBytes = 5;
+	Connection tiny;
+	Protocol tinyProtocol(master, &tiny, limits);
+	expectError("08P01", [&] { tinyProtocol.parameterStatus("", ""); });
+	expectError("08P01", [&] { tinyProtocol.error("0A000", "", false); });
+	tinyProtocol.ready('T');
+	require(tiny.output == Bytes({'Z', 0, 0, 0, 5, 'T'}), "Minimum Ready frame was rejected");
+
+	Connection stalled;
+	stalled.writeChunk = 0;
+	Protocol stalledProtocol(master, &stalled);
+	expectError("08P01", [&] { stalledProtocol.ready(); });
+}
+
+void verifyDeadlinesAndTransport(IMaster* master)
+{
+	Limits limits;
+	limits.timeoutMs = 25;
+	Connection slow(frame('Q', text("long enough")));
+	slow.readChunk = 1;
+	slow.delay = 10ms;
+	Protocol slowProtocol(master, &slow, limits);
+	Message message;
+	expectError("08006", [&] { slowProtocol.readMessage(message); });
+	require(slow.position < slow.input.size(), "Short progress reset the frame deadline");
+	require(!slow.timeouts.empty() && (slow.timeouts.size() == 1 ||
+		slow.timeouts.back() < slow.timeouts.front()),
+		"Transport timeouts did not consume the whole-frame budget");
+
+	Connection writes;
+	writes.writeChunk = 1;
+	writes.delay = 10ms;
+	Protocol writesProtocol(master, &writes, limits);
+	expectError("08006", [&] { writesProtocol.authenticationOk(); });
+	require(writes.output.size() < 9, "Short writes reset the frame deadline");
+
+	Bytes input = startup({{"user", "a"}, {"database", "d"}});
+	append(input, frame('p', text("secret")));
+	Connection authentication(input);
+	Protocol authenticationProtocol(master, &authentication, limits);
+	Startup result;
+	require(authenticationProtocol.readStartup(result), "Valid startup failed");
+	std::this_thread::sleep_until(authenticationProtocol.startupDeadline() + 1ms);
+	const auto before = authentication.position;
+	expectError("08006", [&] {
+		authenticationProtocol.readMessage(message, authenticationProtocol.startupDeadline());
+	});
+	require(authentication.position == before, "Password received a fresh startup deadline");
+	expectError("08006", [&] {
+		authenticationProtocol.authenticationOk(authenticationProtocol.startupDeadline());
+	});
+	require(authentication.output.empty(), "Expired startup wrote AuthenticationOk");
+
+	Connection broken;
+	broken.failRead = true;
+	Protocol brokenProtocol(master, &broken);
+	bool failed = false;
+	try
+	{
+		brokenProtocol.readMessage(message);
+	}
+	catch (const FbException& error)
+	{
+		failed = true;
+		require(error.getStatus()->getErrors()[1] == isc_net_read_err,
+			"Transport ISC status was lost");
+	}
+	require(failed, "Transport failure was reported as EOF");
+	Connection excessive({'Q'});
+	excessive.excessiveRead = true;
+	Protocol excessiveProtocol(master, &excessive);
+	expectError("08P01", [&] { excessiveProtocol.readMessage(message); });
+}
+
+} // namespace
+
+int main()
+{
+	try
+	{
+		IMaster* master = fb_get_master_interface();
+		verifyStartup(master);
+		verifyStartupErrors(master);
+		verifyFrontend(master);
+		verifyFrontendErrors(master);
+		verifyBackend(master);
+		verifyDeadlinesAndTransport(master);
+		std::puts("PgWire protocol codec tests passed");
+		return 0;
+	}
+	catch (const std::exception& error)
+	{
+		std::fprintf(stderr, "PgWire protocol codec tests failed: %s\n", error.what());
+	}
+	catch (...)
+	{
+		std::fputs("PgWire protocol codec tests failed: unexpected exception\n", stderr);
+	}
+	return 1;
+}

@@ -22,6 +22,7 @@
 #include "../../Server.h"
 #include "../../ProtocolPlugin.h"
 #include "../../SocketConnection.h"
+#include "../../Authentication.h"
 #include "../common/classes/ImplementHelper.h"
 #include "../common/config/config.h"
 #include "../common/StatusArg.h"
@@ -106,6 +107,7 @@ void logException(const EndpointConfig& endpoint, const Exception& ex)
 struct Settings
 {
 	EndpointConfig endpoint;
+	std::vector<std::string> databaseAliases;
 	unsigned workers = 4;
 	unsigned queueSize = 16;
 	unsigned timeout = 30000;
@@ -170,6 +172,20 @@ Settings readSettings(const EndpointConfig& endpoint)
 	settings.workers = number(config, "Workers", settings.workers, 16);
 	settings.queueSize = number(config, "QueueSize", settings.queueSize, 64);
 	settings.timeout = number(config, "IOTimeout", settings.timeout, 300000);
+	if (const auto aliases = setting(config, "DatabaseAliases"))
+	{
+		std::vector<std::string_view> names;
+		std::string error;
+		const char* value = aliases->getValue();
+		if (!Detail::splitEndpointList(value ? value : "", "DatabaseAliases", names, error))
+			fail(error.c_str());
+		for (const auto name : names)
+		{
+			if (name.size() > 255 || !Detail::validConfiguredName(name))
+				fail("DatabaseAliases must contain local database aliases");
+			settings.databaseAliases.emplace_back(name);
+		}
+	}
 	return settings;
 }
 
@@ -250,17 +266,102 @@ int listenSocket(unsigned port, unsigned backlog)
 class HostContext final : public RefCntIface<IWireServerHostImpl<HostContext, CheckStatusWrapper>>
 {
 public:
-	HostContext(const EndpointConfig& endpoint, std::atomic<bool>& stopping)
-		: endpoint(endpoint), stopping(stopping) {}
+	HostContext(const Settings& settings, IWireConnection* connection, std::atomic<bool>& stopping)
+		: endpoint(settings.endpoint), aliases(settings.databaseAliases), connection(connection), stopping(stopping) {}
+	~HostContext() override { closeAll(); }
 	FB_BOOLEAN isStopping() override { return stopping.load(); }
 	void log(unsigned level, unsigned length, const char* message) override
 	{
 		if (level >= LOG_INFO && level <= LOG_ERROR)
 			logEndpoint(endpoint, safeText(message, length).c_str());
 	}
+	IAttachment* attachDatabase(CheckStatusWrapper* status, const char* database, const char* user,
+		unsigned passwordLength, const void* password, const char* applicationName) override
+	{
+		try
+		{
+			if (!database || std::find(aliases.begin(), aliases.end(), database) == aliases.end())
+				(Arg::Gds(isc_unavailable)).raise();
+			IAttachment* attachment = authenticateAndAttach(status, database, user, passwordLength,
+				static_cast<const char*>(password), connection->getPeerAddress(), connection->getPeerPort(), endpoint.plugin.c_str(),
+				applicationName, stopping);
+			if (!attachment)
+				return nullptr;
+			try
+			{
+				check(status);
+				std::lock_guard<std::mutex> guard(mutex);
+				if (stopping)
+					(Arg::Gds(isc_att_shutdown)).raise();
+				attachments.push_back(attachment);
+			}
+			catch (...)
+			{
+				FbLocalStatus cleanup;
+				closeAttachment(&cleanup, attachment);
+				throw;
+			}
+			return attachment; // Borrowed: this context owns the returned reference.
+		}
+		catch (const Exception& ex) { ex.stuffException(status); }
+		catch (...) { (Arg::Gds(isc_random) << "Wire attachment failed").copyTo(status); }
+		return nullptr;
+	}
+	void detachDatabase(CheckStatusWrapper* status, IAttachment* attachment) override
+	{
+		try
+		{
+			{
+				std::lock_guard<std::mutex> guard(mutex);
+				const auto found = std::find(attachments.begin(), attachments.end(), attachment);
+				if (found == attachments.end())
+					(Arg::Gds(isc_bad_db_handle)).raise();
+				attachments.erase(found);
+			}
+			closeAttachment(status, attachment);
+		}
+		catch (const Exception& ex) { ex.stuffException(status); }
+	}
+	void cancelAll()
+	{
+		std::vector<RefPtr<IAttachment>> snapshot;
+		{
+			std::lock_guard<std::mutex> guard(mutex);
+			for (auto* attachment : attachments)
+				snapshot.emplace_back(attachment);
+		}
+		for (auto& attachment : snapshot)
+		{
+			FbLocalStatus status;
+			attachment->cancelOperation(&status, fb_cancel_raise);
+		}
+	}
+	void closeAll() noexcept
+	{
+		std::vector<IAttachment*> owned;
+		{
+			std::lock_guard<std::mutex> guard(mutex);
+			owned.swap(attachments);
+		}
+		for (auto* attachment : owned)
+		{
+			FbLocalStatus status;
+			closeAttachment(&status, attachment);
+		}
+	}
 private:
+	static void closeAttachment(CheckStatusWrapper* status, IAttachment* attachment)
+	{
+		attachment->detach(status);
+		if (status->getState() & IStatus::STATE_ERRORS)
+			attachment->release();
+	}
 	const EndpointConfig endpoint;
+	const std::vector<std::string> aliases;
+	const RefPtr<IWireConnection> connection;
 	std::atomic<bool>& stopping;
+	std::mutex mutex;
+	std::vector<IAttachment*> attachments;
 };
 
 class Endpoint final
@@ -298,16 +399,22 @@ public:
 		{
 			std::shared_ptr<Work> work;
 			std::shared_ptr<ProtocolSession> session;
+			RefPtr<HostContext> context;
 			{
 				std::lock_guard<std::mutex> guard(mutex);
 				work = active[i];
 				if (work)
+				{
 					session = work->session;
+					context = work->context;
+				}
 			}
 			if (work)
 				work->connection->shutdown();
 			if (session)
 				session->stop();
+			if (context)
+				context->cancelAll();
 		}
 		for (;;)
 		{
@@ -341,6 +448,7 @@ private:
 	{
 		explicit Work(IWireConnection* connection) : connection(REF_NO_INCR, connection) {}
 		RefPtr<IWireConnection> connection;
+		RefPtr<HostContext> context;
 		std::shared_ptr<ProtocolSession> session;
 		const Clock::time_point accepted = Clock::now();
 	};
@@ -453,7 +561,11 @@ private:
 			{
 				if (!stopping && Clock::now() - work->accepted < std::chrono::milliseconds(settings.timeout))
 				{
-					RefPtr<IWireServerHost> context(FB_NEW HostContext(settings.endpoint, stopping));
+					RefPtr<HostContext> context(FB_NEW HostContext(settings, work->connection, stopping));
+					{
+						std::lock_guard<std::mutex> guard(mutex);
+						work->context = context;
+					}
 					std::shared_ptr<ProtocolSession> session = plugin->createSession(context, work->connection);
 					{
 						std::lock_guard<std::mutex> guard(mutex);
@@ -472,6 +584,8 @@ private:
 			}
 			catch (const Exception& ex) { logException(settings.endpoint, ex); }
 			catch (...) { logEndpoint(settings.endpoint, "Session creation or execution failed"); }
+			if (work->context)
+				work->context->closeAll();
 			work->connection->shutdown();
 			{
 				std::lock_guard<std::mutex> guard(mutex);

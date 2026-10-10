@@ -564,6 +564,17 @@ set_exported_symbols        (udr_engine fbplugin)
 
 
 ########################################
+# SHARED LIBRARY pgwire
+########################################
+
+add_library                 (pgwire SHARED plugins/wire/pg/PgWire.cpp plugins/wire/pg/Protocol.cpp ${VERSION_RC})
+add_dependencies_cc         (pgwire UpdateCloopInterfaces)
+target_link_libraries       (pgwire common yvalve)
+set_target_properties       (pgwire PROPERTIES OUTPUT_NAME PgWire)
+set_output_directory        (pgwire plugins)
+set_exported_symbols        (pgwire fbplugin)
+
+########################################
 # SHARED LIBRARY srp
 ########################################
 
