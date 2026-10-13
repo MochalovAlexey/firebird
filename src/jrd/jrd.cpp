@@ -7848,11 +7848,16 @@ void release_attachment(thread_db* tdbb, Jrd::Attachment* attachment, XThreadEns
 
 	attachment->releaseBatches();
 
-    // CMP_release() changes att_requests.
+	// CMP_release() releases a whole statement, possibly containing several
+	// prepared request clones owned by this attachment. Mark all of them unused
+	// before releasing the first statement during forced attachment cleanup.
+	for (auto* request : attachment->att_requests)
+		request->setUnused();
+
+	// CMP_release() changes att_requests.
 	while (attachment->att_requests.hasData())
 	{
 		auto* req = attachment->att_requests.back();
-		req->setUnused();
 		CMP_release(tdbb, req);
 	}
 

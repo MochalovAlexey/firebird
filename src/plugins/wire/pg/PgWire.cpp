@@ -115,20 +115,14 @@ public:
 			protocol.ready('I');
 			QueryExecutor executor(owned.attachment);
 
-			while (!stopping() && protocol.readMessage(message))
+			while (!stopping() && protocol.readMessage(message, executor.discarding()))
 			{
 				if (stopping())
 					return;
 				if (message.type == 'X')
 					return;
-				if (message.type == 'Q')
-				{
-					if (!executor.execute(protocol, message.text()))
-						return;
-					protocol.ready(executor.transactionState());
-				}
-				else
-					throw ProtocolError("0A000", "Frontend message is not supported yet");
+				if (!executor.process(protocol, message))
+					return;
 				message.clear();
 			}
 		}

@@ -250,6 +250,8 @@ void verifyFrontendErrors(IMaster* master)
 		{"08P01", frame('p', {'x'})},
 		{"08P01", frame('Q', {'x', 0, 'y', 0})},
 		{"08P01", frame('X', {0})},
+		{"08P01", frame('H', {0})},
+		{"08P01", frame('S', {0})},
 		{"22021", frame('Q', {0xC0, 0x80, 0})},
 		{"22021", frame('Q', {0xE2, 0x82, 0})},
 		{"22021", frame('p', {0xF4, 0x90, 0x80, 0x80, 0})},
@@ -281,6 +283,201 @@ void verifyFrontendErrors(IMaster* master)
 	Protocol unsupportedProtocol(master, &unsupported);
 	require(unsupportedProtocol.readMessage(message) && message.type == 'Y' &&
 		message.body == Bytes({1, 2, 3}), "Unsupported frame lost its boundary");
+}
+
+void verifyDiscardFraming(IMaster* master)
+{
+	Bytes bytes;
+	for (const auto tag : {'Q', 'P', 'B', 'D', 'E', 'C', 'H'})
+		append(bytes, frame(tag, {0xff, 1, 2}));
+	append(bytes, frame('S', {}));
+	Connection connection(bytes);
+	Protocol protocol(master, &connection);
+	Message message;
+	for (const auto tag : {'Q', 'P', 'B', 'D', 'E', 'C', 'H', 'S'})
+	{
+		require(protocol.readMessage(message, true) && message.type == tag,
+			"Discard recovery parsed an ignored body or lost its boundary");
+	}
+	for (const auto tag : {'S', 'X', 'p', '?'})
+	{
+		Connection invalid(frame(tag, {1}));
+		Protocol invalidProtocol(master, &invalid);
+		expectError("08P01", [&] { invalidProtocol.readMessage(message, true); });
+	}
+	Connection truncated({'Q', 0, 0, 0, 9, 'a'});
+	Protocol truncatedProtocol(master, &truncated);
+	expectError("08P01", [&] { truncatedProtocol.readMessage(message, true); });
+}
+
+void verifyExtendedFrontend(IMaster* master)
+{
+	const std::string sql = " /* BEGIN;$1 */ SELECT CAST(? AS INTEGER) AS \"UPDATE\" FROM RDB$DATABASE\r\n";
+	Bytes parse = text("\xD0\xAF");
+	append(parse, text(sql));
+	append(parse, {0, 3, 0, 0, 0, 0, 0, 0, 0, 23, 0xFF, 0xFF, 0xFF, 0xFF});
+	// Four parameters: NULL, empty, arbitrary binary bytes, UTF8 text.
+	const Bytes bind = {
+		'p', 0, 0xD0, 0xAF, 0,
+		0, 4, 0, 0, 0, 0, 0, 1, 0, 0,
+		0, 4, 0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0,
+		0, 0, 0, 3, 0, 0x80, 0xFF,
+		0, 0, 0, 2, 0xD0, 0xAF,
+		0, 1, 0, 1
+	};
+	Bytes input = frame('P', parse);
+	append(input, frame('B', bind));
+	append(input, frame('D', {'S', 0xD0, 0xAF, 0}));
+	append(input, frame('C', {'P', 0}));
+	append(input, frame('E', {'p', 0, 0, 0, 0, 123}));
+	append(input, frame('H', {}));
+	append(input, frame('S', {}));
+	Connection connection(input);
+	connection.readChunk = 1;
+	Protocol protocol(master, &connection);
+	Message message;
+	require(protocol.readMessage(message), "Parse frame was not read");
+	const auto parsed = message.parse();
+	require(parsed.name == "\xD0\xAF" && parsed.sql == sql &&
+		parsed.parameterTypes == std::vector<std::uint32_t>({0, 23, 0xFFFFFFFF}),
+		"Parse changed SQL, object name or unsigned parameter OIDs");
+	require(protocol.readMessage(message), "Bind frame was not read");
+	const auto bound = message.bind();
+	require(bound.portal == "p" && bound.statement == parsed.name &&
+		bound.parameterFormats == std::vector<std::int16_t>({0, 0, 1, 0}) &&
+		bound.resultFormats == std::vector<std::int16_t>({1}), "Bind names or formats changed");
+	require(bound.values.size() == 4 && !bound.values[0] && bound.values[1] &&
+		bound.values[1]->empty() && bound.values[2] == std::string("\0\x80\xFF", 3) &&
+		bound.values[3] == std::string("\xD0\xAF"), "Bind confused NULL, empty, binary or UTF8 bytes");
+	require(parsed.sql == sql, "Decoded Parse retained borrowed Message storage");
+	require(protocol.readMessage(message), "Describe frame was not read");
+	const auto described = message.object();
+	require(described.kind == 'S' && described.name == parsed.name, "Describe changed object identity");
+	require(protocol.readMessage(message), "Close frame was not read");
+	const auto closed = message.object();
+	require(closed.kind == 'P' && closed.name.empty(), "Close rejected an unnamed portal");
+	require(protocol.readMessage(message), "Execute frame was not read");
+	const auto executed = message.execution();
+	require(executed.portal == "p" && executed.maxRows == 123, "Execute changed portal or row limit");
+	require(protocol.readMessage(message) && message.type == 'H' && message.body.empty(),
+		"Flush body was not empty");
+	require(protocol.readMessage(message) && message.type == 'S' && message.body.empty(),
+		"Sync body was not empty");
+	require(!protocol.readMessage(message) && connection.position == input.size(),
+		"Extended messages lost framing alignment");
+	require(bound.values[2] == std::string("\0\x80\xFF", 3), "Decoded Bind retained borrowed storage");
+
+	message.type = 'P';
+	message.body = {0, 0, 0, 0};
+	const auto empty = message.parse();
+	require(empty.name.empty() && empty.sql.empty() && empty.parameterTypes.empty(),
+		"Empty Parse statement was rejected by framing codec");
+	message.type = 'B';
+	message.body = {0, 0, 0, 0, 0, 0, 0, 0};
+	const auto defaults = message.bind();
+	require(defaults.portal.empty() && defaults.statement.empty() && defaults.values.empty() &&
+		defaults.parameterFormats.empty() && defaults.resultFormats.empty(), "Default Bind changed");
+	// Formats and their relation to value/output counts are executor semantics.
+	message.body = {0, 0, 0, 2, 0, 2, 0xFF, 0xFF, 0, 0, 0, 2, 0, 7, 0x80, 0};
+	const auto unsupported = message.bind();
+	require(unsupported.parameterFormats == std::vector<std::int16_t>({2, -1}) &&
+		unsupported.resultFormats == std::vector<std::int16_t>({7, -32768}),
+		"Codec interpreted unsupported formats or their count as malformed framing");
+	message.type = 'E';
+	message.body = {0, 0xFF, 0xFF, 0xFF, 0xFF};
+	require(message.execution().maxRows == 0xFFFFFFFF, "Execute row-limit bits were lost before validation");
+	message.body = {0, 0, 0, 0, 0};
+	require(message.execution().maxRows == 0, "Unlimited Execute row count was changed");
+}
+
+void decodeExtended(const Message& message)
+{
+	switch (message.type)
+	{
+	case 'P': message.parse(); break;
+	case 'B': message.bind(); break;
+	case 'D': case 'C': message.object(); break;
+	case 'E': message.execution(); break;
+	default: throw std::runtime_error("Unexpected test message type");
+	}
+}
+
+void verifyExtendedErrors(IMaster* master)
+{
+	const std::pair<char, Bytes> complete[] = {
+		{'P', {'s', 0, '?', 0, 0, 1, 0, 0, 0, 23}},
+		{'B', {0, 0, 0, 1, 0, 1, 0, 1, 0, 0, 0, 3, 0, 0x80, 0xFF, 0, 0}},
+		{'D', {'S', 's', 0}}, {'C', {'P', 'p', 0}},
+		{'E', {'p', 0, 0, 0, 0, 1}}
+	};
+	for (const auto& item : complete)
+	{
+		// Every truncated prefix is carried in a complete outer frame, so this
+		// exercises body validation independently of transport EOF detection.
+		for (std::size_t length = 0; length < item.second.size(); ++length)
+		{
+			Connection connection(frame(item.first, Bytes(item.second.begin(), item.second.begin() + length)));
+			Protocol protocol(master, &connection);
+			Message message;
+			require(protocol.readMessage(message), "Truncated body fixture lost its outer frame");
+			expectError("08P01", [&] { decodeExtended(message); });
+			require(connection.output.empty(), "Body decoder emitted an automatic error response");
+		}
+		Message message;
+		message.type = item.first;
+		message.body = item.second;
+		decodeExtended(message);
+		message.body.push_back(0);
+		expectError("08P01", [&] { decodeExtended(message); });
+	}
+	const std::pair<char, Bytes> invalid[] = {
+		{'P', {0, 0, 0xFF, 0xFF}}, // Count before any OID bytes.
+		{'B', {0, 0, 0xFF, 0xFF}}, // Format count before format storage.
+		{'B', {0, 0, 0, 0, 0xFF, 0xFF, 0, 0}}, // Value count before lengths.
+		{'B', {0, 0, 0, 0, 0, 1, 0xFF, 0xFF, 0xFF, 0xFE, 0, 0}},
+		{'B', {0, 0, 0, 0, 0, 1, 0x7F, 0xFF, 0xFF, 0xFF, 0, 0}},
+		{'B', {0, 0, 0, 0, 0, 0, 0xFF, 0xFF}}, // Result format array missing.
+		{'D', {'Q', 0}}, {'C', {0, 0}}
+	};
+	for (const auto& item : invalid)
+	{
+		Message message;
+		message.type = item.first;
+		message.body = item.second;
+		expectError("08P01", [&] { decodeExtended(message); });
+	}
+	const std::pair<char, Bytes> invalidUtf8[] = {
+		{'P', {0x80, 0, 0, 0, 0}}, {'P', {0, 0xED, 0xA0, 0x80, 0, 0, 0}},
+		{'B', {0x80, 0, 0, 0, 0, 0, 0, 0, 0}},
+		{'B', {0, 0x80, 0, 0, 0, 0, 0, 0, 0}},
+		{'D', {'S', 0x80, 0}}, {'C', {'P', 0x80, 0}},
+		{'E', {0x80, 0, 0, 0, 0, 0}}
+	};
+	for (const auto& item : invalidUtf8)
+	{
+		Message message;
+		message.type = item.first;
+		message.body = item.second;
+		expectError("22021", [&] { decodeExtended(message); });
+	}
+	Message wrongType;
+	wrongType.type = 'Q';
+	wrongType.body = {0};
+	expectError("08P01", [&] { wrongType.parse(); });
+	expectError("08P01", [&] { wrongType.bind(); });
+	expectError("08P01", [&] { wrongType.object(); });
+	expectError("08P01", [&] { wrongType.execution(); });
+
+	// Int16 counts carry unsigned counts on the wire. They cannot bypass byte
+	// bounds or be truncated to signed values before executor capability checks.
+	Message maximum;
+	maximum.type = 'P';
+	maximum.body = {0, 0, 0xFF, 0xFF};
+	maximum.body.resize(4 + 65535 * 4, 0);
+	maximum.body.back() = 23;
+	const auto parsed = maximum.parse();
+	require(parsed.parameterTypes.size() == 65535 && parsed.parameterTypes.back() == 23,
+		"Parse parameter count was truncated or treated as signed");
 }
 
 void verifyBackend(IMaster* master)
@@ -435,6 +632,79 @@ void verifyResultErrors(IMaster* master)
 		connection.output[6] == 0xFF, "Maximum supported result count changed");
 }
 
+void verifyExtendedBackend(IMaster* master)
+{
+	Connection connection;
+	connection.writeChunk = 1;
+	Protocol protocol(master, &connection);
+	protocol.parseComplete();
+	protocol.bindComplete();
+	protocol.closeComplete();
+	protocol.parameterDescription({23, 25});
+	protocol.parameterDescription({});
+	protocol.noData();
+	protocol.portalSuspended();
+	const Bytes completed = {
+		'1', 0, 0, 0, 4, '2', 0, 0, 0, 4, '3', 0, 0, 0, 4,
+		't', 0, 0, 0, 14, 0, 2, 0, 0, 0, 23, 0, 0, 0, 25,
+		't', 0, 0, 0, 6, 0, 0, 'n', 0, 0, 0, 4, 's', 0, 0, 0, 4
+	};
+	require(connection.output == completed, "Extended completion frames differ from literal bytes");
+	connection.output.clear();
+	protocol.rowDescription({{"x", 23, 4, -1, 1}});
+	protocol.dataRow({std::string("\x80\0\0\0", 4)}, {1});
+	const Bytes binary = {
+		'T', 0, 0, 0, 26, 0, 1, 'x', 0,
+		0, 0, 0, 0, 0, 0, 0, 0, 0, 23, 0, 4, 0xFF, 0xFF, 0xFF, 0xFF, 0, 1,
+		'D', 0, 0, 0, 14, 0, 1, 0, 0, 0, 4, 0x80, 0, 0, 0
+	};
+	require(connection.output == binary, "Binary RowDescription/DataRow changed bytes or format");
+	connection.output.clear();
+	protocol.dataRow({std::string("\0\xFF", 2), std::string("\xD0\xAF"), std::nullopt}, {1, 0, 1});
+	const Bytes mixed = {
+		'D', 0, 0, 0, 22, 0, 3, 0, 0, 0, 2, 0, 0xFF,
+		0, 0, 0, 2, 0xD0, 0xAF, 0xFF, 0xFF, 0xFF, 0xFF
+	};
+	require(connection.output == mixed, "Per-column formats confused binary, text or NULL");
+	connection.output.clear();
+	protocol.dataRow({std::nullopt, std::string()}, {1});
+	require(connection.output == Bytes({'D', 0, 0, 0, 14, 0, 2,
+		0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0}), "Binary NULL and empty lost their distinct lengths");
+	connection.output.clear();
+	expectError("22021", [&] { protocol.dataRow({std::string("\0\xFF", 2)}, {0}); });
+	expectError("22021", [&] {
+		protocol.dataRow({std::string("valid"), std::string("\xFF")}, {1, 0});
+	});
+	expectError("22023", [&] { protocol.dataRow({std::string("x")}, {0, 1}); });
+	expectError("0A000", [&] { protocol.dataRow({std::nullopt}, {-1}); });
+	expectError("0A000", [&] { protocol.rowDescription({{"x", 23, 4, -1, 2}}); });
+	require(connection.output.empty(), "Invalid result format/text emitted a partial frame");
+
+	Limits limits;
+	limits.frameBytes = 14;
+	Connection bounded;
+	Protocol boundedProtocol(master, &bounded, limits);
+	expectError("0A000", [&] { boundedProtocol.parameterDescription({21, 23, 25}); });
+	require(bounded.output.empty(), "Oversized ParameterDescription emitted a partial frame");
+	boundedProtocol.parameterDescription({23, 25});
+	require(bounded.output == Bytes({'t', 0, 0, 0, 14, 0, 2, 0, 0, 0, 23, 0, 0, 0, 25}),
+		"ParameterDescription at its exact byte limit changed");
+	std::vector<std::uint32_t> tooMany(32768, 23);
+	expectError("0A000", [&] { protocol.parameterDescription(tooMany); });
+	require(connection.output.empty(), "ParameterDescription truncated its field count");
+	limits.frameBytes = 5;
+	Connection tiny;
+	Protocol tinyProtocol(master, &tiny, limits);
+	expectError("0A000", [&] { tinyProtocol.parameterDescription({}); });
+	require(tiny.output.empty(), "Tiny ParameterDescription underflowed its length bound");
+	tinyProtocol.parseComplete();
+	tinyProtocol.bindComplete();
+	tinyProtocol.closeComplete();
+	tinyProtocol.noData();
+	tinyProtocol.portalSuspended();
+	require(tiny.output.size() == 25, "Empty Extended response frames exceeded minimum frame limit");
+}
+
 void verifyTransport(IMaster* master)
 {
 	Message message;
@@ -470,9 +740,13 @@ int main()
 		verifyStartupErrors(master);
 		verifyFrontend(master);
 		verifyFrontendErrors(master);
+		verifyExtendedFrontend(master);
+		verifyExtendedErrors(master);
+		verifyDiscardFraming(master);
 		verifyBackend(master);
 		verifyResults(master);
 		verifyResultErrors(master);
+		verifyExtendedBackend(master);
 		verifyTransport(master);
 		std::puts("PgWire protocol codec tests passed");
 		return 0;

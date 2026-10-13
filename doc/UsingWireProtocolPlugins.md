@@ -12,7 +12,7 @@ SuperClassic and Classic are diagnosed without starting additional listeners;
 their native frontend remains available. Other platforms need separate wiring
 and acceptance. P2 added host authentication and local attachments, and a separate
 `PgWire` production module providing PostgreSQL startup. P3 introduced query
-execution; the current P4 implementation supports Simple Query DML/DDL,
+execution; the P4 implementation added Simple Query DML/DDL,
 RETURNING, procedures/blocks and basic result codecs. Completion classification
 now belongs to the PgWire plugin and uses the existing engine API. The refactor
 passed targeted Linux/Super checks. P5 adds explicit transaction/session controls
@@ -26,7 +26,8 @@ Shutdown during a real ON CONNECT trigger is excluded from this acceptance:
 it causes a Debug assertion at alloc.cpp:2075 (!child), also reproduced on the
 native path with wire endpoints disabled. The [attach/shutdown reproducer](../pg_wire_protocol/tools/pgwire_attach_shutdown_smoke.py)
 retains its actual FAIL and nonzero exit; it is not skipped or converted to a pass.
-No core fix is included. The next stage is P7 Extended Query.
+This ON CONNECT defect is not fixed or retested in P7. P7 Extended Query passed
+16 targeted Linux/Super groups; its current contract is described below.
 No new pause or timeout-expiration tests are added. SuperClassic checks only verify
 that native remains available when PgWire is refused; Windows and auth-plugin or
 close/free fault injection are outside this acceptance.
@@ -478,7 +479,9 @@ rolls back any remaining transaction before the attachment is detached.
 Native SET commands change real attachment settings. ALTER SESSION RESET in T
 rolls back and creates a new transaction, possibly behind the same interface,
 and keeps T. In I it creates no application transaction; in E it receives 25P02.
-No protocol statements, portals or savepoint names are cached between Queries.
+P7 caches prepared statements and portals as described below; RESET invalidates
+all of them even when the native transaction interface pointer is unchanged.
+Savepoint names are not cached by the plugin.
 Currently reported ParameterStatus values do not describe the reset options.
 Native AUTO COMMIT and NO AUTO UNDO semantics are preserved; AUTO COMMIT may have
 already committed changes that a later rollback cannot undo. These native SQL
@@ -528,6 +531,74 @@ the full POSIX build, four unit executables (487 SQL classification checks),
 and the Simple Query/lifecycle/startup/native regressions. The native AUTO COMMIT
 limitation above remains; targeted P6/M1 acceptance excludes the separate native
 ON CONNECT shutdown defect. Commands, evidence and coverage limits are maintained in
-[`VALIDATION.md`](../pg_wire_protocol/VALIDATION.md). Extended Query, additional
+[`VALIDATION.md`](../pg_wire_protocol/VALIDATION.md). P7 Extended Query passed 16 targeted Linux/Super groups. Additional
 codecs, remote TCP/TLS, cancellation messages and other server modes require
 subsequent implementation and validation.
+
+
+## PgWire Extended Query profile (P7)
+
+P7 implements Parse, Bind, Describe statement/portal, Execute, Close, Flush and
+Sync and passed 16 targeted Linux/Super groups; this does not establish the full M2 or a
+Psycopg 3 application profile. Direct C libpq and raw-wire acceptance use native
+`?` parameters, for example `SELECT CAST(? AS INTEGER) FROM RDB$DATABASE`, or no
+parameters. PostgreSQL BEGIN and `$n` remain engine syntax errors. P7 leaves
+grammar, public statement metadata and CLOOP unchanged.
+
+P7 includes a narrow native cleanup fix in jrd.cpp release_attachment: all
+attachment requests are marked unused before CMP_release can free a shared
+Statement and its request clones. The original shutdown assertion at
+Statement.cpp:781 was also reproduced over native TCP with wire endpoints
+disabled. It is separate from the unresolved ON CONNECT assertion above.
+Extended.cpp owns prepared objects and Extended message execution; Execute.cpp
+provides the shared transaction policy and Simple Query path.
+
+A prepared statement owns its original SQL, native template handle and metadata.
+Bind prepares that same SQL into a separate native handle for each portal, so
+bound values and cursors have independent execution state. Prepare uses the
+current application transaction or NULL/system prepare; it does not start a
+hidden application transaction. Named statements survive commit. Closing a
+statement or replacing the unnamed statement preserves already bound portals.
+Simple Query removes both unnamed objects. Portals end with the transaction;
+Sync inside explicit T preserves them, including suspended cursors. RESET
+invalidates all statements and portals even with an unchanged native transaction
+interface pointer.
+
+InputCodec validates parameter counts, format-count rules (0/1/N), format codes,
+NULL, lengths and ranges before execution. Parse OID hints may cover a prefix of
+the parameters; zero or an omitted hint uses native inference. Integer, boolean
+and numeric OIDs must match exactly. Text OIDs 25/1042/1043 are interchangeable,
+and an accepted explicit OID is retained in ParameterDescription. A mismatched
+hint receives `0A000`; hints cannot repair missing engine inference or rewrite
+SQL. Ambiguous expressions may therefore need a client-written CAST on the
+parameter itself, such as `CAST(? AS INTEGER) + ID`; the plugin does not inject
+that cast or pass OID hints into the native parser.
+Text input/output supports SMALLINT/INTEGER/BIGINT, BOOLEAN, CHAR/VARCHAR and
+NUMERIC/DECIMAL stored through INT64. Binary integer, boolean and string input
+and output are supported; non-null binary NUMERIC remains `0A000` until P8.
+Exact decimal input, including exponent notation, uses no floating point;
+nonrepresentable scale/range receives `22003`. CHAR input uses varying metadata.
+UTF8/NONE strings require valid UTF8, ASCII input additionally requires ASCII,
+and embedded NUL is rejected.
+
+Execute can suspend a cursor at maxRows and resume it later; zero reads the
+remainder. Flush does not finish a transaction or send ReadyForQuery. Sync
+finishes an implicit cycle and reports one ReadyForQuery, while preserving an
+explicit transaction. CommandComplete for an Execute does not promise a commit
+before Sync. SET TRANSACTION during an already open implicit cycle receives
+`25001`: its TPB cannot replace the existing native transaction. Recoverable
+Extended errors roll back an implicit cycle before Sync, invalidate all portals
+and discard execution messages until Sync; explicit transactions remain in E.
+During discard, bodies of recognized command messages are not decoded; Sync
+and Terminate retain normal handling. Invalid frame lengths, truncated frames
+and unknown tags remain fatal. Semantic Bind count/format errors are recoverable
+`08P01` errors followed by discard-until-Sync.
+
+Per-session limits are 128 statements, 128 portals and 8 MiB of accounted retained
+SQL, metadata and buffers. Additional engine allocations are bounded by object
+counts; the accounted budget is not a process RSS limit. Five codec unit
+executables passed, including 149 input and 487 SQL classification checks;
+seven server groups/58 pytest cases and nine native baseline checks also passed.
+Acceptance results and remaining limitations are recorded in
+[`VALIDATION.md`](../pg_wire_protocol/VALIDATION.md). Expanded codecs and binary
+NUMERIC belong to P8; driver/application profiles belong to P9.

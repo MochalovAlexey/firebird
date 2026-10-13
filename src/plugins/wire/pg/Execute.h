@@ -15,6 +15,7 @@
 #define PLUGINS_WIRE_PG_EXECUTE_H
 
 #include "Protocol.h"
+#include "SqlInfo.h"
 
 namespace Firebird::PgWire
 {
@@ -24,8 +25,7 @@ namespace Firebird::PgWire
 class QueryExecutor final
 {
 public:
-	explicit QueryExecutor(IAttachment* attachment)
-		: attachment(attachment) {}
+	explicit QueryExecutor(IAttachment* attachment);
 	~QueryExecutor();
 	QueryExecutor(const QueryExecutor&) = delete;
 	QueryExecutor& operator=(const QueryExecutor&) = delete;
@@ -33,9 +33,22 @@ public:
 	// SQL goes unchanged to native prepare. Sends result/error, not ReadyForQuery.
 	// false means close the session; transport failures propagate to its owner.
 	bool execute(Protocol& protocol, std::string_view sql);
+	// Dispatches both query protocols, including recovery through Sync and Ready.
+	bool process(Protocol& protocol, const Message& message);
+	bool discarding() const noexcept;
 	char transactionState() const noexcept { return state; }
 
 private:
+	struct Objects;
+	std::unique_ptr<Objects> objects;
+	static bool recovery(ControlKind control);
+	static void checkStatement(IStatement* statement, const SqlInfo& info);
+	std::string control(IStatement* statement, const SqlInfo& info, bool& ending);
+	void startImplicit();
+	void finishImplicit(bool& ending);
+	bool clearPortals(IStatement* executing = nullptr) noexcept;
+	bool clearStatements() noexcept;
+	void clearUnnamed();
 	bool rollback() noexcept;
 	bool transactionIsValid() noexcept;
 

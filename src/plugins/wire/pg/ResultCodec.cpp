@@ -57,6 +57,18 @@ template <typename T> T readValue(const unsigned char* address)
 	return value;
 }
 
+template <typename T> std::string binaryInteger(T value)
+{
+	std::string bytes(sizeof(T), '\0');
+	auto bits = static_cast<std::uint64_t>(value);
+	for (unsigned i = 0; i < sizeof(T); ++i)
+	{
+		bytes[sizeof(T) - i - 1] = static_cast<char>(bits & 0xff);
+		bits >>= 8;
+	}
+	return bytes;
+}
+
 std::string decimal(ISC_INT64 value, int scale)
 {
 	// Unsigned subtraction also represents abs(INT64_MIN), without signed overflow.
@@ -79,7 +91,8 @@ std::string decimal(ISC_INT64 value, int scale)
 
 } // namespace
 
-ResultCodec::ResultCodec(IMessageMetadata* logicalMetadata)
+ResultCodec::ResultCodec(IMessageMetadata* logicalMetadata,
+	const std::vector<std::int16_t>& formats)
 {
 	if (!logicalMetadata)
 		invalidMetadata();
@@ -92,6 +105,13 @@ ResultCodec::ResultCodec(IMessageMetadata* logicalMetadata)
 		throw ProtocolError("0A000", "Result metadata exceeds supported limits");
 	if (!count && logicalLength)
 		invalidMetadata();
+	if (!formats.empty() && formats.size() != 1 && formats.size() != count)
+		throw ProtocolError("08P01", "Result format count does not match column count");
+	for (const auto format : formats)
+	{
+		if (format != 0 && format != 1)
+			throw ProtocolError("0A000", "Result format is not supported");
+	}
 	descriptions.reserve(count);
 	fields.reserve(count);
 	RefPtr<IMetadataBuilder> builder(REF_NO_INCR, logicalMetadata->getBuilder(&status));
@@ -111,6 +131,7 @@ ResultCodec::ResultCodec(IMessageMetadata* logicalMetadata)
 		check(&status);
 		unsigned physicalSize = capacity;
 		Column column;
+		column.format = formats.empty() ? 0 : formats[formats.size() == 1 ? 0 : i];
 		switch (type)
 		{
 		case SQL_SHORT:
@@ -167,6 +188,8 @@ ResultCodec::ResultCodec(IMessageMetadata* logicalMetadata)
 		default:
 			throw ProtocolError("0A000", "Result data type is not supported yet");
 		}
+		if (column.format == 1 && column.oid == 1700)
+			throw ProtocolError("0A000", "Binary numeric results are not supported yet");
 		const auto offset = logicalMetadata->getOffset(&status, i);
 		check(&status);
 		const auto nullOffset = logicalMetadata->getNullOffset(&status, i);
@@ -201,6 +224,15 @@ ResultCodec::ResultCodec(IMessageMetadata* logicalMetadata)
 	}
 }
 
+std::size_t ResultCodec::retainedBytes() const noexcept
+{
+	std::size_t bytes = sizeof(*this) + fields.capacity() * sizeof(Field) +
+		descriptions.capacity() * sizeof(Column);
+	for (const auto& column : descriptions)
+		bytes += column.name.capacity();
+	return bytes;
+}
+
 std::vector<std::optional<std::string>> ResultCodec::decode(const void* buffer, unsigned bufferLength) const
 {
 	if (bufferLength != length || (length && !buffer))
@@ -208,8 +240,10 @@ std::vector<std::optional<std::string>> ResultCodec::decode(const void* buffer, 
 	const auto* bytes = static_cast<const unsigned char*>(buffer);
 	std::vector<std::optional<std::string>> result;
 	result.reserve(fields.size());
-	for (const auto& field : fields)
+	for (unsigned i = 0; i < fields.size(); ++i)
 	{
+		const auto& field = fields[i];
+		const bool binary = descriptions[i].format == 1;
 		if (readValue<ISC_SHORT>(bytes + field.nullOffset))
 		{
 			result.emplace_back(std::nullopt);
@@ -219,20 +253,24 @@ std::vector<std::optional<std::string>> ResultCodec::decode(const void* buffer, 
 		switch (field.type)
 		{
 		case SQL_SHORT:
-			result.emplace_back(decimal(readValue<ISC_SHORT>(address), field.scale));
+			result.emplace_back(binary ? binaryInteger(readValue<ISC_SHORT>(address)) :
+				decimal(readValue<ISC_SHORT>(address), field.scale));
 			break;
 		case SQL_LONG:
-			result.emplace_back(decimal(readValue<ISC_LONG>(address), field.scale));
+			result.emplace_back(binary ? binaryInteger(readValue<ISC_LONG>(address)) :
+				decimal(readValue<ISC_LONG>(address), field.scale));
 			break;
 		case SQL_INT64:
-			result.emplace_back(decimal(readValue<ISC_INT64>(address), field.scale));
+			result.emplace_back(binary ? binaryInteger(readValue<ISC_INT64>(address)) :
+				decimal(readValue<ISC_INT64>(address), field.scale));
 			break;
 		case SQL_BOOLEAN:
 		{
 			const auto value = readValue<FB_BOOLEAN>(address);
 			if (value != FB_FALSE && value != FB_TRUE)
 				throw ProtocolError("XX000", "Invalid engine boolean result");
-			result.emplace_back(value == FB_TRUE ? "t" : "f");
+			result.emplace_back(binary ? std::string(1, value == FB_TRUE ? '\1' : '\0') :
+				value == FB_TRUE ? "t" : "f");
 			break;
 		}
 		case SQL_VARYING:

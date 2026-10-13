@@ -1,6 +1,6 @@
 # Матрица совместимости PostgreSQL wire plugin
 
-Матрица M0–M3 задаёт границы этапов. База — master Firebird 6, SQL dialect 3, UTF8, wire 3.0. Архитектура — [ARCHITECTURE.md](ARCHITECTURE.md), execution contract — [CODEX_CONTEXT.md](CODEX_CONTEXT.md). Предыдущая P5-ревизия прошла целевую Linux/Super loopback приёмку: I/T/E, native transaction/session controls и recovery. В P6 сборка, unit tests и host/startup/Simple Query/transaction/lifecycle/native регрессии прошли. **Известное ограничение native baseline: READ COMMITTED READ CONSISTENCY + AUTO COMMIT не входит в подтверждённую совместимость; SNAPSHOT AUTO COMMIT проверен.** Целевой P6/M1 Linux/Super принят с известными native ограничениями. Shutdown во время ON CONNECT остаётся отдельным исключением: native Debug assertion воспроизводится также без wire endpoints. Следующий этап — P7 Extended Query. Результаты и границы покрытия — в [VALIDATION.md](VALIDATION.md). TLS, Windows и другие server modes требуют отдельной реализации и приёмки.
+Матрица M0–M3 задаёт границы этапов. База — master Firebird 6, SQL dialect 3, UTF8, wire 3.0. Архитектура — [ARCHITECTURE.md](ARCHITECTURE.md), execution contract — [CODEX_CONTEXT.md](CODEX_CONTEXT.md). Предыдущая P5-ревизия прошла целевую Linux/Super loopback приёмку: I/T/E, native transaction/session controls и recovery. В P6 сборка, unit tests и host/startup/Simple Query/transaction/lifecycle/native регрессии прошли. **Известное ограничение native baseline: READ COMMITTED READ CONSISTENCY + AUTO COMMIT не входит в подтверждённую совместимость; SNAPSHOT AUTO COMMIT проверен.** Целевой P6/M1 Linux/Super принят с известными native ограничениями. Shutdown во время ON CONNECT остаётся отдельным исключением: native Debug assertion воспроизводится также без wire endpoints. P7 Extended Query прошёл целевую Linux/Super приёмку: 16 групп. Следующий этап — P8, расширенные codecs; M2 до P9 не заявляется. Результаты и границы покрытия — в [VALIDATION.md](VALIDATION.md). TLS, Windows и другие server modes требуют отдельной реализации и приёмки.
 
 ## Startup/authentication: Linux/Super P2 PASS
 
@@ -8,7 +8,7 @@
 
 User обязателен, database по умолчанию равен user; явно пустой database отвергается. Допустимы application_name и отсутствующий/точный UTF8 client_encoding; иные startup keys/options/replication явно отклоняются. Startup ограничен 16 KiB, typed frame 1 MiB, Password body 4096 bytes с NUL. Собственных transport/frame/startup/auth/output timers нет. Ввод-вывод ждёт progress, EOF или shutdown; queued sockets ограничены числом без истечения по времени.
 
-AuthenticationOk отправляется после attach, затем ParameterStatus и ReadyForQuery I. Version token — `16.0 (Firebird pgwire prototype)`, DateStyle — `ISO, MDY`. Исторический P2 отвечал одинаковым 0A000 на все корректные Query; P3 заменяет это поведение engine execution, описанным ниже. Extended, TLS и BackendKeyData/cancel ещё отсутствуют. P2 PASS относится к записанным startup/authentication checks, не к полной матрице M0–M3.
+AuthenticationOk отправляется после attach, затем ParameterStatus и ReadyForQuery I. Version token — `16.0 (Firebird pgwire prototype)`, DateStyle — `ISO, MDY`. Исторический P2 отвечал одинаковым 0A000 на все корректные Query; P3 заменяет это поведение engine execution, описанным ниже. TLS и BackendKeyData/cancel ещё отсутствуют; P7 Extended Query прошёл целевую Linux/Super приёмку. P2 PASS относится к записанным startup/authentication checks, не к полной матрице M0–M3.
 
 ## Simple Query и P5: историческая приёмка и текущие регрессии
 
@@ -21,6 +21,16 @@ Text output: SMALLINT/INTEGER/BIGINT (OID 21/23/20), BOOLEAN (16), CHAR/VARCHAR 
 Statement-level timeout остаётся 0: native configuration/session settings управляют SQL execution, плагин не задаёт собственные statement/lock timeouts. Firebird.conf StatementTimeout измеряется в секундах, ConnectionIdleTimeout — в минутах; 0 отключает соответствующий engine cap. Native idle shutdown закрывает attachment с rollback; следующий Query получает 57P05/close, без повторного подключения. Native DML timer не является hard deadline prepare/DDL/controls.
 
 Parser error —42601, unknown relation —42P01, permission —42501, unique —23505, FK —23503, CHECK —23514; общий native NOT NULL/domain status остаётся 23000 без угадывания subclass по message.
+
+## Extended Query P7: целевая Linux/Super приёмка пройдена
+
+Реализованы Parse/Bind/Describe/Execute/Close/Flush/Sync, named/unnamed objects, maxRows/PortalSuspended и discard-until-Sync. Параметры передаются через native metadata в исходный SQL с `?`; PostgreSQL BEGIN/$n не переписываются. Проверяемые клиенты P7 — прямой C libpq и raw-wire; Psycopg 3 ещё не проверен. Это ограниченный этап M2; полная совместимость драйвера/приложения относится к P9.
+
+Input/output: text SMALLINT/INTEGER/BIGINT, BOOLEAN, CHAR/VARCHAR и NUMERIC/DECIMAL до INT64, NULL; binary integer/BOOLEAN/строки. Binary NUMERIC и FLOAT/temporal/INT128 остаются P8. Для Parse hints numeric/integer/boolean OID должен точно совпадать с inferred; строковые 25/1042/1043 совместимы. 0/отсутствующий hint — inference; несовместимый hint — 0A000. Text numeric кодируется точно, без float и потери дробных цифр; непредставимое значение — 22003.
+
+Named statements переживают commit; portals живут в transaction, сохраняются через Sync в T и удаляются при завершении transaction или Extended error. Close statement и unnamed Parse replacement сохраняют ранее связанные portals; Simple Query удаляет unnamed statement и portal. RESET удаляет все statements/portals даже при том же native transaction pointer. Bind готовит отдельный native statement того же SQL на portal, без своей application transaction. Лимиты: 128 statements, 128 portals, 8 MiB учитываемых SQL/metadata/buffers; прочие engine allocations ограничены количеством объектов. SET TRANSACTION при открытом implicit cycle получает 25001; ошибка откатывает implicit cycle до Sync. Подробный state/ownership contract — в CODEX_CONTEXT, результаты — в VALIDATION.
+
+P7 включает native cleanup fix нескольких requests одного Statement в release_attachment (jrd.cpp), подтверждённый воспроизведением через native TCP без PgWire. Grammar, public statement metadata и CLOOP не меняются. ON CONNECT shutdown assertion !child остаётся отдельным неисправленным и не перепроверенным ограничением.
 
 ## Главная граница
 
@@ -35,6 +45,8 @@ EMPTY определяется ограниченным lexer только дл�
 BEGIN/$n и другие несовместимые формы остаются native parser errors. Новые grammar/functions/catalogs требуют отдельной будущей работы в движке; разрешённая классификация не добавляет SQL-совместимость.
 
 ## Возможности по этапам
+
+Колонки M0–M3 задают целевой объём этапов; текущий P7 прошёл приёмку базовой части Extended Query, расширенные codecs остаются P8, полный M2 — P9.
 
 | Возможность | M0 | M1 | M2 | M3 |
 |---|---|---|---|---|
@@ -93,7 +105,7 @@ Psycopg 3, pgjdbc, Npgsql, pgx и другие клиенты не объявл�
 
 P5 сохраняет native transaction при ошибке explicit block и ставит E. Обычный prepare выполняется на этом handle; descriptor после prepare разрешает recovery, остальные успешно подготовленные команды блокируются с 25P02 без execution. Failed-prepare whitelist содержит только настоящий `isc_dsql_relation_err` с итоговой nonfatal диагностикой 42P01; explicit SQLSTATE без причины недостаточен. Syntax остаётся 42601, permission — 42501; fatal/shutdown, cancel/timeout, invalid handle, resource/I/O и unknown errors не маскируются. Полный COMMIT из E откатывает текущую работу и выдаёт ROLLBACK/I; ROLLBACK завершает её; успешный ROLLBACK TO восстанавливает T и сохраняет изменения до savepoint. ROLLBACK RETAIN также восстанавливает T, COMMIT RETAIN в E получает 25P02. Полная таблица и edge cases заданы в CODEX_CONTEXT. Факт I/T/E не обещает совпадения isolation, locks или DDL semantics с PostgreSQL.
 
-PgWire session управляет максимум одной текущей application transaction на своём attachment. В P5 между Query не кэшируются statements, portals, metadata или savepoint names. Native session SET реализованы по whitelist CODEX_CONTEXT, с tag SET и реальным изменением engine state. ALTER SESSION RESET выдаёт RESET и учитывает смену underlying transaction при том же interface pointer: I остаётся I, T — T, E получает 25P02. Внутренние engine system/security/autonomous transactions исключены из подсчёта application handles. В M2 Parse/Describe/statements/portals должны использовать current handle либо prepare с NULL без скрытых transactions; RESET получит отдельные cache/lifetime tests. Это ограничение PgWire, не native protocol или общего host для других plugins.
+PgWire session управляет максимум одной текущей application transaction на своём attachment. P7 хранит prepared statements и portals по контракту выше; клиентского кэша savepoint names нет. Native session SET реализованы по whitelist CODEX_CONTEXT, с tag SET и реальным изменением engine state. ALTER SESSION RESET выдаёт RESET и учитывает смену underlying transaction при том же interface pointer: I остаётся I, T — T, E получает 25P02. Внутренние engine system/security/autonomous transactions исключены из подсчёта application handles. Parse/Describe/statements/portals используют current handle либо prepare с NULL без скрытых transactions; RESET инвалидирует их кэш, а runtime cache/lifetime tests входят в P7 acceptance. Это ограничение PgWire, не native protocol или общего host для других plugins.
 
 Явные native transaction characteristics сохраняют семантику Firebird. В частности, `SET TRANSACTION AUTO COMMIT` может зафиксировать изменения до конца логического блока: последующий rollback не отменяет прежние commits. AUTO COMMIT / NO AUTO UNDO не сканируются lexer и не извлекаются в descriptor; их применяет native engine, а приёмка сравнивает effects с native API. I/T/E не подменяет это поведение обещанием PostgreSQL atomicity.
 

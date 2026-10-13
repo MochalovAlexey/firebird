@@ -1,6 +1,6 @@
 # Проверки реализации
 
-Текущая правка от 13 октября 2026 года — серверная приёмка P6, база `228966d5c6`. Целевой M1 для Linux/Super принят с известными native ограничениями; результаты и исключение ON CONNECT shutdown приведены в конце. Предыдущие разделы, включая удалённые IOTimeout и timeout cases, сохранены как история.
+Текущая правка от 13 октября 2026 года — P7 Extended Query, база `c94f8e84ff`. Целевой P7 для Linux/Super прошёл приёмку; результаты и отдельное исправление native prepared-request cleanup приведены в последнем разделе. Следующий этап — P8, расширенные codecs; полный M2 ещё не заявляется. Известные ON CONNECT shutdown и READ CONSISTENCY + AUTO COMMIT ограничения сохраняются. Предыдущие разделы, включая удалённые IOTimeout и timeout cases, сохранены как история.
 
 Дата: 12 октября 2026 года. HEAD до текущего P5: `3657d6a5c1`, baseline master Firebird 6 `bf94598f8deefeb7cc4a8217ee43b3040d5d6650`. Предыдущие разделы сохраняют историю проверок, включая впоследствии удалённые engine metadata и native metadata executable.
 
@@ -712,3 +712,53 @@ python3 -B pg_wire_protocol/tools/pgwire_attach_shutdown_smoke.py --native-only 
   --firebird-dir /tmp/firebird-pgwire-build/gen/Debug/firebird \
   --work-dir /tmp/firebird-native-p6-attach-repro-02
 ```
+
+## P7: Extended Query — 13 октября 2026
+
+База — `c94f8e84ff`, Linux x86_64, Debug, Engine14, Super, IPv4 loopback. Реализованы Parse/Bind/Describe/Execute/Close/Flush/Sync, prepared statements/portals, native input metadata и text/binary basic codecs. Все SQL bytes передаются движку без изменения. Parser, публичные statement metadata и CLOOP не расширялись. Отдельно исправлено освобождение нескольких native requests общего Statement при shutdown attachment; причина и native regression описаны ниже. Рабочий сервер пользователя и его базы не изменялись.
+
+**P7 прошёл целевую приёмку.** Следующий этап — P8, расширенные codecs; P9 должен завершить M2. Параметры проверены через native `?`, PostgreSQL `$1` и BEGIN по-прежнему дают ошибку парсера. Фактический Psycopg 3 profile в P7 не проверен. Binary NUMERIC, floating point/temporal/INT128 codecs, TLS и CancelRequest остаются последующими этапами.
+
+| Проверка | Результат / свидетельство |
+|---|---|
+| Полная сборка `make -j2` | PASS; `/tmp/firebird-pgwire-build/p7-build.log` |
+| Сборка opt-in `wire_tests pgwire_tests`, пять PgWire unit executables | PASS; `/tmp/firebird-pgwire-build/p7-tests-build.log`; InputCodec 149 checks, SqlInfo 487 checks; Protocol/ErrorStatus/ResultCodec PASS |
+| Extended Query | PASS, 16 групп; `/tmp/firebird-pgwire-p7-extended-04/summary.json` |
+| Simple Query regression | PASS, 12 групп; `/tmp/firebird-pgwire-p7-simple-01/summary.json` |
+| Transaction/session regression | PASS, 14 групп; `/tmp/firebird-pgwire-p7-transactions-01/summary.json` |
+| Startup/authentication regression | PASS, 49 checks; `/tmp/firebird-pgwire-p7-startup-01/summary.json` |
+| Server regression после engine cleanup fix | PASS, 7 групп и 58 pytest cases (23.85 s); `/tmp/firebird-pgwire-p7-server-02/summary.json` |
+| Native TCP baseline после fix | PASS, 9 checks; `/tmp/firebird-pgwire-p7-native-01/summary.json` |
+| Native two-prepared-handle shutdown | PASS, 3 checks, обе остановки exit 0; `/tmp/firebird-pgwire-p7-native-prepared-shutdown-02/summary.json` |
+
+Прямой C libpq 14.24 (headers/runtime) проверил PQexecParams, PQprepare/PQexecPrepared, PQsendQueryParams/PQsendQueryPrepared/PQgetResult в nonblocking режиме, ноль параметров, native `?`, NULL, text/binary и настоящий parser failure `$1`. Raw TCP проверил порядок сообщений, Describe/OIDs/formats, named/unnamed replacement/Close и сохранение bound portals после закрытия source statement. Несколько portals одного SQL имеют независимые cursors и значения; maxRows/Suspended/resume сохраняют строки и итоговый command count.
+
+Native observer подтвердил отсутствие commit до Sync, rollback всего implicit cycle при ошибке, сохранение explicit T/E через Sync, восстановление savepoints и prepared reuse после commit. COMMIT/ROLLBACK/RETAIN и переход COMMIT из E в ROLLBACK проверены непосредственно через Extended Execute. Ошибки Bind отклоняют неподдержанные значения/форматы до необратимого GEN_ID effect. Recovery игнорирует тела полных командных frames до Sync; повреждённая внешняя framing остаётся fatal. RESET из I/T очищает objects без дополнительных prepare-transactions, даже при замене underlying transaction за тем же интерфейсом.
+
+Проверены 128 statements/128 portals и суммарный byte limit: 51 SQL по 163889 bytes помещается, следующий получает 54000 до достижения count limit. Это лимит учитываемых SQL/metadata/buffers, а не измеренный RSS cap. EOF/Terminate и shutdown освобождают suspended cursors и откатывают незавершённые изменения. Traced startup/Simple Query повторно показал 0 backend network connect attempts; scope trace указан в summary, он не выдаётся за отдельную трассу всех Extended сообщений.
+
+Команда основной приёмки (work directory должен быть новым):
+
+```sh
+python3 -B pg_wire_protocol/tools/pgwire_extended_query_smoke.py \
+  --firebird-dir /tmp/firebird-pgwire-build/gen/Debug/firebird \
+  --work-dir /tmp/firebird-pgwire-p7-extended-04 \
+  --libpq-include-dir /tmp/firebird-pgwire-p3-deps/libpq-dev/usr/include/postgresql \
+  --libpq-library /lib/x86_64-linux-gnu/libpq.so.5
+```
+
+### Native cleanup нескольких prepared requests
+
+P7 выявил assertion `Statement.cpp:781`, `!((*instance)->isUsed())`, при остановке с двумя native prepares одного SQL. Независимый native TCP запуск с пустым списком wire endpoints воспроизвёл SIGABRT: `/tmp/firebird-pgwire-p7-native-cursor-01/summary.json`. Это отдельный дефект; ранее отложенный ON CONNECT assertion `alloc.cpp:2075 (!child)` не исправлялся и не проверялся повторно в P7.
+
+Стек нового падения: `Statement::release → CMP_release → release_attachment → purge_attachment → shutdownAttachments`. `release_attachment` снимал used только с очередного request, но CMP_release освобождал весь Statement вместе с другими занятыми clones. Исправление в `src/jrd/jrd.cpp` сначала снимает used у всех requests уничтожаемого attachment, затем освобождает statements прежним циклом. Коллекция меняется только во втором проходе; parser, execution semantics и новые metadata/API этим не затрагиваются.
+
+Сохранён воспроизводимый regression с родным OO API и TCP, отключённым PgWire, двумя prepared handles и отдельным сценарием cursor/rollback:
+
+```sh
+python3 -B pg_wire_protocol/tools/pgwire_native_prepared_shutdown_smoke.py \
+  --firebird-dir /tmp/firebird-pgwire-build/gen/Debug/firebird \
+  --work-dir /tmp/firebird-pgwire-p7-native-prepared-shutdown-02
+```
+
+Промежуточные Extended `-01/-02/-03` не входят в PASS. Они выявили требование native inference (`ID + CAST(? AS INTEGER)`; исходный `CAST(ID + ? AS INTEGER)` даёт HY004 также в native isql SET PLANONLY), неверную fatal обработку отрицательного Execute maxRows и описанный cleanup assertion. Эти причины исправлены и покрыты финальным `-04`. Native inference evidence сохранён в `extended-01/native-parameter-inference.json`; SQL rewriting ради прохождения fixture не добавлялся. Первый запуск native regression остановился до старта сервера из-за отсутствовавшего linker search path для libtommath; harness теперь задаёт runtime library path через `-rpath-link`.

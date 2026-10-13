@@ -52,14 +52,45 @@ struct Startup
 	std::string clientEncoding = "UTF8";
 };
 
-// Wire metadata supplied by the executor. Table identity is not advertised;
-// all columns use text format. No engine types or SQL text enter this codec.
+// Wire metadata supplied by the executor. Table identity is not advertised.
+// Format 0 is text, format 1 is binary; no engine types enter this codec.
 struct Column
 {
 	std::string name;
 	std::uint32_t oid;
 	std::int16_t typeSize;
 	std::int32_t typeModifier = -1;
+	std::int16_t format = 0;
+};
+
+struct ParseMessage
+{
+	std::string name;
+	std::string sql;
+	std::vector<std::uint32_t> parameterTypes;
+};
+
+struct BindMessage
+{
+	std::string portal;
+	std::string statement;
+	std::vector<std::int16_t> parameterFormats;
+	// Length-delimited bytes, including binary NULs; text validation belongs to
+	// the input codec, after the executor resolves each parameter's format.
+	std::vector<std::optional<std::string>> values;
+	std::vector<std::int16_t> resultFormats;
+};
+
+struct ObjectMessage
+{
+	char kind; // S: statement, P: portal.
+	std::string name;
+};
+
+struct ExecuteMessage
+{
+	std::string portal;
+	std::uint32_t maxRows;
 };
 
 // No copies of password frames. Wipe storage before clearing/reusing/freeing it.
@@ -75,6 +106,13 @@ struct Message
 	// For validated Query/Password messages only. Excludes the framing NUL;
 	// SQL bytes are otherwise unchanged, and the view expires with the message.
 	std::string_view text() const;
+	// Decode only structure, bounded counts and UTF8 strings. The executor
+	// validates OIDs, format codes/counts and maxRows against its capabilities.
+	// Returned objects own their strings; they do not retain views into body.
+	ParseMessage parse() const;
+	BindMessage bind() const;
+	ObjectMessage object() const; // Describe or Close.
+	ExecuteMessage execution() const;
 	char type = 0;
 	std::vector<std::uint8_t> body;
 };
@@ -91,7 +129,9 @@ public:
 	// false means EOF before the next frame. Truncation inside a frame is an error.
 	// Declines SSL/GSS once each with N.
 	bool readStartup(Startup& startup);
-	bool readMessage(Message& message);
+	// During Extended recovery read complete frames, ignoring command bodies
+	// except Sync/Terminate. Framing limits still apply.
+	bool readMessage(Message& message, bool discard = false);
 
 	void authenticationCleartext();
 	void authenticationOk();
@@ -103,9 +143,18 @@ public:
 	// UTF8/NUL produces 22021. These checks
 	// emit no partial message, allowing the executor to report a query error.
 	void rowDescription(const std::vector<Column>& columns);
-	void dataRow(const std::vector<std::optional<std::string>>& values);
+	// Format-count rules are 0 (all text), 1 (all alike), or one per field.
+	// Binary fields are copied as bytes; text fields retain UTF8/NUL validation.
+	void dataRow(const std::vector<std::optional<std::string>>& values,
+		const std::vector<std::int16_t>& formats = {});
 	void commandComplete(std::string_view tag);
 	void emptyQuery();
+	void parseComplete();
+	void bindComplete();
+	void closeComplete();
+	void parameterDescription(const std::vector<std::uint32_t>& types);
+	void noData();
+	void portalSuspended();
 
 private:
 	struct DisposeStatus { void operator()(IStatus* status) const { status->dispose(); } };

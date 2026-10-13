@@ -75,7 +75,9 @@ struct Request
 	}
 };
 
-bool recovery(ControlKind control)
+} // namespace
+
+bool QueryExecutor::recovery(ControlKind control)
 {
 	return control == ControlKind::Commit || control == ControlKind::Rollback ||
 		control == ControlKind::RollbackRetaining || control == ControlKind::RollbackTo;
@@ -83,7 +85,7 @@ bool recovery(ControlKind control)
 
 // Transaction descriptors must agree with the existing coarse native type.
 // Session commands use legacy DDL type and remain an explicit lexer whitelist.
-void checkStatement(IStatement* statement, const SqlInfo& info)
+void QueryExecutor::checkStatement(IStatement* statement, const SqlInfo& info)
 {
 	if (!info.supported)
 		throw ProtocolError("0A000", "Statement command is not supported yet");
@@ -119,13 +121,6 @@ void checkStatement(IStatement* statement, const SqlInfo& info)
 	}
 }
 
-} // namespace
-
-QueryExecutor::~QueryExecutor()
-{
-	rollback();
-}
-
 bool QueryExecutor::rollback() noexcept
 {
 	if (!transaction)
@@ -150,6 +145,95 @@ bool QueryExecutor::transactionIsValid() noexcept
 	return !(status->getState() & IStatus::STATE_ERRORS);
 }
 
+void QueryExecutor::startImplicit()
+{
+	if (transaction)
+		return;
+	FbLocalStatus status;
+	const unsigned char tpb[] = {isc_tpb_version3, isc_tpb_write,
+		isc_tpb_read_committed, isc_tpb_read_consistency, isc_tpb_wait};
+	transaction = attachment->startTransaction(&status, sizeof(tpb), tpb);
+	check(&status);
+}
+
+void QueryExecutor::finishImplicit(bool& ending)
+{
+	if (state != 'I')
+		return;
+	if (!clearPortals())
+		throw ProtocolError("XX000", "Could not close query resources");
+	if (transaction)
+	{
+		ending = true;
+		FbLocalStatus status;
+		transaction->commit(&status);
+		check(&status);
+		transaction = nullptr;
+	}
+}
+
+std::string QueryExecutor::control(IStatement* statement, const SqlInfo& info, bool& ending)
+{
+	const auto kind = info.control;
+	if (kind == ControlKind::Start && (state != 'I' || transaction))
+		throw ProtocolError("25001", "A transaction is already active");
+	if (state == 'I' && kind != ControlKind::Start && kind != ControlKind::Session &&
+		kind != ControlKind::ResetSession && kind != ControlKind::Commit && kind != ControlKind::Rollback)
+	{
+		throw ProtocolError("25000", "No active transaction");
+	}
+	// Cursors cannot outlive a transaction boundary, including a reset which
+	// can replace the underlying transaction without changing its interface.
+	if (kind == ControlKind::Commit || kind == ControlKind::Rollback ||
+		kind == ControlKind::CommitRetaining || kind == ControlKind::RollbackRetaining ||
+		kind == ControlKind::RollbackTo || kind == ControlKind::ResetSession)
+	{
+		if (!clearPortals(statement))
+			throw ProtocolError("XX000", "Could not close query resources");
+	}
+	if (kind == ControlKind::ResetSession && !clearStatements())
+		throw ProtocolError("XX000", "Could not close prepared statements");
+	if (!transaction && (kind == ControlKind::Commit || kind == ControlKind::Rollback))
+		return info.tag;
+	ending = kind == ControlKind::Commit || kind == ControlKind::CommitRetaining ||
+		kind == ControlKind::Rollback;
+	FbLocalStatus status;
+	if (state == 'E' && kind == ControlKind::Commit)
+	{
+		transaction->rollback(&status);
+		check(&status);
+		transaction = nullptr;
+		state = 'I';
+		return "ROLLBACK";
+	}
+	const auto previous = transaction;
+	transaction = statement->execute(&status, transaction, nullptr, nullptr, nullptr, nullptr);
+	check(&status);
+	if (kind == ControlKind::Commit || kind == ControlKind::Rollback)
+	{
+		if (transaction)
+			throw ProtocolError("XX000", "Transaction was not completed");
+		state = 'I';
+	}
+	else if (kind == ControlKind::Start)
+	{
+		if (!transaction)
+			throw ProtocolError("XX000", "Transaction was not started");
+		state = 'T';
+	}
+	else
+	{
+		if (bool(transaction) != bool(previous) ||
+			(kind != ControlKind::ResetSession && transaction != previous))
+		{
+			throw ProtocolError("XX000", "Statement unexpectedly changed the transaction");
+		}
+		if (state != 'I')
+			state = transaction ? 'T' : 'I';
+	}
+	return info.tag;
+}
+
 bool QueryExecutor::execute(Protocol& protocol, std::string_view sql)
 {
 	Request request;
@@ -162,6 +246,8 @@ bool QueryExecutor::execute(Protocol& protocol, std::string_view sql)
 	{
 		bool fatal = diagnostic.fatal || ending;
 		if (!request.cleanup())
+			fatal = true;
+		if (!clearPortals())
 			fatal = true;
 		if (state != 'I' && !fatal)
 		{
@@ -181,6 +267,7 @@ bool QueryExecutor::execute(Protocol& protocol, std::string_view sql)
 	};
 	try
 	{
+		clearUnnamed();
 		FbLocalStatus status;
 		// In I, prepare uses NULL (the engine's internal system transaction),
 		// avoiding a hidden application transaction before SET TRANSACTION/reset.
@@ -191,6 +278,7 @@ bool QueryExecutor::execute(Protocol& protocol, std::string_view sql)
 			diagnose(&status).state == "42601" && inspectSql(sql).empty)
 		{
 			request.close();
+			finishImplicit(ending);
 			protocol.emptyQuery();
 			return true; // EMPTY preserves I, T or E.
 		}
@@ -203,67 +291,9 @@ bool QueryExecutor::execute(Protocol& protocol, std::string_view sql)
 
 		if (info.control != ControlKind::None)
 		{
-			const auto control = info.control;
-			std::string tag = info.tag;
-			if (control == ControlKind::Start && state != 'I')
-				throw ProtocolError("25001", "A transaction is already active");
-			if (state == 'I' && (control == ControlKind::Commit || control == ControlKind::Rollback))
-			{
-				// Successfully prepared full control with no active transaction.
-				// Native execute requires a handle; the wire operation is a no-op.
-			}
-			else if (state == 'I' && control != ControlKind::Start &&
-				control != ControlKind::Session && control != ControlKind::ResetSession)
-			{
-				throw ProtocolError("25000", "No active transaction");
-			}
-			else if (state == 'E' && control == ControlKind::Commit)
-			{
-				// Prepare the original COMMIT, but a failed block can only roll back.
-				// This invokes the native API; no replacement SQL is constructed.
-				ending = true;
-				request.close();
-				transaction->rollback(&status);
-				check(&status);
-				transaction = nullptr;
-				state = 'I';
-				tag = "ROLLBACK";
-			}
-			else
-			{
-				const auto previous = transaction;
-				ending = control == ControlKind::Commit || control == ControlKind::CommitRetaining ||
-					control == ControlKind::Rollback;
-				// Execute may consume/replace the old interface even on error.
-				transaction = request.statement->execute(&status, transaction,
-					nullptr, nullptr, nullptr, nullptr);
-				check(&status);
-				if (control == ControlKind::Commit || control == ControlKind::Rollback)
-				{
-					if (transaction)
-						throw ProtocolError("XX000", "Transaction was not completed");
-					state = 'I';
-				}
-				else if (control == ControlKind::Start)
-				{
-					if (!transaction)
-						throw ProtocolError("XX000", "Transaction was not started");
-					state = 'T';
-				}
-				else
-				{
-					if (bool(transaction) != bool(previous) ||
-						(control != ControlKind::ResetSession && transaction != previous))
-					{
-						throw ProtocolError("XX000", "Statement unexpectedly changed the transaction");
-					}
-					// RESET can replace the native transaction behind the SAME interface.
-					// No cursors, statements or savepoint names are cached across Queries.
-					// Current reported ParameterStatus values do not describe reset options.
-					state = transaction ? 'T' : 'I';
-				}
-			}
+			const auto tag = control(request.statement, info, ending);
 			request.close();
+			finishImplicit(ending);
 			protocol.commandComplete(tag);
 			return true;
 		}
@@ -275,7 +305,7 @@ bool QueryExecutor::execute(Protocol& protocol, std::string_view sql)
 		const auto inputCount = input->getCount(&status);
 		check(&status);
 		if (inputCount)
-			throw ProtocolError("0A000", "Query parameters require Extended Query support");
+			throw ProtocolError("0A000", "Query parameters require the Extended Query protocol");
 		RefPtr<IMessageMetadata> logicalOutput(REF_NO_INCR, request.statement->getOutputMetadata(&status));
 		check(&status);
 		const ResultCodec output(logicalOutput);
@@ -283,15 +313,7 @@ bool QueryExecutor::execute(Protocol& protocol, std::string_view sql)
 		if (hasCursor && !hasOutput)
 			throw ProtocolError("XX000", "Inconsistent engine output metadata");
 		std::vector<unsigned char> buffer(output.messageLength());
-		if (!transaction)
-		{
-			// The engine controls statement and lock waits. Explicit SET TRANSACTION
-			// characteristics (including AUTO COMMIT) are passed through unchanged.
-			const unsigned char tpb[] = {isc_tpb_version3, isc_tpb_write,
-				isc_tpb_read_committed, isc_tpb_read_consistency, isc_tpb_wait};
-			transaction = attachment->startTransaction(&status, sizeof(tpb), tpb);
-			check(&status);
-		}
+		startImplicit();
 		if (hasOutput)
 			protocol.rowDescription(output.columns());
 		std::uint64_t rows = 0;
@@ -333,13 +355,7 @@ bool QueryExecutor::execute(Protocol& protocol, std::string_view sql)
 		const auto tag = info.count == CountKind::None ? info.tag :
 			info.tag + " " + std::to_string(count);
 		request.close();
-		if (state == 'I')
-		{
-			ending = true;
-			transaction->commit(&status);
-			check(&status);
-			transaction = nullptr;
-		}
+		finishImplicit(ending);
 		protocol.commandComplete(tag);
 		return true;
 	}

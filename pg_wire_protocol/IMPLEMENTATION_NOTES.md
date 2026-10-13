@@ -4,7 +4,7 @@
 
 Linux/Super host P1 со штатным getPluginConfig и целевые P2 startup/authentication checks прошли по [VALIDATION.md](VALIDATION.md). P3 SELECT execution и минимальная engine metadata прошли целевую Linux/Super приёмку M0. P4 Simple Query DML/DDL, базовые codecs и EMPTY прошли целевую Linux/Super приёмку. По уточнённому требованию пользователя выполнен refactor классификации в плагин (описан ниже, Linux/Super проверки прошли). P5 explicit transactions и session controls прошёл целевую Linux/Super приёмку с отдельным native AUTO COMMIT ограничением; результаты записаны в VALIDATION. TLS, Windows wiring/runtime и другие server modes остаются дальнейшей работой.
 
-Текущее уточнение от 13 октября 2026 года: добавленные wire-таймауты удалены. Ниже сохранена история этапов; прежние описания IOTimeout относятся к тем ревизиям, а не к текущему контракту.
+Текущее уточнение от 13 октября 2026 года: добавленные wire-таймауты удалены. Ниже сохранена история этапов; прежние описания IOTimeout относятся к тем ревизиям, а не к текущему контракту. P7 Extended Query прошёл целевую Linux/Super приёмку (16 групп); актуальное дополнение находится в конце документа.
 
 ## Первый срез P1
 
@@ -162,4 +162,19 @@ QueryExecutor больше не устанавливает statement timeout и 
 
 Legacy pytest мигрирован на совместимый Simple Query: 58 cases, явный native SET TRANSACTION, положительный RETURNING, отдельный отказ driver-generated BEGIN. Новый server harness проверяет административную отмену/отключение, shutdown базы, ресурсы после прогрева и shutdown при record lock wait; выбранные группы и существующие regression suites прошли. Точные результаты — в [VALIDATION.md](VALIDATION.md).
 
-P6 завершён, целевой M1 для Linux/Super принят с известными native ограничениями. Остановка во время ON CONNECT вызывает assertion `!child` в `alloc.cpp:2075` при failed attach cleanup; независимый native TCP сценарий без wire endpoints воспроизводит тот же стек. Исправление этого падения согласованно исключено из P6. Скрипт воспроизведения сохраняет FAIL, без skip/xfail или подмены результата. Core и SQL semantics в текущей правке не менялись. Следующий этап — P7, Extended Query.
+P6 завершён, целевой M1 для Linux/Super принят с известными native ограничениями. Остановка во время ON CONNECT вызывает assertion `!child` в `alloc.cpp:2075` при failed attach cleanup; независимый native TCP сценарий без wire endpoints воспроизводит тот же стек. Исправление этого падения согласованно исключено из P6. Скрипт воспроизведения сохраняет FAIL, без skip/xfail или подмены результата. В срезе P6 core и SQL semantics не менялись. Реализация следующего этапа P7, Extended Query, описана ниже.
+
+
+## P7: Extended Query и input/output codecs
+
+Parse/Bind/Describe/Execute/Close/Flush/Sync и named/unnamed prepared objects прошли целевую Linux/Super приёмку: 16 групп. Extended.cpp хранит statements/portals и исполняет Extended messages, Execute.cpp задаёт общую transaction policy и Simple Query path. Grammar, public statement metadata и CLOOP не меняются; SQL не переписывается. Native `?` связывается с input metadata; BEGIN/$n остаются parser errors. C libpq и raw-wire прошли приёмку; фактический Psycopg 3 profile ещё не проверен и не заявляется по наличию Extended Query.
+
+При shutdown с двумя prepared requests одного SQL обнаружен native assertion Statement.cpp:781, воспроизведённый также через native TCP без wire endpoints. Узкий fix release_attachment в jrd.cpp снимает used со всех requests attachment перед первым CMP_release: общий Statement может освободить несколько clones сразу. Это отдельный cleanup defect; прежний ON CONNECT shutdown assertion alloc.cpp:2075 (!child) не исправлялся и повторно не проверялся.
+
+InputCodec владеет bind metadata и формирует native message с null indicators. Text integers, BOOLEAN, CHAR/VARCHAR и exact NUMERIC/DECIMAL до INT64 дополняются binary integer/BOOLEAN/строками; binary NUMERIC отложен P8. CHAR input использует varying metadata; UTF8/NONE/ASCII и NUL проверяются до execution. Decimal с exponent преобразуется без float и округления; потеря ненулевых цифр или overflow дают 22003. Parse OID hints требуют точного integer/boolean/numeric OID либо совместимого string OID 25/1042/1043; ноль означает inference. Unit test использует настоящий MetadataBuilder и проверяет границы, NULL, formats и ошибки. ResultCodec формирует согласованные text/binary output values; native buffers не копируются как PG binary.
+
+QueryExecutor сохраняет named statement между transactions. Каждый Bind повторно готовит тот же SQL в отдельном native handle portal без собственной transaction; prepared template и уже связанные portals имеют независимый lifetime. Close statement и unnamed Parse replacement сохраняют bound portals. Q удаляет unnamed statement/portal; transaction end удаляет portals, а Sync в T сохраняет их. Ошибка удаляет все portals и включает discard-until-Sync, сохраняя explicit transaction в E. RESET инвалидирует все statements/portals, включая случай замены underlying transaction за прежним pointer.
+
+Лимиты — 128 statements, 128 portals и 8 MiB учитываемых сохранённых SQL/metadata/buffers; остальные engine allocations ограничены количеством объектов. Flush не фиксирует transaction, Sync завершает implicit cycle и сообщает ReadyForQuery. CommandComplete Execute не является обещанием commit до Sync. Ошибка откатывает implicit cycle сразу, до Sync; SET TRANSACTION при открытом implicit cycle получает 25001, поскольку новый TPB не заменяет существующий native handle.
+
+P7: 16 Extended groups — PASS; пять codec unit executables — PASS, включая 149 input и 487 SQL-classifier checks. Повторно прошли семь server groups/58 pytest cases и девять native baseline checks. Отдельный native prepared-shutdown harness прошёл три проверки без PgWire, обе остановки завершились с exit 0. Полные команды и регрессии — в VALIDATION. Следующий этап — P8; M2 требует P9.

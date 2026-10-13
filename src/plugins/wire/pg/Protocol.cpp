@@ -110,6 +110,83 @@ std::string_view consumeString(const std::vector<std::uint8_t>& bytes, std::size
 	return value;
 }
 
+class Reader
+{
+public:
+	explicit Reader(const std::vector<std::uint8_t>& bytes) : bytes(bytes) {}
+
+	void requireItems(std::size_t count, unsigned width) const
+	{
+		// Check multiplication and allocation bounds by division first.
+		if (count > (bytes.size() - offset) / width)
+			malformed("Truncated frontend message field");
+	}
+
+	char character()
+	{
+		requireItems(1, 1);
+		return static_cast<char>(bytes[offset++]);
+	}
+
+	std::uint16_t shortValue()
+	{
+		requireItems(1, 2);
+		const auto value = (std::uint16_t(bytes[offset]) << 8) | bytes[offset + 1];
+		offset += 2;
+		return value;
+	}
+
+	std::uint32_t longValue()
+	{
+		requireItems(1, 4);
+		const auto value = integer(bytes.data() + offset);
+		offset += 4;
+		return value;
+	}
+
+	std::string string()
+	{
+		return std::string(consumeString(bytes, offset));
+	}
+
+	std::optional<std::string> value()
+	{
+		const auto length = longValue();
+		if (length == 0xFFFFFFFF)
+			return std::nullopt;
+		if (length > 0x7FFFFFFF)
+			malformed("Invalid Bind parameter length");
+		requireItems(length, 1);
+		std::string result(reinterpret_cast<const char*>(bytes.data() + offset), length);
+		offset += length;
+		return result;
+	}
+
+	std::vector<std::int16_t> formats()
+	{
+		const auto count = shortValue();
+		requireItems(count, 2);
+		std::vector<std::int16_t> result;
+		result.reserve(count);
+		for (unsigned i = 0; i < count; ++i)
+		{
+			const auto value = shortValue();
+			result.push_back(static_cast<std::int16_t>(value <= 32767 ? value : int(value) - 65536));
+		}
+		return result;
+	}
+
+	void finish() const
+	{
+		if (offset != bytes.size())
+			malformed("Trailing bytes after frontend message");
+	}
+
+private:
+	const std::vector<std::uint8_t>& bytes;
+	std::size_t offset = 0;
+};
+
 void validateBackendString(std::string_view text)
 {
 	if (text.find('\0') != std::string_view::npos)
@@ -215,6 +292,68 @@ std::string_view Message::text() const
 	return result;
 }
 
+ParseMessage Message::parse() const
+{
+	if (type != 'P')
+		malformed("Message is not Parse");
+	Reader reader(body);
+	ParseMessage result;
+	result.name = reader.string();
+	result.sql = reader.string();
+	const auto count = reader.shortValue();
+	reader.requireItems(count, 4);
+	result.parameterTypes.reserve(count);
+	for (unsigned i = 0; i < count; ++i)
+		result.parameterTypes.push_back(reader.longValue());
+	reader.finish();
+	return result;
+}
+
+BindMessage Message::bind() const
+{
+	if (type != 'B')
+		malformed("Message is not Bind");
+	Reader reader(body);
+	BindMessage result;
+	result.portal = reader.string();
+	result.statement = reader.string();
+	result.parameterFormats = reader.formats();
+	const auto count = reader.shortValue();
+	reader.requireItems(count, 4);
+	result.values.reserve(count);
+	for (unsigned i = 0; i < count; ++i)
+		result.values.push_back(reader.value());
+	result.resultFormats = reader.formats();
+	reader.finish();
+	return result;
+}
+
+ObjectMessage Message::object() const
+{
+	if (type != 'D' && type != 'C')
+		malformed("Message is not Describe or Close");
+	Reader reader(body);
+	ObjectMessage result;
+	result.kind = reader.character();
+	if (result.kind != 'S' && result.kind != 'P')
+		malformed("Invalid Describe or Close object kind");
+	result.name = reader.string();
+	reader.finish();
+	return result;
+}
+
+ExecuteMessage Message::execution() const
+{
+	if (type != 'E')
+		malformed("Message is not Execute");
+	Reader reader(body);
+	ExecuteMessage result;
+	result.portal = reader.string();
+	result.maxRows = reader.longValue();
+	reader.finish();
+	return result;
+}
+
 Protocol::Protocol(IMaster* master, IWireConnection* connection, Limits limits)
 	: connection(connection), limits(limits),
 	  status(master ? master->getStatus() : nullptr)
@@ -296,7 +435,7 @@ bool Protocol::readStartup(Startup& startup)
 	}
 }
 
-bool Protocol::readMessage(Message& message)
+bool Protocol::readMessage(Message& message, bool discard)
 {
 	message.clear();
 	std::uint8_t header[5];
@@ -311,10 +450,23 @@ bool Protocol::readMessage(Message& message)
 	message.type = header[0];
 	message.body.resize(length - 4);
 	readExact(message.body.data(), message.body.size());
+	if (discard && message.type != 'S' && message.type != 'X')
+	{
+		switch (message.type)
+		{
+		case 'Q': case 'P': case 'B': case 'D': case 'E': case 'C': case 'H':
+			return true;
+		default:
+			malformed("Unexpected frontend message during query recovery");
+		}
+	}
 	if (message.type == 'p' || message.type == 'Q')
 		message.text();
-	else if (message.type == 'X' && !message.body.empty())
-		malformed("Terminate frame must have an empty body");
+	else if ((message.type == 'X' || message.type == 'H' || message.type == 'S') &&
+		!message.body.empty())
+	{
+		malformed("Terminate, Flush and Sync must have empty bodies");
+	}
 	return true;
 }
 
@@ -385,6 +537,8 @@ void Protocol::rowDescription(const std::vector<Column>& columns)
 		addResultBytes(size, 19, limits.frameBytes);
 		addResultBytes(size, column.name.size(), limits.frameBytes);
 		validateBackendString(column.name);
+		if (column.format != 0 && column.format != 1)
+			throw ProtocolError("0A000", "Unsupported result format");
 	}
 	std::vector<std::uint8_t> body;
 	body.reserve(size);
@@ -397,23 +551,34 @@ void Protocol::rowDescription(const std::vector<Column>& columns)
 		appendInteger(body, column.oid);
 		appendShort(body, static_cast<std::uint16_t>(column.typeSize));
 		appendInteger(body, static_cast<std::uint32_t>(column.typeModifier));
-		appendShort(body, 0); // Text format.
+		appendShort(body, column.format);
 	}
 	send('T', body);
 }
 
-void Protocol::dataRow(const std::vector<std::optional<std::string>>& values)
+void Protocol::dataRow(const std::vector<std::optional<std::string>>& values,
+	const std::vector<std::int16_t>& formats)
 {
 	checkFieldCount(values.size());
+	if (formats.size() > 1 && formats.size() != values.size())
+		throw ProtocolError("22023", "Result format count does not match field count");
+	for (const auto format : formats)
+	{
+		if (format != 0 && format != 1)
+			throw ProtocolError("0A000", "Unsupported result format");
+	}
 	std::size_t size = 0;
 	addResultBytes(size, 2, limits.frameBytes);
-	for (const auto& value : values)
+	for (std::size_t i = 0; i < values.size(); ++i)
 	{
 		addResultBytes(size, 4, limits.frameBytes);
+		const auto& value = values[i];
 		if (value)
 		{
 			addResultBytes(size, value->size(), limits.frameBytes);
-			validateBackendString(*value);
+			const auto format = formats.empty() ? 0 : formats[formats.size() == 1 ? 0 : i];
+			if (!format)
+				validateBackendString(*value);
 		}
 	}
 	std::vector<std::uint8_t> body;
@@ -447,6 +612,45 @@ void Protocol::commandComplete(std::string_view tag)
 void Protocol::emptyQuery()
 {
 	send('I', {});
+}
+
+void Protocol::parseComplete()
+{
+	send('1', {});
+}
+
+void Protocol::bindComplete()
+{
+	send('2', {});
+}
+
+void Protocol::closeComplete()
+{
+	send('3', {});
+}
+
+void Protocol::parameterDescription(const std::vector<std::uint32_t>& types)
+{
+	checkFieldCount(types.size());
+	std::size_t size = 0;
+	addResultBytes(size, 2, limits.frameBytes);
+	addResultBytes(size, types.size() * 4, limits.frameBytes);
+	std::vector<std::uint8_t> body;
+	body.reserve(size);
+	appendShort(body, types.size());
+	for (const auto type : types)
+		appendInteger(body, type);
+	send('t', body);
+}
+
+void Protocol::noData()
+{
+	send('n', {});
+}
+
+void Protocol::portalSuspended()
+{
+	send('s', {});
 }
 
 } // namespace Firebird::PgWire

@@ -246,6 +246,36 @@ void verifyMetadataRejection()
 		"Empty output metadata was not supported");
 }
 
+void verifyBinaryFormats()
+{
+	auto metadata = describe({{SQL_SHORT, 2}, {SQL_LONG, 4}, {SQL_INT64, 8},
+		{SQL_BOOLEAN, 1}, {SQL_VARYING, 16, 0, 0, 4}});
+	ResultCodec codec(metadata, {1});
+	std::vector<unsigned char> buffer(codec.messageLength());
+	store<ISC_SHORT>(buffer, offset(codec, 0), -32768);
+	store<ISC_LONG>(buffer, offset(codec, 1), -1);
+	store<ISC_INT64>(buffer, offset(codec, 2), std::numeric_limits<ISC_INT64>::min());
+	store<FB_BOOLEAN>(buffer, offset(codec, 3), FB_FALSE);
+	storeText(codec, buffer, 4, "Я ");
+	const auto values = codec.decode(buffer.data(), buffer.size());
+	require(values[0] == std::string("\x80\0", 2) && values[1] == std::string(4, '\xff') &&
+		values[2] == std::string("\x80\0\0\0\0\0\0\0", 8) &&
+		values[3] == std::string(1, '\0') && values[4] == "Я ", "Incorrect binary result bytes");
+	for (const auto& column : codec.columns())
+		require(column.format == 1, "Incorrect binary column description");
+	ResultCodec mixed(metadata, {0, 1, 0, 1, 0});
+	const auto mixedValues = mixed.decode(buffer.data(), buffer.size());
+	require(mixedValues[0] == "-32768" && mixedValues[1] == values[1] &&
+		mixedValues[2] == "-9223372036854775808" && mixedValues[3] == values[3] &&
+		mixedValues[4] == values[4], "Mixed result formats were ignored");
+	store<ISC_SHORT>(buffer, offset(codec, 3, true), -1);
+	require(!codec.decode(buffer.data(), buffer.size())[3], "Binary NULL became false");
+	expectError([&] { ResultCodec invalid(metadata, {0, 1}); }, "08P01");
+	expectError([&] { ResultCodec invalid(metadata, {2}); }, "0A000");
+	metadata = describe({{SQL_INT64, 8, -2, 1}});
+	expectError([&] { ResultCodec unsupported(metadata, {1}); }, "0A000");
+}
+
 } // namespace
 
 int main()
@@ -257,6 +287,7 @@ int main()
 		verifyBoolean();
 		verifyText();
 		verifyMetadataRejection();
+		verifyBinaryFormats();
 		std::puts("PgWire result codec tests passed");
 		return 0;
 	}

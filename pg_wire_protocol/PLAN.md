@@ -4,7 +4,7 @@
 
 PostgreSQL grammar/functions отложены. Ограниченная plugin-local classification задаёт command tags, control profile и EMPTY; SQL не переписывается и не делится. Полную проверку и реальное исполнение выполняет неизменённый parser/DSQL; новые публичные statement metadata не добавляются.
 
-Предыдущая P5-ревизия прошла целевую Linux/Super loopback приёмку: I/T/E, native transaction/session controls и recovery. В P6 сборка, unit tests и host/startup/Simple Query/transaction/lifecycle/native регрессии прошли. **Известное ограничение native baseline: READ COMMITTED READ CONSISTENCY + AUTO COMMIT не входит в подтверждённую совместимость; SNAPSHOT AUTO COMMIT проверен.** Целевой P6/M1 Linux/Super принят с известными native ограничениями. Shutdown во время ON CONNECT остаётся отдельным исключением: native Debug assertion воспроизводится также без wire endpoints. Следующий этап — P7 Extended Query. Результаты и границы покрытия — в [VALIDATION.md](VALIDATION.md). TLS, Windows и другие server modes требуют отдельной реализации и приёмки.
+Предыдущая P5-ревизия прошла целевую Linux/Super loopback приёмку: I/T/E, native transaction/session controls и recovery. В P6 сборка, unit tests и host/startup/Simple Query/transaction/lifecycle/native регрессии прошли. **Известное ограничение native baseline: READ COMMITTED READ CONSISTENCY + AUTO COMMIT не входит в подтверждённую совместимость; SNAPSHOT AUTO COMMIT проверен.** Целевой P6/M1 Linux/Super принят с известными native ограничениями. Shutdown во время ON CONNECT остаётся отдельным исключением: native Debug assertion воспроизводится также без wire endpoints. P7 Extended Query прошёл целевую Linux/Super приёмку: 16 групп. Следующий этап — P8, расширенные codecs; M2 до P9 не заявляется. Результаты и границы покрытия — в [VALIDATION.md](VALIDATION.md). TLS, Windows и другие server modes требуют отдельной реализации и приёмки.
 
 ## P0. База, зависимости и проектирование
 
@@ -90,7 +90,7 @@ Native session SET исполняются по whitelist из CODEX_CONTEXT; ALT
 
 ## P6. Серверная приёмка — M1
 
-**Целевой P6/M1 Linux/Super принят с известными native ограничениями.** Прошли семь групп server harness, 58 pytest cases, сборка и перечисленные в VALIDATION регрессии. Shutdown во время ON CONNECT исключён из этой приёмки: [attach/shutdown harness](tools/pgwire_attach_shutdown_smoke.py) сохраняет FAIL/SIGABRT, assertion alloc.cpp:2075 (!child), через PgWire и native-only с пустыми wire lists. Core не изменялся. Следующий этап — P7 Extended Query. Новых сценариев пауз или срабатывания таймаутов P6 не добавляет.
+**Целевой P6/M1 Linux/Super принят с известными native ограничениями.** Прошли семь групп server harness, 58 pytest cases, сборка и перечисленные в VALIDATION регрессии. Shutdown во время ON CONNECT исключён из этой приёмки: [attach/shutdown harness](tools/pgwire_attach_shutdown_smoke.py) сохраняет FAIL/SIGABRT, assertion alloc.cpp:2075 (!child), через PgWire и native-only с пустыми wire lists. В P6 core не изменялся. P7 Extended Query прошёл целевую Linux/Super приёмку: 16 групп. Следующий этап — P8, расширенные codecs; M2 до P9 не заявляется. Новых сценариев пауз или срабатывания таймаутов P6 не добавляет.
 
 [pgwire_server_smoke.py](tools/pgwire_server_smoke.py) объединяет мигрированный pytest-набор (58 live cases — PASS), 40 connect/query/error/disconnect sessions (16 для прогрева, 24 для учёта attachments/statements/transactions/FDs; общее число threads записывается как диагностика), отмену через MON$STATEMENTS в I/E, удаление attachment в I/T, gfix shutdown базы и остановку сервера с lock wait, password exchange и partial startup. SuperClassic проверяется только на диагностируемый отказ PgWire с сохранением native.
 
@@ -100,17 +100,21 @@ Native session SET исполняются по whitelist из CODEX_CONTEXT; ALT
 
 ## P7. Extended Query и prepared objects
 
-Реализовать Parse/Bind/Describe/Execute/Close/Flush/Sync, named/unnamed statements/portals, handle/buffer/cursor ownership и лимиты. SQL из Parse передавать неизменённым. Bind связывает значения с input slots, описанными движком, без поиска `$n` в тексте.
+**Целевая Linux/Super приёмка — PASS: 16 групп; evidence в [VALIDATION.md](VALIDATION.md).** Parse/Bind/Describe/Execute/Close/Flush/Sync, named/unnamed statements и portals используют существующие engine interfaces. SQL Parse передаётся неизменённым; Bind получает порядок slots из native metadata. `$n` и PostgreSQL BEGIN остаются будущим расширением parser.
 
-Поддержать ParameterDescription, RowDescription/NoData, PortalSuspended/maxRows, Close и повторное выполнение prepared statement в новой transaction. Ошибка приводит к discard-until-Sync; Flush не завершает transaction и не отправляет ReadyForQuery. Согласовать Simple/Extended transaction boundaries.
+ParameterDescription, RowDescription/NoData, PortalSuspended/maxRows и повторное исполнение prepared statements реализованы. Named statement переживает commit. Bind готовит отдельный native statement с тем же SQL для каждого portal, используя текущую transaction либо NULL; скрытые application transactions не создаются. Close statement и замена unnamed statement сохраняют уже связанные portals. Simple Query инвалидирует unnamed statement и portal. Завершение transaction удаляет portals; Sync внутри T сохраняет их. Ошибка инвалидирует все portals и включает discard-until-Sync; explicit transaction сохраняется в E. RESET инвалидирует все statements/portals, даже если native transaction interface pointer не изменился.
 
-Проверить несколько prepared statements/portals и ALTER SESSION RESET: скрытая transaction под Parse не появляется, смена native transaction учитывается даже при прежнем interface pointer. Нужный engine system transaction при prepare с NULL не считается дополнительной application transaction.
+Поддержаны text input/output базовых integer/BOOLEAN/CHAR/VARCHAR/NUMERIC до INT64 и NULL; binary integer/BOOLEAN/строки. Binary NUMERIC и расширенные codecs остаются P8. Parse OID hints проверяются консервативно: точный inferred numeric/integer/boolean OID, для строк совместимы 25/1042/1043; 0 или отсутствующий hint означает inference. Значения не превращаются в SQL literals.
 
-**Готово:** прямой libpq `PQexecParams`, `PQprepare`/`PQexecPrepared` с нулём параметров и native `?`, например `SELECT CAST(? AS INTEGER) FROM RDB$DATABASE`. Raw-wire проверяет порядок сообщений, formats, lifetime и recovery. `$n` не переписывается и пока отвергается parser.
+На session ограничены 128 statements, 128 portals и 8 MiB учитываемых сохранённых SQL/metadata/buffers. Остальные engine allocations ограничиваются числом объектов. Flush не завершает transaction; Sync фиксирует implicit cycle и выдаёт ReadyForQuery, сохраняя explicit T/E. CommandComplete Execute не означает commit cycle. Ошибка implicit cycle откатывает его уже до Sync; Sync завершает protocol recovery. SET TRANSACTION при уже открытом implicit cycle получает 25001: его TPB не заменяет текущую native transaction.
+
+**Приёмка:** прямой C libpq `PQexecParams`, `PQprepare`/`PQexecPrepared` с нулём параметров и native `?`, например `SELECT CAST(? AS INTEGER) FROM RDB$DATABASE`; raw-wire проверяет formats, lifecycle, limits и recovery. C/raw проверки `$1` получают настоящую parser error. Прошли 16 групп P7, пять codec unit executables (149 input и 487 SQL-classifier checks), семь server groups/58 pytest cases и девять native baseline checks; полные результаты и регрессии — в VALIDATION. Psycopg 3 фактически не проверен в P7, другие driver/application profiles остаются P9. Следующий этап — P8; M2 до P9 не заявляется.
+
+В P7 включён узкий native cleanup fix: release_attachment в jrd.cpp снимает used со всех requests attachment перед первым CMP_release, который может освободить несколько clones одного Statement. Падение до исправления воспроизведено через native TCP без PgWire. Grammar, public statement metadata и CLOOP не меняются. Отдельный ON CONNECT shutdown assertion !child не исправлялся и повторно не проверялся.
 
 ## P8. Расширенные codecs
 
-Добавить FLOAT/DOUBLE, DATE/TIME/TIMESTAMP без TZ, INT128/NUMERIC до 38 цифр и text/binary input/output согласованного набора. Для каждого типа задать OID, format, range и точное преобразование. Native layout не является PG binary format.
+Добавить FLOAT/DOUBLE, DATE/TIME/TIMESTAMP без TZ, INT128/NUMERIC до 38 цифр, binary NUMERIC и text/binary input/output согласованного набора. Для каждого типа задать OID, format, range и точное преобразование. Native layout не является PG binary format.
 
 ParameterStatus отражает реальные свойства codec/session: `integer_datetimes` согласован с binary temporal representation; TimeZone — только с поддержанным поведением. Не обещать interval/settings, которых реализация не поддерживает.
 

@@ -27,10 +27,12 @@ namespace Firebird::PgWire
 class ResultCodec final
 {
 public:
-	explicit ResultCodec(IMessageMetadata* logicalMetadata);
+	explicit ResultCodec(IMessageMetadata* logicalMetadata,
+		const std::vector<std::int16_t>& formats = {});
 
 	IMessageMetadata* fetchMetadata() const noexcept { return metadata; }
 	unsigned messageLength() const noexcept { return length; }
+	std::size_t retainedBytes() const noexcept;
 	const std::vector<Column>& columns() const noexcept { return descriptions; }
 	std::vector<std::optional<std::string>> decode(const void* buffer, unsigned bufferLength) const;
 

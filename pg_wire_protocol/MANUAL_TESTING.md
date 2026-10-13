@@ -2,13 +2,21 @@
 
 Для ручной работы есть [tools/pgwire_client.py](tools/pgwire_client.py): Python 3 клиент, который загружает настоящую `libpq` через `ctypes` и подключается по TCP. Дополнительные Python-пакеты не нужны; системная `libpq` должна быть доступна загрузчику библиотек.
 
-Текущий P5 выполняет SELECT, INSERT/UPDATE/DELETE, MERGE, UPDATE OR INSERT, поддержанные DDL и вызовы процедур/EXECUTE BLOCK. Поддержаны результаты SMALLINT/INTEGER/BIGINT, BOOLEAN, CHAR/VARCHAR, точные NUMERIC/DECIMAL в SHORT/LONG/INT64 и NULL; DML RETURNING может возвращать одну или несколько строк. Вне явного блока запрос выполняется в implicit transaction: успех фиксируется перед CommandComplete, ошибка откатывает её. После SET TRANSACTION запросы разделяют одну transaction до COMMIT/ROLLBACK. Пустой SQL и текст только из whitespace/comments дают EmptyQueryResponse.
+Текущий Simple Query выполняет SELECT, INSERT/UPDATE/DELETE, MERGE, UPDATE OR INSERT, поддержанные DDL и вызовы процедур/EXECUTE BLOCK. Поддержаны результаты SMALLINT/INTEGER/BIGINT, BOOLEAN, CHAR/VARCHAR, точные NUMERIC/DECIMAL в SHORT/LONG/INT64 и NULL; DML RETURNING может возвращать одну или несколько строк. Вне явного блока запрос выполняется в implicit transaction: успех фиксируется перед CommandComplete, ошибка откатывает её. После SET TRANSACTION запросы разделяют одну transaction до COMMIT/ROLLBACK. Пустой SQL и текст только из whitespace/comments дают EmptyQueryResponse.
 
 Доступны native SET TRANSACTION, COMMIT/ROLLBACK, RETAIN, savepoints и поддержанные session SET/ALTER SESSION RESET. Клиент показывает состояния I (idle), T (transaction), E (failed transaction). Несовместимые `BEGIN` и `$1` получают ошибку парсера Firebird. Клиент отправляет любой введённый SQL целиком и показывает реальную ошибку сервера; он не добавляет BEGIN и не переписывает запросы.
 
 PgWire использует ограниченный анализ начала команды для текста ответа, но весь SQL передаётся штатному парсеру Firebird без изменений. Имена в кавычках, литералы и содержимое PSQL не переписываются. Неизвестная плагину команда может получить 0A000 после успешного prepare; синтаксическая ошибка остаётся ошибкой движка.
 
 Ниже приведена инструкция для вашего экземпляра сервера. Она сама не создаёт пользователей, не изменяет конфигурацию и не запускает сервер. Ожидаемые результаты примеров нужно проверить на выбранной БД.
+
+## Параметры и Extended Query P7
+
+P7 Extended Query прошёл целевую Linux/Super приёмку: 16 групп, см. [VALIDATION.md](VALIDATION.md). Этот консольный `pgwire_client.py` использует `PQexec`/Simple Query и не добавляет отдельные Bind values. Для P7 нужен прямой libpq `PQexecParams` либо `PQprepare`/`PQexecPrepared`, например SQL `SELECT CAST(? AS INTEGER) FROM RDB$DATABASE` с одним отдельным text parameter `42`. SQL остаётся неизменным; `$1` и автоматически добавленный BEGIN по-прежнему получают parser error.
+
+Input/output поддерживают text integer/BOOLEAN/CHAR/VARCHAR/NUMERIC до INT64 и NULL, binary integer/BOOLEAN/строки. Binary NUMERIC и расширенные codecs отложены. Named prepared statements можно повторно исполнять после commit; portals ограничены transaction и удаляются при ошибке/завершении. RESET очищает все prepared objects. Лимиты session: 128 statements, 128 portals, 8 MiB учитываемых SQL/metadata/buffers. Профиль Psycopg 3 ещё не проверен; результаты существующих Simple Query примеров не доказывают совместимость его автоматически генерируемого SQL.
+
+Для неоднозначного native expression задайте тип самого параметра в исходном SQL, например `CAST(? AS INTEGER) + ID`: Parse OID hints не заменяют вывод типов Firebird, плагин не вставляет CAST. В Extended Query успешный implicit cycle фиксируется на Sync; ошибка откатывает его до Sync. SET TRANSACTION при уже открытом implicit cycle получает 25001. Расширение codecs следует в P8, приёмка M2 — в P9.
 
 ## Подготовить экземпляр Firebird
 
