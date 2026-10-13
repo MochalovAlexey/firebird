@@ -4,7 +4,7 @@
 
 PostgreSQL grammar/functions отложены. Ограниченная plugin-local classification задаёт command tags, control profile и EMPTY; SQL не переписывается и не делится. Полную проверку и реальное исполнение выполняет неизменённый parser/DSQL; новые публичные statement metadata не добавляются.
 
-Предыдущая P5-ревизия прошла целевую Linux/Super loopback приёмку: I/T/E, native transaction/session controls и recovery. Удаление wire-таймаутов проверено сборкой и выбранными unit/host/Simple Query регрессиями; полная P5-приёмка повторно не проводилась. **Известное ограничение native baseline: READ COMMITTED READ CONSISTENCY + AUTO COMMIT не входит в подтверждённую совместимость; SNAPSHOT AUTO COMMIT проверен.** M1 ещё не принят, следующий этап — P6. Результаты и границы покрытия — в [VALIDATION.md](VALIDATION.md). TLS, Windows и другие server modes требуют отдельной реализации и приёмки.
+Предыдущая P5-ревизия прошла целевую Linux/Super loopback приёмку: I/T/E, native transaction/session controls и recovery. В P6 сборка, unit tests и host/startup/Simple Query/transaction/lifecycle/native регрессии прошли. **Известное ограничение native baseline: READ COMMITTED READ CONSISTENCY + AUTO COMMIT не входит в подтверждённую совместимость; SNAPSHOT AUTO COMMIT проверен.** Целевой P6/M1 Linux/Super принят с известными native ограничениями. Shutdown во время ON CONNECT остаётся отдельным исключением: native Debug assertion воспроизводится также без wire endpoints. Следующий этап — P7 Extended Query. Результаты и границы покрытия — в [VALIDATION.md](VALIDATION.md). TLS, Windows и другие server modes требуют отдельной реализации и приёмки.
 
 ## P0. База, зависимости и проектирование
 
@@ -70,7 +70,7 @@ EMPTY определяется ограниченным lexer только дл�
 
 ## P5. Транзакции и состояние сессии
 
-**Исторический статус P5: целевая Linux/Super loopback приёмка — PASS с native ограничением READ CONSISTENCY + AUTO COMMIT.** Все 14 transaction groups прошли без skips; SNAPSHOT AUTO COMMIT и NO AUTO UNDO проверены. Повторены full build, четыре unit executable (487 classifier checks), Simple Query 12, lifecycle 7, startup 52 и native 9. Полный M1 остаётся P6. Один `QueryExecutor` на authenticated session владеет transaction и I/T/E. В I prepare получает NULL, в T/E — current native handle. Plugin-local `ControlKind` применяется после successful prepare и сверяется со штатным coarse type. Возвращённый `ITransaction*` сохраняется до проверки execute status, включая замену или NULL.
+**Исторический статус P5: целевая Linux/Super loopback приёмка — PASS с native ограничением READ CONSISTENCY + AUTO COMMIT.** Все 14 transaction groups прошли без skips; SNAPSHOT AUTO COMMIT и NO AUTO UNDO проверены. Повторены full build, четыре unit executable (487 classifier checks), Simple Query 12, lifecycle 7, startup 52 и native 9. Целевой M1 принят отдельно в P6 с указанными ограничениями. Один `QueryExecutor` на authenticated session владеет transaction и I/T/E. В I prepare получает NULL, в T/E — current native handle. Plugin-local `ControlKind` применяется после successful prepare и сверяется со штатным coarse type. Возвращённый `ITransaction*` сохраняется до проверки execute status, включая замену или NULL.
 
 Реализованы `SET TRANSACTION` → tag BEGIN, полный COMMIT/ROLLBACK, `COMMIT/ROLLBACK [WORK] RETAIN [SNAPSHOT]`, SAVEPOINT, RELEASE SAVEPOINT и ROLLBACK TO. В I полные controls являются no-op; retaining и savepoint actions дают 25000/I. Повторный SET TRANSACTION в T даёт 25001/E с сохранением существующего handle. BEGIN, START TRANSACTION и RETAINING не входят в native grammar и остаются parser errors.
 
@@ -82,7 +82,7 @@ EMPTY определяется ограниченным lexer только дл�
 
 Дополнительные transport/frame/startup/auth/output timers удалены. SQL и ожидание lock используют native policy: statement-level timeout остаётся 0, implicit WAIT не получает plugin lock timeout. StatementTimeout в конфигурации задаётся в секундах, ConnectionIdleTimeout — в минутах; 0 отключает соответствующий engine cap. Native idle shutdown откатывает transaction, следующий Query получает 57P05/close.
 
-AUTO COMMIT DML проверяется положительно в native SNAPSHOT profile, NO AUTO UNDO — отдельно. Ограничение native Debug baseline: AUTO COMMIT с READ COMMITTED READ CONSISTENCY вызывает assertion `Savepoint.cpp:833` в restart path, независимо воспроизведённый embedded isql без PgWire/server/triggers. Этот профиль не входит в принятую совместимость. В P5 core/SQL options не менялись; исправление native дефекта остаётся отдельной работой. Repro и точный объём покрытия записываются в VALIDATION, M1 остаётся отдельной приёмкой P6.
+AUTO COMMIT DML проверяется положительно в native SNAPSHOT profile, NO AUTO UNDO — отдельно. Ограничение native Debug baseline: AUTO COMMIT с READ COMMITTED READ CONSISTENCY вызывает assertion `Savepoint.cpp:833` в restart path, независимо воспроизведённый embedded isql без PgWire/server/triggers. Этот профиль не входит в принятую совместимость. В P5 core/SQL options не менялись; исправление native дефекта остаётся отдельной работой. Repro и точный объём покрытия записаны в VALIDATION; P6 принимает целевой M1 с этим native ограничением.
 
 Native session SET исполняются по whitelist из CODEX_CONTEXT; ALTER SESSION RESET имеет настоящий effect. RESET может заменить native transaction за тем же interface pointer: при успехе I остаётся I, T — T, в E команда получает 25P02. В P5 нет cached statements/portals или клиентского списка savepoint names, которые могли бы пережить reset. Session settings не эмулируются успешными ответами.
 
@@ -90,15 +90,13 @@ Native session SET исполняются по whitelist из CODEX_CONTEXT; ALT
 
 ## P6. Серверная приёмка — M1
 
-**Следующий этап; M1 пока не объявлен принятым.** После P5 повторить обязательные группы на окончательной ревизии.
+**Целевой P6/M1 Linux/Super принят с известными native ограничениями.** Прошли семь групп server harness, 58 pytest cases, сборка и перечисленные в VALIDATION регрессии. Shutdown во время ON CONNECT исключён из этой приёмки: [attach/shutdown harness](tools/pgwire_attach_shutdown_smoke.py) сохраняет FAIL/SIGABRT, assertion alloc.cpp:2075 (!child), через PgWire и native-only с пустыми wire lists. Core не изменялся. Следующий этап — P7 Extended Query. Новых сценариев пауз или срабатывания таймаутов P6 не добавляет.
 
-Выполнить архитектурные, authentication, parser, wire и lifecycle группы TEST_PLAN. Переработать исходный Python scaffold по новому контракту; его прежние 56 cases не являются неизменным gate. Добавить cross-visibility PG/native, permissions, лимиты, malformed clients и resource accounting после прогрева.
+[pgwire_server_smoke.py](tools/pgwire_server_smoke.py) объединяет мигрированный pytest-набор (58 live cases — PASS), 40 connect/query/error/disconnect sessions (16 для прогрева, 24 для учёта attachments/statements/transactions/FDs; общее число threads записывается как диагностика), отмену через MON$STATEMENTS в I/E, удаление attachment в I/T, gfix shutdown базы и остановку сервера с lock wait, password exchange и partial startup. SuperClassic проверяется только на диагностируемый отказ PgWire с сохранением native.
 
-Проверить shutdown с idle/incomplete/auth/active/blocked-query sessions. Использовать `IAttachment::cancelOperation`; не делать бесконечный join в preproviders. Module references удерживаются до завершения callbacks; engine calls после shutdown providers запрещены.
+При terminal host stop использовать `IAttachment::cancelOperation(fb_cancel_abort)`, чтобы запрет оставался действующим между engine calls; PgWire повторно проверяет stop после чтения frame. Module references сохраняются до завершения callbacks, бесконечного join в preproviders нет. Обрыв клиентского socket во время engine call не обнаруживается немедленно: cleanup начинается после возврата из движка и обнаружения I/O failure. Явный server shutdown отменяет engine operation независимо от чтения socket.
 
-Добавить внешнее завершение attachment/database, отмену через MON$STATEMENTS, idle/statement timeouts. Зафиксировать обнаружение shutdown при idle socket и сроки cleanup. Super и SuperClassic получают отдельные результаты.
-
-**Критерий M1:** обязательные проверки пройдены, ограничения и команды в VALIDATION. Это Simple Query с совместимым SQL, а не гарантия работы любого PostgreSQL-приложения.
+**Критерий целевого M1 выполнен:** перечисленные P6-01–07 и регрессии прошли; shutdown во время ON CONNECT остаётся явно исключённым native дефектом с отдельным FAIL. Команды и ограничения записаны в VALIDATION. Windows, работа PgWire в SuperClassic/Classic, auth-plugin и close/free fault injection этим результатом не принимаются. Native READ CONSISTENCY + AUTO COMMIT остаётся известным ограничением. Выбранное приложение и его SQL-зависимости относятся к M3.
 
 ## P7. Extended Query и prepared objects
 

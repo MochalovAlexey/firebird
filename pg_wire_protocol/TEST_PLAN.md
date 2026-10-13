@@ -2,7 +2,7 @@
 
 База — `master` Firebird 6, SHA из [BASELINE.md](BASELINE.md). Архитектура и SQL boundary определены в [ARCHITECTURE.md](ARCHITECTURE.md), transaction contract — в [CODEX_CONTEXT.md](CODEX_CONTEXT.md), заявляемые возможности — в [COMPATIBILITY.md](COMPATIBILITY.md).
 
-Исходный Python scaffold содержит 20 функций/56 параметризованных случаев и требует миграции. Начальные host tests расположены в src/common/tests/WireProtocolConfigTest.cpp, src/remote/server/wire/tests и isolated tools harness. P2/P3/P4 приёмка сохранена в VALIDATION. Предыдущая P5-ревизия прошла целевую Linux/Super приёмку с native ограничением READ CONSISTENCY + AUTO COMMIT; выбранные проверки после удаления wire-таймаутов прошли и записаны в [VALIDATION.md](VALIDATION.md), без повторения полной P5-приёмки. P6/M1 остаётся следующим этапом. PASS относится к зафиксированным cases/fixtures, а наличие строки в полной матрице не означает её прохождения.
+Python scaffold мигрирован под текущий контракт: 58 live cases прошли в P6. Начальные host tests расположены в src/common/tests/WireProtocolConfigTest.cpp, src/remote/server/wire/tests и isolated tools harness. P2/P3/P4 приёмка сохранена в VALIDATION. Предыдущая P5-ревизия прошла целевую Linux/Super приёмку с native ограничением READ CONSISTENCY + AUTO COMMIT; P6 повторил сборку, unit tests и целевые регрессии по [VALIDATION.md](VALIDATION.md). Целевой P6/M1 Linux/Super принят с известными native ограничениями, включая отдельно исключённый ON CONNECT shutdown. Следующий этап — P7 Extended Query. PASS относится к зафиксированным cases/fixtures, а наличие строки в полной матрице не означает её прохождения.
 
 ## Этапы и обязательный минимум
 
@@ -28,9 +28,27 @@ BEGIN/START TRANSACTION/RETAINING/$n и SQL, который parser пока не
 | M0-07 | EOF/incomplete startup/shutdown освобождают attachments/sessions/workers до unload |
 | M0-08 | Prepare использует исходный SQL; descriptor и штатные input/output/flags проверяются до execution. Unsupported capabilities не дают частичных эффектов, supported RETURNING работает |
 
+## P6/M1 — целевой Linux/Super принят с известными native ограничениями
+
+[pgwire_server_smoke.py](tools/pgwire_server_smoke.py) прошёл семь групп на отдельной копии Linux/Super runtime и БД: pytest 58 passed, 16 warmup + 24 measured sessions, FD count 15 и диагностический thread count 11 во всех измеряемых batches. Оба сервера завершились exit 0; регрессии и точные команды — в VALIDATION. Новых сценариев пауз и срабатывания таймаутов нет; клиентские пределы ожидания ограничивают только harness.
+
+Отдельный [pgwire_attach_shutdown_smoke.py](tools/pgwire_attach_shutdown_smoke.py) воспроизвёл SIGABRT при shutdown во время реального ON CONNECT: assertion alloc.cpp:2075 (!child), путь internalAttach → unwindAttach → shutdownDatabase → Database destructor. Native-only run с пустыми wire lists воспроизводит тот же сбой. Этот native дефект исключён из целевой P6/M1 приёмки; core не изменялся. Reproducer сохраняет настоящий FAIL и ненулевой exit, без xfail/skip или преобразования результата в PASS.
+
+| ID | Проверка и критерий |
+|---|---|
+| P6-01 | Мигрированный pytest-набор: 58 cases; autocommit/native controls, positive RETURNING, ошибки, права и native roundtrip. Live PASS записан отдельно; skip/xfail не принимаются |
+| P6-02 | 40 sessions: 16 warmup и 24 измеряемых. После query/disconnect нет session-owned statements/transactions/attachments; FD count не растёт относительно прогретого baseline; общее число threads — диагностика native worker cache, wire workers проверяются при shutdown |
+| P6-03 | MON$STATEMENTS отменяет активный SQL: 57014/I либо 57014/E, recovery и native observer подтверждают rollback |
+| P6-04 | MON$ATTACHMENTS завершает session из I/T: следующий Query получает FATAL 57P01/close; незавершённые изменения откатываются |
+| P6-05 | gfix shutdown базы: FATAL 57P01 на следующем Query, rollback; после online работает новое подключение |
+| P6-06 | Server shutdown при lock wait, password exchange и partial startup: engine cancellation, EOF, exit 0, rollback и завершение workers |
+| P6-07 | SuperClassic: native работает, PgWire не загружен, listener отсутствует и есть диагностика неподдержанного режима |
+
+Результаты повторных конфигурационных, ABI, codec и host/startup/Simple Query/transaction/lifecycle/native проверок записаны в VALIDATION. PASS ограничивается фактически запущенными cases. Windows, работа PgWire в SuperClassic/Classic, auth-plugin и close/free fault injection не входят в этот результат; READ CONSISTENCY + AUTO COMMIT остаётся известным native исключением. Клиентский EOF во время engine call не имеет отдельного watcher: немедленная отмена по disconnect не обещается, server shutdown отменяет операцию явно.
+
 ## Исторический P5 — целевая Linux/Super приёмка PASS с native ограничением
 
-Финальный transaction harness прошёл 14 групп без skips: I/T/E, raw ReadyForQuery/PQtransactionStatus, visibility через native observer, savepoint/retaining recovery, session SET/RESET, 100 ms DML timeout в I/T, error precedence, SNAPSHOT AUTO COMMIT, NO AUTO UNDO, disconnect и реальные commit/reset errors, C libpq и connect trace. Backend connects — 0; серверы завершились с exit 0. Full build и четыре unit executable (487 classifier checks), Simple Query 12, lifecycle 7, startup 52 и native 9 прошли отдельно. Evidence — в VALIDATION. Это целевой profile, не автоматический PASS всех вариантов T01–T14 и остальной матрицы; P6/M1 ещё не завершён.
+Финальный transaction harness прошёл 14 групп без skips: I/T/E, raw ReadyForQuery/PQtransactionStatus, visibility через native observer, savepoint/retaining recovery, session SET/RESET, 100 ms DML timeout в I/T, error precedence, SNAPSHOT AUTO COMMIT, NO AUTO UNDO, disconnect и реальные commit/reset errors, C libpq и connect trace. Backend connects — 0; серверы завершились с exit 0. Full build и четыре unit executable (487 classifier checks), Simple Query 12, lifecycle 7, startup 52 и native 9 прошли отдельно. Evidence — в VALIDATION. Этот исторический результат не означает PASS всех вариантов T01–T14 и остальной матрицы; целевой M1 позднее принят в P6 с указанными исключениями.
 
 Текущий [pgwire_transaction_smoke.py](tools/pgwire_transaction_smoke.py) проверяет AUTO COMMIT DML с SNAPSHOT и отдельно NO AUTO UNDO. Native SNAPSHOT baseline положительный. Дефект AUTO COMMIT с READ COMMITTED READ CONSISTENCY воспроизводит assertion `Savepoint.cpp:833` в restart path через embedded isql без PgWire/server/triggers; этот profile не входит в подтверждённую совместимость и требует повторного теста после native fix. Evidence независимых native repro и точная команда прогона записываются в VALIDATION; core/SQL options для обхода не меняются.
 
@@ -131,7 +149,7 @@ Startup SQLSTATE проверять raw ErrorResponse field `C`: `psycopg2.conne
 | W04 | Startup 3.0/неподдержанные version/options, SSLRequest/GSSENCRequest | Реальный профиль: до TLS ровно `N`; неизвестные обещания не подтверждены успешным startup |
 | W05 | Независимые golden bytes результатов/errors | OID, lengths, NULL=-1, empty=0, required ErrorResponse fields, ReadyForQuery и tags; не только собственный encode→decode |
 | W06 | Native keepalive/crypt/compression и parallel sessions | PG stream не получает native bytes; framing/auth/SQL state разных sessions независимы |
-| W07 | Байты SQL на входе и в parser | Instrumented boundary сверяет bytes/length для comments, quotes, semicolons, whitespace и UTF8; wire frontend не нормализует и не переписывает SQL |
+| W07 | Байты SQL на входе и в parser | Code review неизменной передачи bytes/length и TCP fixtures для comments, quotes, semicolons, whitespace и UTF8; wire frontend не нормализует и не переписывает SQL |
 | W08 | EMPTY и malformed SQL | Исходный SQL проходит engine prepare; только tokenless closed-comments/whitespace + syntax 42601 даёт EMPTY. Незаконченные tokens, vertical tab и отдельный `;` остаются errors; non-syntax errors сохраняются |
 | W09 | `BEGIN`, `START TRANSACTION`, `COMMIT RETAINING`, `$1`, `::date` и похожие tokens внутри literals/comments | Engine syntax errors в неподдержанных позициях; внутри literals/comments смысл определяет parser. Ошибка в T переводит в E; в E syntax сохраняет 42601. Native RETAIN [SNAPSHOT] проверяется положительно, frontend replacement отсутствует |
 | W10 | Несколько statements в одном Query/Parse | Parser отвергает неподдержанный batch без частичного исполнения; `;` внутри совместимого SQL не разделяется frontend |
@@ -141,7 +159,7 @@ W07 требует code review неизменной передачи SQL и TCP 
 
 ## Q/T. DSQL metadata, выполнение и транзакции
 
-Используются штатные getType/getFlags/input/output/affected records и plugin-local command/control descriptor. Новые public engine metadata, parser observer и pre-prepare analysis API не требуются. P5 E-state использует обычный prepare и реальный transaction handle; следующие проверки обязательны для его acceptance и дальнейшего M1.
+Используются штатные getType/getFlags/input/output/affected records и plugin-local command/control descriptor. Новые public engine metadata, parser observer и pre-prepare analysis API не требуются. P5 E-state использует обычный prepare и реальный transaction handle; ниже задана матрица ожидаемого поведения. Точный принятый P6/M1 profile и исключения указаны выше, результаты отдельных cases — в VALIDATION.
 
 | ID | Сценарий | Критерий |
 |---|---|---|
@@ -218,14 +236,14 @@ T11 не утверждает, что prepare лишён compile/cache/lock/trac
 | L01 | Серии connect/SQL/error/disconnect после warmup | Session attachments, transactions, cursors, plugin sessions и FDs возвращаются к baseline; documented caches выделены отдельно |
 | L02 | Малформированный/медленный клиент и исчерпание лимита | Другие PG sessions и native обслуживаются; очереди/память ограничены |
 | L03 | Shutdown в accept, idle read, password exchange, incomplete frame/write | Readers/writers разбужены, workers завершены, registry освобождён |
-| L04 | Shutdown active SQL/lock wait | Lock timeout намеренно больше cleanup deadline; shutdown всё равно ограничен и не ждёт естественного lock timeout |
+| L04 | Shutdown active SQL/lock wait | Native WAIT без plugin lock timeout; явный shutdown отменяет операцию и не ждёт освобождения конкурирующего lock |
 | L05 | Provider phases | Нет бесконечного join в preproviders; cancellation позволяет providers завершиться; после shutdown не запускаются engine operations |
 | L06 | Library lifetime | Инструментированный plugin подтверждает, что callbacks/sessions завершены до releasePlugin/module cleanup; нет direct dlclose и use-after-unload |
 | L07 | Частичная ошибка создания session/plugin и repeated stop | Идемпотентный cleanup, нет double release; initial status не затёрт вторичной ошибкой |
 
 Подходящее свидетельство выбирается под риск: ownership counters, monitoring, FDs, инструментированный тестовый plugin, при необходимости sanitizer. Только отсутствие lock не доказывает отсутствие утечек. Проверять cleanup и worker completion независимо от завершения клиентского процесса.
 
-Исходный тестовый профиль T08/L04: cleanup deadline 5 секунд, lock timeout конкурирующей transaction 15 секунд, общий client deadline 30 секунд. Значения фиксируются в fixture и отчёте; при адаптации к CI сохраняется строгий порядок cleanup deadline < lock timeout < client deadline. Это устраняет гонку между Terminate cleanup и проверкой освобождённого ключа.
+В P6 lock-wait fixture синхронизируется по MON$RECORD_WAITS > 0 и вызывает server shutdown при удерживаемом lock. Собственного engine/lock timeout он не задаёт и его срабатывания не ожидает; общий postproviders join по-прежнему ограничен 5 секундами.
 
 ## R/C/U. Удалённый профиль, TLS, отмена и приложение
 
@@ -244,21 +262,11 @@ T11 не утверждает, что prepare лишён compile/cache/lock/trac
 
 ## Миграция Python scaffold
 
-Исходное число 56 не является обязательной целью новой приёмки. Перед execution пересмотреть конкретные node IDs и зафиксировать migration diff:
+Миграция выполнена, 58 cases прошли live; результат записан в VALIDATION. По сравнению с исходными 56 cases default connection стал autocommit, explicit transactions используют native SET TRANSACTION/COMMIT/ROLLBACK. Driver-generated BEGIN и connection context проверяются отрицательно. RETURNING проверяется положительно, а unsupported output — отдельным отказом до side effects. Scalar/CRUD/errors/permissions/native roundtrip сохранены; `::date` остаётся parser dependency.
 
-| Исходная группа | Изменение |
-|---|---|
-| `_pg_connection(autocommit=False)` и тесты implicit BEGIN | Перевести compatible-wire fixtures в `autocommit=True`; explicit transactions проверять передачей native SQL. Отдельный negative test фиксирует реальный отказ driver-generated BEGIN |
-| `test_connection_context_with_autocommit` | `with conn` способен послать BEGIN даже при autocommit=True; прежний positive expectation откладывается до parser support, вместо него проверить/документировать отказ без утраты данных |
-| Scalar/CRUD/error/permissions/native roundtrip | Сохранить смысл, обновить fixtures и сопоставить Q/D/S gates; compatible SQL должен проверяться положительно |
-| `test_returning_rejected_before_changes` | Удалить blanket rejection RETURNING; заменить позитивными rows/tags/counts для поддержанных codecs и отдельным capability refusal без side effects |
-| `test_unsupported_output_types` | Negative только для реально отсутствующего codec; реализованные temporal/floating/INT128 cases становятся positive |
-| `test_python_date_adapter_remains_unsupported_sql` | Syntax boundary `::date` сохраняется независимо от появления DATE codec |
-| Batch/error/disconnect | Сохранить соответствующий parser/transaction/cleanup смысл, сохранить ограниченную lexical classification и engine validation; запретить rewrite/splitting |
+Skip/xfail не заменяют приёмку; отсутствие обязательного сервера или fixture — ошибка. Будущие Extended Query/parser-dependent client profiles относятся к следующим этапам.
 
-Не делать blanket skip/xfail legacy suite и не требовать одновременно взаимоисключающие positive/negative outcomes. Будущие parser-dependent client tests имеют отдельную отмеченную dependency и не считаются выполненными. Недостающий сервер/fixture в выбранной integration job является ошибкой, а не успешным skip.
-
-Пример окружения для будущего запуска, без настоящих секретов:
+Пример окружения для самостоятельного запуска, без настоящих секретов:
 
 ```sh
 export PGWIRE_TEST_DSN='host=127.0.0.1 port=15432 dbname=pgwire_test user=PGWIRE_TEST'
@@ -271,7 +279,7 @@ export FB_NATIVE_PASSWORD='<пароль native observer>'
 export FB_ISQL='/absolute/path/to/firebird/isql'
 ```
 
-Python dependencies закреплены в `requirements-tests.txt`; фактический runtime libpq записывать отдельно. Из каталога пакета подготовительная проверка выполняет `python -m py_compile tests/test_pgwire_acceptance.py` и `python -m pytest --collect-only -q`. После миграции запуск выбранного integration набора оборачивается во внешний deadline, например `timeout 180s python -m pytest -q -m integration`. `connect_timeout` не ограничивает зависший SQL; native subprocess и серверные ожидания также имеют собственные deadlines.
+Python dependencies закреплены в `requirements-tests.txt`; фактический runtime libpq записывать отдельно. Из каталога пакета подготовительная проверка выполняет `python -m py_compile tests/test_pgwire_acceptance.py` и `python -m pytest --collect-only -q`. Запуск выбранного integration набора оборачивается во внешний deadline, например `timeout 180s python -m pytest -q -m integration`. `connect_timeout` не ограничивает зависший SQL; native subprocess и серверные ожидания также имеют собственные deadlines.
 
 ## Отчёт VALIDATION
 

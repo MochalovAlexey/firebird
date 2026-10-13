@@ -117,6 +117,8 @@ public:
 
 			while (!stopping() && protocol.readMessage(message))
 			{
+				if (stopping())
+					return;
 				if (message.type == 'X')
 					return;
 				if (message.type == 'Q')

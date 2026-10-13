@@ -331,7 +331,10 @@ public:
 		for (auto& attachment : snapshot)
 		{
 			FbLocalStatus status;
-			attachment->cancelOperation(&status, fb_cancel_raise);
+			// Terminal endpoint stop must also prevent subsequent engine operations.
+			// A one-shot raise can miss a worker between API calls; abort keeps the
+			// attachment shut down even when no operation is currently running.
+			attachment->cancelOperation(&status, fb_cancel_abort);
 		}
 	}
 	void closeAll() noexcept

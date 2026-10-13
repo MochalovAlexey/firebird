@@ -1,6 +1,6 @@
 # Проверки реализации
 
-Текущая правка от 13 октября 2026 года — полное удаление добавленных wire-таймаутов, база `5f873c9eba`. Проверки этой правки приведены в конце; описания IOTimeout и прежних timeout cases ниже сохранены как история.
+Текущая правка от 13 октября 2026 года — серверная приёмка P6, база `228966d5c6`. Целевой M1 для Linux/Super принят с известными native ограничениями; результаты и исключение ON CONNECT shutdown приведены в конце. Предыдущие разделы, включая удалённые IOTimeout и timeout cases, сохранены как история.
 
 Дата: 12 октября 2026 года. HEAD до текущего P5: `3657d6a5c1`, baseline master Firebird 6 `bf94598f8deefeb7cc4a8217ee43b3040d5d6650`. Предыдущие разделы сохраняют историю проверок, включая впоследствии удалённые engine metadata и native metadata executable.
 
@@ -655,3 +655,60 @@ P5 C libpq использует headers/runtime 14.24, реально наблю
 Сборка и тестовые runtime находятся в `/tmp`; запущенный сервер и базы пользователя не изменялись. Wire host проверяет совместную работу native listener и двух plugin endpoints, ограничение размера очереди и остановку blocked I/O. Simple Query проверяет DML/DDL/RETURNING и видимость через native connection с C libpq 14.24 и psycopg2 2.9.11/libpq 17.6. Все четыре тестовых server phases завершились с exit 0 без forced kill; trace показал 0 backend network connects.
 
 Новых тестов с паузами или срабатываниями таймаутов не добавлено; прежние проверки удалённых таймаутов убраны. Полный P5 transaction/session, startup и native baseline suites в этой правке повторно не запускались; их результаты выше относятся к предыдущей ревизии.
+
+## P6: серверная приёмка — 13 октября 2026
+
+База — `228966d5c6`, Linux x86_64, Debug, Engine14, Super, IPv4 loopback. Изменены только wire shutdown и проверочные материалы: terminal stop использует `fb_cancel_abort`, потому что однократный `fb_cancel_raise` может попасть между engine calls; PgWire повторно проверяет остановку после чтения сообщения. Parser, DSQL, native transaction semantics и ABI в этой правке не менялись. Все runtime и БД изолированы в `/tmp`; рабочий сервер пользователя не изменялся.
+
+**P6 завершён; целевой M1 для Linux/Super принят с известными native ограничениями.** По согласованному объёму исправление падения при shutdown во время ON CONNECT исключено из этого этапа. Сценарий остаётся FAIL и воспроизводится также при полностью отключённом PgWire; его результат не входит в PASS. Ранее выявленный READ CONSISTENCY + AUTO COMMIT также остаётся вне подтверждённой совместимости. Следующий этап — P7, Extended Query.
+
+| Проверка | Результат / свидетельство |
+|---|---|
+| Полная сборка `make -j2` и `make -C gen -j2 TARGET=Debug wire_tests pgwire_tests` | PASS; `/tmp/firebird-pgwire-build/p6-build.log`, `p6-tests-build.log` |
+| PgWire protocol/error/result/sql unit executables | PASS, включая 487 SqlInfo checks |
+| P6 server harness | PASS, 7 групп; `/tmp/firebird-pgwire-p6-server-03/summary.json` |
+| Мигрированный psycopg2 pytest | PASS, 58 cases без skips; `/tmp/firebird-pgwire-p6-server-03/pytest.log` |
+| P5 transactions/session regression | PASS, 14 групп; `/tmp/firebird-pgwire-p6-transactions-01/summary.json` |
+| Simple Query regression | PASS, 12 групп; `/tmp/firebird-pgwire-p6-simple-01/summary.json` |
+| Lifecycle regression | PASS, 7 групп; `/tmp/firebird-pgwire-p6-lifecycle-01/summary.json` |
+| Startup/authentication regression | PASS, 49 checks; `/tmp/firebird-pgwire-p6-startup-01/summary.json` |
+| Native baseline | PASS, 9 checks; `/tmp/firebird-pgwire-p6-native-01/summary.json` |
+| Wire host и plugin lifecycle | PASS, 9 host checks; `/tmp/firebird-wire-p6-host-01/summary.json`; `wire_plugin_smoke.py` подтвердил aliases/stop/cleanup/unload через реальный PluginManager |
+| Shutdown во время ON CONNECT: PgWire | FAIL, SIGABRT; `/tmp/firebird-pgwire-p6-attach-shutdown-01/summary.json` и `backtrace.log` |
+| Тот же ON CONNECT: только native TCP, wire endpoints выключены | FAIL, тот же SIGABRT; `/tmp/firebird-pgwire-p6-native-attach-shutdown-01/summary.json` и `backtrace.log` |
+
+Новый server harness выполняет 58 driver cases, затем 16 warmup и 24 измеряемых connect/query/error/explicit transaction/disconnect цикла. Attachments/transactions/statements освобождаются; FD baseline — 15, все три измеренных batch — 15. Потоков было 11 во всех финальных snapshots, но это диагностическое число: native server сохраняет workers в пуле, поэтому его точное совпадение не является gate. Возврат RSS к исходному значению не проверяется.
+
+DELETE MON$STATEMENTS действительно отменяет работу с 57014 и правильным I/E/recovery. DELETE MON$ATTACHMENTS и `gfix -shut full -force 0` дают FATAL 57P01 на следующем Query, с rollback и последующим успешным подключением после online. Для gfix используется случайный пароль SYSDBA только клонированной security DB. Остановка при record lock wait синхронизируется с MON$RECORD_WAITS > 0; одновременно существуют idle transaction, password wait и неполный Startup. Оба server phases завершаются exit 0 без SIGKILL. SuperClassic проверен только на явный отказ дополнительного endpoint при работоспособном native listener.
+
+Реальные драйверы: C libpq headers/runtime 14.24 и psycopg2 2.9.11/libpq 17.6, pytest 8.4.2. Traced startup/Simple Query/transactions показали 0 backend network connects. Новых проверок пауз или срабатывания timeout нет; существующие P5 session tests повторены как regression.
+
+Основная команда из корня workspace (нужен новый work directory):
+
+```sh
+python3 -B pg_wire_protocol/tools/pgwire_server_smoke.py \
+  --firebird-dir /tmp/firebird-pgwire-build/gen/Debug/firebird \
+  --work-dir /tmp/firebird-pgwire-p6-server-03 \
+  --driver-python /tmp/firebird-pgwire-p3-deps/venv/bin/python
+```
+
+Промежуточные `server-01` и `server-02` не входят в PASS: первый выявил некорректное требование точного native thread count, второй — отсутствовавшее право DELETE на MON$STATEMENTS у тестового observer. В debug fixture также заменён role-based gfix на SYSDBA клонированной security DB, чтобы вернуть полностью остановленную БД online. Эти исправления относятся к harness, production binaries не менялись после `p6-build.log`.
+
+### Известное исключение приёмки: ON CONNECT и shutdown
+
+Trigger для WIRE_PG_OTHER вставляет marker, увеличивает sequence и выполняет длительный COUNT. Native observer подтверждает вход по sequence, после чего harness посылает SIGTERM. Оба варианта падают на `Assertion (!child)`, `src/common/classes/alloc.cpp:2075`, server exit -6 без принудительного kill. Проверки EOF/rollback после штатной остановки не достигнуты.
+
+Стек: `JProvider::internalAttach` → `unwindAttach` → `JRD_shutdown_database` → `Database::~Database` → `MemPool::~MemPool`. В native-only варианте нижняя ветка — `DatabaseAuth::accept`, список wire endpoints пуст. Это отделяет дефект native attach cleanup от lifecycle PgWire/plugin unload. Полные stacks, fixture SQL и логи сохранены в двух каталогах, указанных в таблице. Ошибка не маскируется успешным skip/xfail: скрипт возвращает ненулевой код, а падение явно исключено из объёма текущей приёмки M1.
+
+В PgWire core оставшийся child pool принадлежит Request для TRIGGER_CONNECT, созданному в Statement::getRequest. Request уже не используется и отвязан от attachment/transaction/caller; statement и его request generation остаются живы. Причина пропуска освобождения ещё не установлена. Принудительное удаление child pools или обход в плагине не добавлены; исправление native cleanup остаётся отдельной задачей.
+
+Сохранённый в репозитории reproducer повторил оба FAIL с `trigger_entered=1`, server exit -6 и тем же assertion. Его summary находятся в `/tmp/firebird-pgwire-p6-attach-repro-02/` и `/tmp/firebird-native-p6-attach-repro-02/`. Команды (work directories должны быть новыми):
+
+```sh
+python3 -B pg_wire_protocol/tools/pgwire_attach_shutdown_smoke.py \
+  --firebird-dir /tmp/firebird-pgwire-build/gen/Debug/firebird \
+  --work-dir /tmp/firebird-pgwire-p6-attach-repro-02
+python3 -B pg_wire_protocol/tools/pgwire_attach_shutdown_smoke.py --native-only \
+  --firebird-dir /tmp/firebird-pgwire-build/gen/Debug/firebird \
+  --work-dir /tmp/firebird-native-p6-attach-repro-02
+```

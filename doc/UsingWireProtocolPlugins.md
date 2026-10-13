@@ -19,8 +19,17 @@ passed targeted Linux/Super checks. P5 adds explicit transaction/session control
 and passed targeted Linux/Super checks with a documented native AUTO COMMIT
 limitation; TLS remains a later step. Recorded checks and coverage limits are in
 [`VALIDATION.md`](../pg_wire_protocol/VALIDATION.md).
-The subsequent timeout removal passed the full build and selected unit, host and
-Simple Query checks recorded in VALIDATION; full P5 acceptance was not repeated.
+P6 passed seven Linux/Super loopback server groups, 58 live driver cases, the build,
+unit tests and targeted host/startup/query/transaction/lifecycle/native regressions.
+The targeted Linux/Super P6/M1 profile is accepted with known native limitations.
+Shutdown during a real ON CONNECT trigger is excluded from this acceptance:
+it causes a Debug assertion at alloc.cpp:2075 (!child), also reproduced on the
+native path with wire endpoints disabled. The [attach/shutdown reproducer](../pg_wire_protocol/tools/pgwire_attach_shutdown_smoke.py)
+retains its actual FAIL and nonzero exit; it is not skipped or converted to a pass.
+No core fix is included. The next stage is P7 Extended Query.
+No new pause or timeout-expiration tests are added. SuperClassic checks only verify
+that native remains available when PgWire is refused; Windows and auth-plugin or
+close/free fault injection are outside this acceptance.
 
 The interface definitions are in
 [`FirebirdInterface.idl`](../src/include/firebird/FirebirdInterface.idl). The
@@ -219,11 +228,16 @@ plugin release. Copy or retain the necessary owners under the lock, then perform
 those operations after releasing it.
 
 Engine cancellation is a host responsibility with separately protected
-attachment ownership. It must not turn plugin `stop()` into a blocking
+attachment ownership. Terminal host stop uses `fb_cancel_abort` so cancellation
+also prevents engine work between calls; PgWire rechecks stop after reading a
+frame. This differs from a recoverable statement cancellation. It must not turn plugin `stop()` into a blocking
 cancellation or detach operation. Server shutdown must allow providers to
 terminate engine operations; an unconditional join before provider shutdown can
 deadlock that process. Synchronous authentication and attach callbacks rely on
 stop checks between calls and provider shutdown; the codec applies no timer.
+There is no separate socket watcher during an engine call. A client disconnect
+is detected after the call returns and I/O resumes, so it does not guarantee
+immediate SQL cancellation. Explicit server shutdown cancels engine work.
 
 The Linux host registers `preproviders` and `postproviders` shutdown callbacks.
 The first stops accept, wakes connections and requests session stop without
@@ -512,7 +526,8 @@ and psycopg2 2.9.11/libpq 17.6. Server traces showed no backend network connecti
 The previous P5 revision passed its targeted Linux/Super checks: 14 transaction/session groups,
 the full POSIX build, four unit executables (487 SQL classification checks),
 and the Simple Query/lifecycle/startup/native regressions. The native AUTO COMMIT
-limitation above remains; the full M1 acceptance stage is still P6. Commands, evidence and coverage limits are maintained in
+limitation above remains; targeted P6/M1 acceptance excludes the separate native
+ON CONNECT shutdown defect. Commands, evidence and coverage limits are maintained in
 [`VALIDATION.md`](../pg_wire_protocol/VALIDATION.md). Extended Query, additional
 codecs, remote TCP/TLS, cancellation messages and other server modes require
 subsequent implementation and validation.

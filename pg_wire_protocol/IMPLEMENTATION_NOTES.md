@@ -155,3 +155,11 @@ Session controls исполняются штатно с текущим либо 
 13 октября 2026 года, база `5f873c9eba`. По указанию пользователя полностью удалены IOTimeout, deadlines startup/auth/messages/output и истечение ожидания queued sockets. Из нового IWireConnection удалён аргумент timeout; C++/Pascal bindings перегенерированы. Сетевые операции ждут данные, EOF/ошибку или shutdown. Общий предел join при остановке сервера сохранён.
 
 QueryExecutor больше не устанавливает statement timeout и не задаёт lock timeout в implicit TPB. ConnectionIdleTimeout, StatementTimeout и native session/transaction settings применяет движок. Сервер и protocol plugins требуется пересобирать вместе. Новые тестовые сценарии не добавлены; из существующих удалены проверки устранённых ограничений. Результаты сборки и применимых проверок записываются в [VALIDATION.md](VALIDATION.md).
+
+## P6: серверная приёмка и terminal stop
+
+13 октября 2026 года, база `228966d5c6`. Окончательная остановка endpoint использует `IAttachment::cancelOperation(fb_cancel_abort)`: разовый `fb_cancel_raise` мог попасть между engine calls, вернуть nothing-to-cancel и пропустить следующую операцию. Snapshot RefPtr сохраняет ownership; callbacks и I/O по-прежнему завершаются до выгрузки модуля. PgWire повторно проверяет stopping после readMessage перед dispatch. При обычном клиентском disconnect во время engine call EOF обнаруживается только при следующем socket I/O; независимого наблюдателя/таймера не добавлено.
+
+Legacy pytest мигрирован на совместимый Simple Query: 58 cases, явный native SET TRANSACTION, положительный RETURNING, отдельный отказ driver-generated BEGIN. Новый server harness проверяет административную отмену/отключение, shutdown базы, ресурсы после прогрева и shutdown при record lock wait; выбранные группы и существующие regression suites прошли. Точные результаты — в [VALIDATION.md](VALIDATION.md).
+
+P6 завершён, целевой M1 для Linux/Super принят с известными native ограничениями. Остановка во время ON CONNECT вызывает assertion `!child` в `alloc.cpp:2075` при failed attach cleanup; независимый native TCP сценарий без wire endpoints воспроизводит тот же стек. Исправление этого падения согласованно исключено из P6. Скрипт воспроизведения сохраняет FAIL, без skip/xfail или подмены результата. Core и SQL semantics в текущей правке не менялись. Следующий этап — P7, Extended Query.

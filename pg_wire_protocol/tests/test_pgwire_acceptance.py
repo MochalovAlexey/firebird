@@ -1,10 +1,11 @@
-"""Original acceptance scaffold; migration to the plugin plan is pending.
+"""M1 Simple Query acceptance for the Firebird PostgreSQL wire plugin.
 
 Reference client: psycopg2-binary 2.9.11, libpq 17.6, ordinary synchronous
 cursor, Simple Query protocol 3.0, UTF8, Firebird SQL dialect 3.  Expectations
-predate the no-SQL-parsing wire plugin design: automatic BEGIN, transaction
-contexts and RETURNING rejection need revision as specified in TEST_PLAN.md.
-The original 56 collected cases are not the current implementation gate.
+use autocommit mode so the driver sends compatible SQL unchanged. Explicit
+transactions use native SET TRANSACTION and SQL COMMIT/ROLLBACK. Driver-generated
+BEGIN is tested as an unsupported parser dependency, including connection
+contexts. This module complements raw wire, host and resource lifecycle tests.
 
 Only disposable PGW_T_<uuid> tables are created.  Use a dedicated test database
 and accounts.  Missing configuration is an error, not a skipped test.  Runtime
@@ -66,7 +67,7 @@ def _connection_params(dsn_env="PGWIRE_TEST_DSN", password_env="PGPASSWORD", **o
 
 
 @contextmanager
-def _pg_connection(*, autocommit=False, dsn_env="PGWIRE_TEST_DSN",
+def _pg_connection(*, autocommit=True, dsn_env="PGWIRE_TEST_DSN",
                    password_env="PGPASSWORD", **overrides):
     conn = psycopg2.connect(**_connection_params(dsn_env, password_env, **overrides))
     try:
@@ -167,7 +168,18 @@ def test_connect_and_select_metadata(pg_connect):
             assert cur.description[0].internal_size == 4
             assert cur.rowcount == 1
             assert cur.statusmessage == "SELECT 1"
-        assert conn.get_transaction_status() == extensions.TRANSACTION_STATUS_INTRANS
+        assert conn.get_transaction_status() == extensions.TRANSACTION_STATUS_IDLE
+
+
+def test_driver_generated_begin_is_rejected(pg_connect):
+    with pg_connect(autocommit=False) as conn:
+        with conn.cursor() as cur:
+            with pytest.raises(psycopg2.Error) as error:
+                cur.execute('SELECT CAST(42 AS INTEGER) FROM RDB$DATABASE')
+            assert error.value.pgcode == "42601"
+        assert conn.get_transaction_status() == extensions.TRANSACTION_STATUS_IDLE
+        conn.autocommit = True
+        _assert_usable(conn)
 
 
 @pytest.mark.parametrize(
@@ -263,10 +275,14 @@ def test_crud_and_rowcounts(pg_connect, table):
 def test_commit_visibility(pg_connect, table):
     with pg_connect() as writer, pg_connect(autocommit=True) as observer:
         with writer.cursor() as cur:
+            cur.execute("SET TRANSACTION READ WRITE READ COMMITTED NO WAIT")
+            assert cur.statusmessage == "BEGIN"
             cur.execute(f"INSERT INTO {table} (ID) VALUES (1)")
         assert writer.get_transaction_status() == extensions.TRANSACTION_STATUS_INTRANS
         assert _rows(observer, f"SELECT ID FROM {table}") == []
-        writer.commit()
+        with writer.cursor() as cur:
+            cur.execute("COMMIT")
+            assert cur.statusmessage == "COMMIT"
         assert writer.get_transaction_status() == extensions.TRANSACTION_STATUS_IDLE
         assert _rows(observer, f"SELECT ID FROM {table}") == [(1,)]
 
@@ -274,10 +290,14 @@ def test_commit_visibility(pg_connect, table):
 def test_rollback_visibility(pg_connect, table):
     with pg_connect() as writer, pg_connect(autocommit=True) as observer:
         with writer.cursor() as cur:
+            cur.execute("SET TRANSACTION READ WRITE READ COMMITTED NO WAIT")
             cur.execute(f"INSERT INTO {table} (ID) VALUES (1)")
+        assert writer.get_transaction_status() == extensions.TRANSACTION_STATUS_INTRANS
         assert _rows(writer, f"SELECT ID FROM {table}") == [(1,)]
         assert _rows(observer, f"SELECT ID FROM {table}") == []
-        writer.rollback()
+        with writer.cursor() as cur:
+            cur.execute("ROLLBACK")
+            assert cur.statusmessage == "ROLLBACK"
         assert writer.get_transaction_status() == extensions.TRANSACTION_STATUS_IDLE
         assert _rows(observer, f"SELECT ID FROM {table}") == []
 
@@ -289,6 +309,7 @@ def test_unique_violation_aborts_transaction(pg_connect, table, finish):
             cur.execute(f"INSERT INTO {table} (ID) VALUES (1)")
         with pg_connect() as writer:
             with writer.cursor() as cur:
+                cur.execute("SET TRANSACTION READ WRITE READ COMMITTED NO WAIT")
                 cur.execute(f"INSERT INTO {table} (ID) VALUES (2)")
                 with pytest.raises(psycopg2.Error) as error:
                     cur.execute(f"INSERT INTO {table} (ID) VALUES (1)")
@@ -298,7 +319,9 @@ def test_unique_violation_aborts_transaction(pg_connect, table, finish):
                     cur.execute('SELECT CAST(1 AS INTEGER) AS "value" FROM RDB$DATABASE')
                 assert aborted.value.pgcode == "25P02"
             # COMMIT while failed must roll back all work, just like ROLLBACK.
-            getattr(writer, finish)()
+            with writer.cursor() as cur:
+                cur.execute(finish.upper())
+                assert cur.statusmessage == "ROLLBACK"
             assert writer.get_transaction_status() == extensions.TRANSACTION_STATUS_IDLE
             assert _rows(observer, f"SELECT ID FROM {table} ORDER BY ID") == [(1,)]
             _assert_usable(writer)
@@ -307,7 +330,9 @@ def test_unique_violation_aborts_transaction(pg_connect, table, finish):
 def test_disconnect_releases_uncommitted_key(pg_connect, table):
     with pg_connect() as writer:
         with writer.cursor() as cur:
+            cur.execute("SET TRANSACTION READ WRITE READ COMMITTED NO WAIT")
             cur.execute(f"INSERT INTO {table} (ID) VALUES (7)")
+        assert writer.get_transaction_status() == extensions.TRANSACTION_STATUS_INTRANS
     with pg_connect(autocommit=True) as next_writer:
         assert _rows(next_writer, f"SELECT ID FROM {table}") == []
         with next_writer.cursor() as cur:
@@ -340,21 +365,40 @@ def test_multiple_statements_rejected_atomically(pg_connect, table):
 
 
 @pytest.mark.parametrize("form", ["insert_values", "insert_select", "update", "delete"])
-def test_returning_rejected_before_changes(pg_connect, table, form):
+def test_returning_rows_tags_and_changes(pg_connect, table, form):
     statements = {
         "insert_values": f"INSERT INTO {table} (ID) VALUES (2) RETURNING ID",
         "insert_select": f"INSERT INTO {table} (ID) SELECT 2 FROM RDB$DATABASE RETURNING ID",
         "update": f"UPDATE {table} SET V = 'after' WHERE ID = 1 RETURNING ID",
         "delete": f"DELETE FROM {table} WHERE ID = 1 RETURNING ID",
     }
+    tags = {"insert_values": "INSERT 0 1", "insert_select": "INSERT 0 1",
+            "update": "UPDATE 1", "delete": "DELETE 1"}
+    returned_id = 2 if form.startswith("insert_") else 1
+    expected_rows = ([(1, "before"), (2, None)] if form.startswith("insert_") else
+                     [(1, "after")] if form == "update" else [])
     with pg_connect(autocommit=True) as conn:
         with conn.cursor() as cur:
             cur.execute(f"INSERT INTO {table} (ID, V) VALUES (1, 'before')")
+            cur.execute(statements[form])
+            assert cur.fetchall() == [(returned_id,)]
+            assert cur.description[0].type_code == 23
+            assert cur.rowcount == 1
+            assert cur.statusmessage == tags[form]
+        assert conn.get_transaction_status() == extensions.TRANSACTION_STATUS_IDLE
+        assert _rows(conn, f"SELECT ID, V FROM {table} ORDER BY ID") == expected_rows
+
+
+def test_returning_unsupported_output_preserves_rows(pg_connect, table):
+    with pg_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(f"INSERT INTO {table} (ID, V) VALUES (1, 'before')")
             with pytest.raises(psycopg2.Error) as error:
-                cur.execute(statements[form])
+                cur.execute(f"UPDATE {table} SET V='after' RETURNING CAST(ID AS DOUBLE PRECISION)")
             assert error.value.pgcode == "0A000"
         assert conn.get_transaction_status() == extensions.TRANSACTION_STATUS_IDLE
-        assert _rows(conn, f"SELECT ID, V FROM {table} ORDER BY ID") == [(1, "before")]
+        assert _rows(conn, f"SELECT ID, V FROM {table}") == [(1, "before")]
+        _assert_usable(conn)
 
 
 @pytest.mark.parametrize(
@@ -431,25 +475,17 @@ def test_repeated_connections(pg_connect):
             assert conn.get_transaction_status() == extensions.TRANSACTION_STATUS_IDLE
 
 
-def test_connection_context_with_autocommit(pg_connect, table):
+def test_connection_context_generated_begin_is_rejected(pg_connect, table):
     with pg_connect(autocommit=True) as conn, pg_connect(autocommit=True) as observer:
         # Since psycopg2 2.9, this context starts a transaction even in autocommit.
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(f"INSERT INTO {table} (ID) VALUES (1)")
-            assert conn.get_transaction_status() == extensions.TRANSACTION_STATUS_INTRANS
-            assert _rows(observer, f"SELECT ID FROM {table}") == []
-        assert not conn.closed
-        assert conn.get_transaction_status() == extensions.TRANSACTION_STATUS_IDLE
-        assert _rows(observer, f"SELECT ID FROM {table}") == [(1,)]
-        with pytest.raises(RuntimeError, match="rollback probe"):
+        with pytest.raises(psycopg2.Error) as error:
             with conn:
                 with conn.cursor() as cur:
-                    cur.execute(f"INSERT INTO {table} (ID) VALUES (2)")
-                raise RuntimeError("rollback probe")
+                    cur.execute(f"INSERT INTO {table} (ID) VALUES (1)")
+        assert error.value.pgcode == "42601"
         assert not conn.closed
         assert conn.get_transaction_status() == extensions.TRANSACTION_STATUS_IDLE
-        assert _rows(observer, f"SELECT ID FROM {table} ORDER BY ID") == [(1,)]
+        assert _rows(observer, f"SELECT ID FROM {table}") == []
         _assert_usable(conn)
 
 
