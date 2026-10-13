@@ -2,9 +2,9 @@
 
 Для ручной работы есть [tools/pgwire_client.py](tools/pgwire_client.py): Python 3 клиент, который загружает настоящую `libpq` через `ctypes` и подключается по TCP. Дополнительные Python-пакеты не нужны; системная `libpq` должна быть доступна загрузчику библиотек.
 
-Текущий P4 выполняет SELECT, INSERT/UPDATE/DELETE, MERGE, UPDATE OR INSERT, поддержанные DDL и вызовы процедур/EXECUTE BLOCK. Поддержаны результаты SMALLINT/INTEGER/BIGINT, BOOLEAN, CHAR/VARCHAR, точные NUMERIC/DECIMAL в SHORT/LONG/INT64 и NULL; DML RETURNING может возвращать одну или несколько строк. Каждый запрос выполняется в отдельной implicit transaction: успех фиксируется перед CommandComplete, ошибка откатывает её. Пустой SQL и текст только из whitespace/comments дают EmptyQueryResponse.
+Текущий P5 выполняет SELECT, INSERT/UPDATE/DELETE, MERGE, UPDATE OR INSERT, поддержанные DDL и вызовы процедур/EXECUTE BLOCK. Поддержаны результаты SMALLINT/INTEGER/BIGINT, BOOLEAN, CHAR/VARCHAR, точные NUMERIC/DECIMAL в SHORT/LONG/INT64 и NULL; DML RETURNING может возвращать одну или несколько строк. Вне явного блока запрос выполняется в implicit transaction: успех фиксируется перед CommandComplete, ошибка откатывает её. После SET TRANSACTION запросы разделяют одну transaction до COMMIT/ROLLBACK. Пустой SQL и текст только из whitespace/comments дают EmptyQueryResponse.
 
-Явные SET TRANSACTION/COMMIT/ROLLBACK и session commands пока получают `0A000`; их реализация относится к P5. Несовместимые `BEGIN` и `$1` получают ошибку парсера Firebird. Клиент отправляет любой введённый SQL целиком и показывает реальную ошибку сервера; он не добавляет BEGIN и не переписывает запросы.
+Доступны native SET TRANSACTION, COMMIT/ROLLBACK, RETAIN, savepoints и поддержанные session SET/ALTER SESSION RESET. Клиент показывает состояния I (idle), T (transaction), E (failed transaction). Несовместимые `BEGIN` и `$1` получают ошибку парсера Firebird. Клиент отправляет любой введённый SQL целиком и показывает реальную ошибку сервера; он не добавляет BEGIN и не переписывает запросы.
 
 PgWire использует ограниченный анализ начала команды для текста ответа, но весь SQL передаётся штатному парсеру Firebird без изменений. Имена в кавычках, литералы и содержимое PSQL не переписываются. Неизвестная плагину команда может получить 0A000 после успешного prepare; синтаксическая ошибка остаётся ошибкой движка.
 
@@ -98,7 +98,7 @@ SELECT CAST(40 + 2 AS INTEGER) AS "answer" FROM RDB$DATABASE
 | `\q` | Завершить соединение |
 | `\?` | Показать справку |
 
-Точка с запятой **не запускает** запрос: выполнением управляет `\g`. Клиент не ищет SQL statements и не разделяет текст по `;`. Завершающая SQL-точка с запятой допустима, но две команды в одном буфере попадут в parser целиком и пока будут отклонены. После обычной SQL-ошибки можно сразу ввести следующий запрос на том же соединении.
+Точка с запятой **не запускает** запрос: выполнением управляет `\g`. Клиент не ищет SQL statements и не разделяет текст по `;`. Завершающая SQL-точка с запятой допустима, но две команды в одном буфере попадут в parser целиком и пока будут отклонены. После ошибки вне явного блока можно сразу продолжать. Ошибка внутри явного блока переводит его в E: для продолжения нужен ROLLBACK или допустимый ROLLBACK TO SAVEPOINT.
 
 Проверка типов и NULL:
 
@@ -212,7 +212,7 @@ DELETE FROM PGWIRE_MANUAL WHERE ID = 2;
 COMMIT;
 ```
 
-Повторите SELECT в PgWire: ожидается только `(1, 11)`. Каждый PgWire Query начинает новую implicit READ COMMITTED transaction и завершает её commit после чтения всех строк.
+Повторите SELECT в PgWire: ожидается только `(1, 11)`. Без SET TRANSACTION каждый PgWire Query исполняется в новой implicit READ COMMITTED READ CONSISTENCY transaction и завершает её commit после чтения всех строк.
 
 Проверка native rollback:
 
@@ -221,7 +221,7 @@ UPDATE PGWIRE_MANUAL SET VAL = 999 WHERE ID = 1;
 ROLLBACK;
 ```
 
-Повторный PgWire SELECT должен по-прежнему вернуть `(1, 11)`. Не используйте явный COMMIT/ROLLBACK в PgWire для этих действий: в текущем этапе поддержан только implicit cycle. Изменения из другого соединения native observer с snapshot transaction увидит после своего `COMMIT;` или `ROLLBACK;` и нового SELECT.
+Повторный PgWire SELECT должен по-прежнему вернуть `(1, 11)`. В этом сценарии PgWire работает без SET TRANSACTION, поэтому отдельный COMMIT после каждого запроса не нужен. Изменения из другого соединения native observer с snapshot transaction увидит после своего `COMMIT;` или `ROLLBACK;` и нового SELECT.
 
 ## Два терминала: PgWire меняет, native проверяет
 
@@ -305,12 +305,6 @@ COMMIT;
 UPDATE PGWIRE_MANUAL SET VAL = 999 WHERE ID = 1
 RETURNING CAST(VAL AS DOUBLE PRECISION)
 \g
-COMMIT
-\g
-ROLLBACK
-\g
-SET TRANSACTION
-\g
 BEGIN
 \g
 SELECT $1 FROM RDB$DATABASE
@@ -319,9 +313,58 @@ SELECT ID, VAL FROM PGWIRE_MANUAL ORDER BY ID
 \g
 ```
 
-UPDATE должен получить `0A000` из-за неподдержанного типа RETURNING **до изменения строки**. COMMIT, ROLLBACK и SET TRANSACTION тоже дают `0A000`, а BEGIN и `$1` — ошибку парсера. Последний SELECT должен работать на том же connection и вернуть прежнюю строку `(1, 11)` из native-сценария. Native observer после завершения своей snapshot transaction также должен увидеть VAL=11. Успешный UPDATE без неподдержанного RETURNING теперь выполняется и фиксируется — он больше не подходит для проверки отказа.
+UPDATE должен получить `0A000` из-за неподдержанного типа RETURNING **до изменения строки**. BEGIN и `$1` дают ошибку парсера. Этот пример выполняется из I, без открытого явного блока. Последний SELECT должен работать на том же connection и вернуть прежнюю строку `(1, 11)` из native-сценария. Native observer после завершения своей snapshot transaction также должен увидеть VAL=11. Успешный UPDATE без неподдержанного RETURNING теперь выполняется и фиксируется — он больше не подходит для проверки отказа.
 
 Клиент выводит SQLSTATE и server diagnostic. Fatal/transport error может завершить соединение; это отличается от обычной recoverable SQL-ошибки.
+
+## Явные транзакции и savepoints
+
+На тестовой БД создайте отдельную таблицу через PgWire (вне явного блока):
+
+```text
+CREATE TABLE PGWIRE_TX_MANUAL (ID INTEGER PRIMARY KEY, VAL INTEGER)
+\g
+SET TRANSACTION READ WRITE ISOLATION LEVEL READ COMMITTED RECORD_VERSION
+\g
+INSERT INTO PGWIRE_TX_MANUAL VALUES (1, 10)
+\g
+```
+
+После SET TRANSACTION ожидаются tag `BEGIN` и состояние T; INSERT остаётся в T. Команда BEGIN в тексте SQL этим не поддерживается. В другом native-подключении выполните `COMMIT; SELECT * FROM PGWIRE_TX_MANUAL; COMMIT;`: новая строка пока не видна.
+
+В том же PgWire-подключении:
+
+```text
+SAVEPOINT BEFORE_UPDATE
+\g
+UPDATE PGWIRE_TX_MANUAL SET VAL = 20 WHERE ID = 1
+\g
+INSERT INTO PGWIRE_TX_MANUAL VALUES (1, 30)
+\g
+SELECT * FROM PGWIRE_TX_MANUAL
+\g
+ROLLBACK TO SAVEPOINT BEFORE_UPDATE
+\g
+SELECT * FROM PGWIRE_TX_MANUAL
+\g
+COMMIT
+\g
+```
+
+Повторный INSERT получает 23505 и переводит блок в E. Первый SELECT получает 25P02. ROLLBACK TO возвращает T; следующий SELECT показывает `(1, 10)`, поскольку изменение до savepoint сохранено. COMMIT переводит соединение в I. Native observer после завершения своей snapshot transaction теперь видит `(1, 10)`.
+
+Для полной отмены откройте новый блок, измените VAL и отправьте ROLLBACK. Native observer должен по-прежнему видеть 10. Если вместо восстановления отправить COMMIT из E, сервер выполнит rollback всего незавершённого блока и вернёт tag ROLLBACK/I. Выход `\q` или обрыв соединения также откатывает незавершённую transaction.
+
+Native retaining записывается как `COMMIT RETAIN [SNAPSHOT]` или `ROLLBACK RETAIN [SNAPSHOT]` и сохраняет T. Написание RETAINING текущий parser не принимает. Native AUTO COMMIT фиксирует промежуточные изменения; последующий ROLLBACK их не отменит. Проверенный профиль — `SET TRANSACTION READ WRITE SNAPSHOT AUTO COMMIT`. Сочетание AUTO COMMIT с READ COMMITTED READ CONSISTENCY вызывает assertion в текущем native Debug-движке даже через isql без PgWire; до исправления движка этот профиль не используйте. Подробности воспроизведения — в [VALIDATION.md](VALIDATION.md). Обычный SET TRANSACTION без характеристик сохраняет native default SNAPSHOT, поэтому для READ COMMITTED указывайте его явно.
+
+`ALTER SESSION RESET` реально сбрасывает настройки/контекст сессии. В T он откатывает изменения и создаёт новую transaction, оставляя T; в E получает 25P02. После проверки завершите блок и удалите тестовую таблицу:
+
+```text
+ROLLBACK
+\g
+DROP TABLE PGWIRE_TX_MANUAL
+\g
+```
 
 ## Необязательно: увидеть implicit commit и rollback записи из SELECT
 

@@ -124,7 +124,6 @@ int main(void)
     sql_error(connection, "/* unfinished", "42601");
     sql_error(connection, "'unfinished", "42601");
     sql_error(connection, "BEGIN", "42601");
-    sql_error(connection, "SET TRANSACTION", "0A000");
     PQfinish(connection);
     printf("{\"libpq_version\":%d,\"compile_header_version\":%d,\"protocol\":3,"
            "\"types\":[16,1042,1043,1700],\"dml_ddl_returning_empty\":true}\n", PQlibVersion(), PG_VERSION_NUM);

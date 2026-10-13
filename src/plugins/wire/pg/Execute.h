@@ -19,12 +19,31 @@
 namespace Firebird::PgWire
 {
 
-// The attachment is borrowed from the host. SQL bytes go unchanged to prepare.
-// Each Query owns one implicit transaction and closes all child interfaces.
-// Sends result/error, but not ReadyForQuery. false means the session must close.
-// Transport failures propagate to the session; they must never resume framing.
-bool executeQuery(Protocol& protocol, IAttachment* attachment, std::string_view sql,
-	unsigned timeoutMs);
+// One executor per authenticated session, destroyed before the borrowed
+// attachment is detached. Only this object owns an application transaction.
+class QueryExecutor final
+{
+public:
+	QueryExecutor(IAttachment* attachment, unsigned timeoutMs)
+		: attachment(attachment), timeoutMs(timeoutMs) {}
+	~QueryExecutor();
+	QueryExecutor(const QueryExecutor&) = delete;
+	QueryExecutor& operator=(const QueryExecutor&) = delete;
+
+	// SQL goes unchanged to native prepare. Sends result/error, not ReadyForQuery.
+	// false means close the session; transport failures propagate to its owner.
+	bool execute(Protocol& protocol, std::string_view sql);
+	char transactionState() const noexcept { return state; }
+
+private:
+	bool rollback() noexcept;
+	bool transactionIsValid() noexcept;
+
+	IAttachment* const attachment;
+	const unsigned timeoutMs;
+	ITransaction* transaction = nullptr;
+	char state = 'I';
+};
 
 } // namespace Firebird::PgWire
 

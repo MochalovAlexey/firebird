@@ -36,10 +36,11 @@ bool validSqlState(const char* state)
 
 } // namespace
 
-Diagnostic diagnose(const IStatus* status)
+Diagnostic diagnose(const IStatus* status, bool failedPrepare)
 {
 	Diagnostic result;
 	unsigned priority = 0;
+	bool missingRelation = false;
 	// Inspect the complete structured vector, including nested causes. Calling
 	// fb_sqlstate once would only examine its legacy ISC_STATUS_LENGTH prefix.
 	for (const ISC_STATUS* p = status->getErrors(); *p != isc_arg_end; )
@@ -50,11 +51,13 @@ Diagnostic diagnose(const IStatus* status)
 			const char* state = reinterpret_cast<const char*>(*p++);
 			if (!validSqlState(state) || !std::strcmp(state, "00000") || !std::strcmp(state, "HY000"))
 				continue;
-			const unsigned rank = !std::strcmp(state, "42000") || !std::strcmp(state, "22000") ||
-				!std::strcmp(state, "23000") ? 10 : 35;
+			const bool fatal = state[0] == '0' && state[1] == '8';
+			const unsigned rank = fatal ? 80 :
+				(!std::strcmp(state, "42000") || !std::strcmp(state, "22000") ||
+				 !std::strcmp(state, "23000") ? 10 : 35);
 			if (rank > priority)
 			{
-				result = {state, "Firebird SQL operation failed", state[0] == '0' && state[1] == '8'};
+				result = {state, "Firebird SQL operation failed", fatal};
 				priority = rank;
 			}
 			continue;
@@ -65,6 +68,7 @@ Diagnostic diagnose(const IStatus* status)
 			continue;
 		}
 		const ISC_STATUS code = *p++;
+		missingRelation |= code == isc_dsql_relation_err;
 		Diagnostic candidate;
 		unsigned rank = 0;
 		switch (code)
@@ -111,7 +115,7 @@ Diagnostic diagnose(const IStatus* status)
 		case isc_dsql_token_unk_err:
 		case isc_command_end_err:
 		case isc_command_end_err2:
-			candidate = {"42601", "SQL syntax error", false}; rank = 40; break;
+			candidate = {"42601", "SQL syntax error", false}; rank = 55; break;
 		default:
 			{
 				const ISC_STATUS single[ISC_STATUS_LENGTH] = {isc_arg_gds, code, isc_arg_end};
@@ -136,6 +140,11 @@ Diagnostic diagnose(const IStatus* status)
 		if (rank > priority)
 			result = std::move(candidate), priority = rank;
 	}
+	// Deliberately narrow whitelist: only a real native missing-relation cause.
+	// Syntax, privilege, timeout, shutdown and unknown semantic errors retain
+	// their normal diagnostics. A literal/explicit SQLSTATE alone is insufficient.
+	if (failedPrepare && missingRelation && result.state == "42P01" && !result.fatal)
+		result = {"25P02", "Current transaction is aborted; rollback is required", false};
 	return result;
 }
 

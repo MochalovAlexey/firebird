@@ -4,7 +4,7 @@
 
 PostgreSQL grammar/functions отложены. Ограниченная plugin-local classification задаёт command tags, control profile и EMPTY; SQL не переписывается и не делится. Полную проверку и реальное исполнение выполняет неизменённый parser/DSQL; новые публичные statement metadata не добавляются.
 
-P4 с ограниченным lexer внутри плагина и существующими engine interfaces принят в целевом Linux/Super loopback профиле. Сборка, unit tests и повторные SQL/lifecycle/startup/native проверки прошли; evidence и исторические результаты находятся в [VALIDATION.md](VALIDATION.md). Следующий этап — P5: explicit I/T/E и session controls. TLS, Windows и другие server modes требуют отдельной реализации и приёмки.
+P5 реализован и прошёл целевую Linux/Super loopback приёмку: I/T/E, native transaction/session controls и recovery. **Известное ограничение native baseline: READ COMMITTED READ CONSISTENCY + AUTO COMMIT не входит в подтверждённую совместимость; SNAPSHOT AUTO COMMIT проверен.** M1 ещё не принят, следующий этап — P6. Результаты и границы покрытия — в [VALIDATION.md](VALIDATION.md). TLS, Windows и другие server modes требуют отдельной реализации и приёмки.
 
 ## P0. База, зависимости и проектирование
 
@@ -52,11 +52,11 @@ M0 проверил вычисляемый SELECT, настоящие C libpq/Ps
 
 ## P4. Simple Query, базовые codecs и ограниченная классификация
 
-**Статус: целевая Linux/Super loopback приёмка — PASS.** Full make, четыре unit executable, 12 Simple Query групп с trace и lifecycle/startup/native regressions прошли. Прежние ревизии остаются историей; новые evidence и ограничения — в [VALIDATION.md](VALIDATION.md). Следующий этап — P5.
+**Статус P4: целевая Linux/Super loopback приёмка — PASS.** Full make, четыре unit executable, 12 Simple Query групп с trace и lifecycle/startup/native regressions прошли. Evidence и ограничения — в [VALIDATION.md](VALIDATION.md). P5 ниже прошёл отдельную целевую приёмку с повторением regression; результаты разных ревизий сохранены отдельно.
 
 SQL передаётся в engine prepare целиком, с исходной byte length и без изменения текста. Ограниченный lexer внутри PgWire определяет вид команды, command tag, профиль transaction/session controls и признак tokenless EMPTY. Он учитывает comments, строки и quoted identifiers, но не проверяет grammar, имена объектов, privileges или типы. Общий wire host SQL не анализирует.
 
-После успешного engine prepare плагин сочетает lexical descriptor с существующими `getType()`, `getFlags()`, input/output metadata и affected records. `FLAG_HAS_CURSOR` выбирает cursor/fetch; output metadata определяет singleton output и codecs. RETURNING не превращает DML в SELECT. Неподдержанный control либо UNKNOWN, включая USING wrapper, получает 0A000 до execution; ошибка самого prepare сохраняет приоритет. Новые публичные DSQL getInfo items, AST annotations и parser diagnostics для PgWire не добавляются.
+После успешного engine prepare плагин сочетает lexical descriptor с существующими `getType()`, `getFlags()`, input/output metadata и affected records. `FLAG_HAS_CURSOR` выбирает cursor/fetch; output metadata определяет singleton output и codecs. RETURNING не превращает DML в SELECT. В I/T неподдержанный control либо UNKNOWN, включая USING wrapper, получает 0A000 до execution; в E успешно подготовленные команды, кроме разрешённого recovery, получают 25P02. Ошибка самого prepare имеет отдельный приоритет по CODEX_CONTEXT. Новые публичные DSQL getInfo items, AST annotations и parser diagnostics для PgWire не добавляются.
 
 Запрещены SQL rewriting, удаление comments из передаваемого текста, разбиение batches, замена `$n` на `?`, подстановка параметров SQL-литералами и эмуляция успешного SET/BEGIN. Совместимость синтаксиса и реальное исполнение определяет только Firebird. Неподдержанный batch передаётся parser целиком и отвергается без частичных эффектов.
 
@@ -64,23 +64,33 @@ EMPTY определяется ограниченным lexer только дл�
 
 Сохранить SELECT/DML/DDL/RETURNING, EXECUTE BLOCK/PROCEDURE, affected-record counts, singleton/cursor output и реальные implicit commit/rollback. Поддержанные text codecs: integer, BOOLEAN, CHAR/VARCHAR, exact numeric в SHORT/LONG/INT64 и NULL. CHAR fetch использует varying metadata, logical CHAR OID и значимые пробелы сохраняются.
 
-Обязательные проверки: ограниченный lexer unit tests; raw TCP comments/mixed-case/CTE/quoted identifiers/literals/DDL modifiers/RETURNING; неизвестные wrappers и controls после prepare получают 0A000 без side effects; malformed SQL/batches сохраняют parser error. Штатные native isql AUTOTERM и diagnostics не меняются. C libpq и psycopg2 autocommit, cross-visibility, real commit failure, lifecycle/startup/native regressions прошли на этой реализации. Зависимость от отдельного native metadata executable удалена.
+Проверки P4: ограниченный lexer unit tests; raw TCP comments/mixed-case/CTE/quoted identifiers/literals/DDL modifiers/RETURNING; неизвестные wrappers и прежний control guard; malformed SQL/batches сохраняют parser error. В P5 negative expectations для поддержанных controls заменяются проверками фактического исполнения и I/T/E. Штатные native isql AUTOTERM и diagnostics не меняются. C libpq и psycopg2 autocommit, cross-visibility, real commit failure, lifecycle/startup/native regressions прошли на P4. Зависимость от отдельного native metadata executable удалена.
 
 **Критерий завершения:** сборка и соответствующая текущему SQL boundary integration suite прошли, реальные команды/версии/ограничения записаны в VALIDATION. Close/free fault injection и engine execution timeout отдельно отмечаются как выполненные либо not-run.
 
 ## P5. Транзакции и состояние сессии
 
-Реализовать I/T/E по CODEX_CONTEXT с plugin-local control descriptor после engine prepare для действий `SET TRANSACTION`, `COMMIT`, `ROLLBACK`, retaining и savepoints. SQL управления транзакцией проходит движок; после execute учитывать возвращённый `ITransaction*`, который может измениться или стать NULL. Implicit transaction имеет настоящий commit/rollback.
+**Статус: целевая Linux/Super loopback приёмка P5 — PASS с native ограничением READ CONSISTENCY + AUTO COMMIT.** Все 14 transaction groups прошли без skips; SNAPSHOT AUTO COMMIT и NO AUTO UNDO проверены. Повторены full build, четыре unit executable (487 classifier checks), Simple Query 12, lifecycle 7, startup 52 и native 9. Полный M1 остаётся P6. Один `QueryExecutor` на authenticated session владеет transaction и I/T/E. В I prepare получает NULL, в T/E — current native handle. Plugin-local `ControlKind` применяется после successful prepare и сверяется со штатным coarse type. Возвращённый `ITransaction*` сохраняется до проверки execute status, включая замену или NULL.
+
+Реализованы `SET TRANSACTION` → tag BEGIN, полный COMMIT/ROLLBACK, `COMMIT/ROLLBACK [WORK] RETAIN [SNAPSHOT]`, SAVEPOINT, RELEASE SAVEPOINT и ROLLBACK TO. В I полные controls являются no-op; retaining и savepoint actions дают 25000/I. Повторный SET TRANSACTION в T даёт 25001/E с сохранением существующего handle. BEGIN, START TRANSACTION и RETAINING не входят в native grammar и остаются parser errors.
 
 Только PgWire-сессия управляет не более чем одной текущей application transaction; последовательных транзакций за жизнь соединения может быть сколько угодно. Это не ограничение generic host, родного API или других plugins. Parse/Describe/statements/portals используют текущую transaction либо prepare с NULL, без отдельного handle; внутренние system/security/autonomous transactions не входят в инвариант.
 
-В E использовать обычный prepare с живой native transaction, штатные metadata и plugin-local control descriptor. После успешного prepare исполнять только разрешённые recovery commands, прочие освобождать с 25P02. Синтаксические ошибки сохраняют 42601; ожидаемые semantic errors могут отображаться в 25P02 по явной таблице. Shutdown, cancellation/timeout, invalid handle, resource/I/O errors сохраняют собственную диагностику и cleanup/close. Prepare не выполняет подготовленный DML/DDL, но может компилировать, загружать metadata/external routines и брать locks; это не отдельный чистый parser API.
+В E выполняется обычный prepare с сохранённой native transaction. Успешно подготовленные команды, кроме recovery, освобождаются с 25P02 без execution. Failed-prepare whitelist ограничен фактическим `isc_dsql_relation_err`, когда итоговая диагностика — nonfatal 42P01: только этот случай заменяется на 25P02. Одного explicit SQLSTATE 42P01 недостаточно. Syntax, permission, shutdown, cancellation/timeout, invalid handle, resource/I/O и unknown errors сохраняют собственную диагностику и cleanup/close. Prepare может компилировать, загружать metadata/external routines и брать locks; отсутствие SQL execution не делает его отдельным чистым parser API.
 
-После statement error в explicit block сохранять native transaction и логический E; обычные команды получают 25P02. Полный COMMIT из E завершает текущую transaction rollback. Допустимый ROLLBACK TO восстанавливает T без потери изменений до savepoint. Retaining, AUTO COMMIT / NO AUTO UNDO и ошибки control commands следуют контракту CODEX_CONTEXT: native AUTO COMMIT сохраняет собственную семантику, уже совершённые commits не отменяются. Не эмулировать успешный PostgreSQL `BEGIN`, `SET` и другие несовместимые формы.
+После statement error в explicit block сохраняется native transaction и E. Полный COMMIT из E делает настоящий rollback с tag ROLLBACK/I; допустимый ROLLBACK TO и ROLLBACK RETAIN восстанавливают T. Implicit TPB — READ WRITE / READ COMMITTED READ CONSISTENCY / WAIT, lock timeout `ceil(IOTimeout / 1000)` секунд. Implicit commit выполняется до CommandComplete. Опции explicit SET TRANSACTION, включая AUTO COMMIT / NO AUTO UNDO, передаются движку неизменёнными и не извлекаются lexer; прежние AUTO COMMIT commits не отменяются последующим rollback.
 
-**Готово:** native transaction SQL, visibility, I/T/E и `PQtransactionStatus`, unique violation/recovery, savepoints/retaining, disconnect rollback и `ALTER SESSION RESET`, способный заменить native transaction при том же interface pointer. Автоматический `BEGIN` psycopg2 остаётся отрицательной проверкой синтаксиса до отдельного расширения grammar.
+Statement timeout — минимум IOTimeout и ненулевого attachment timeout, иначе IOTimeout; проверяется реальный DML execution timeout после native SET STATEMENT TIMEOUT. Prepare/DDL/controls не получают hard deadline от этого timer.
+
+AUTO COMMIT DML проверяется положительно в native SNAPSHOT profile, NO AUTO UNDO — отдельно. Ограничение native Debug baseline: AUTO COMMIT с READ COMMITTED READ CONSISTENCY вызывает assertion `Savepoint.cpp:833` в restart path, независимо воспроизведённый embedded isql без PgWire/server/triggers. Этот профиль не входит в принятую совместимость. В P5 core/SQL options не менялись; исправление native дефекта остаётся отдельной работой. Repro и точный объём покрытия записываются в VALIDATION, M1 остаётся отдельной приёмкой P6.
+
+Native session SET исполняются по whitelist из CODEX_CONTEXT; ALTER SESSION RESET имеет настоящий effect. RESET может заменить native transaction за тем же interface pointer: при успехе I остаётся I, T — T, в E команда получает 25P02. В P5 нет cached statements/portals или клиентского списка savepoint names, которые могли бы пережить reset. Session settings не эмулируются успешными ответами.
+
+**Критерий завершения:** live checks подтверждают native transaction SQL, visibility, I/T/E и `PQtransactionStatus`, error precedence, unique violation/recovery, savepoints/retaining, disconnect rollback, session SET и ALTER SESSION RESET; результаты записаны в VALIDATION. Unit tests не заменяют эту приёмку. Автоматический BEGIN psycopg2 остаётся отрицательной проверкой синтаксиса до отдельного расширения grammar.
 
 ## P6. Серверная приёмка — M1
+
+**Следующий этап; M1 пока не объявлен принятым.** После P5 повторить обязательные группы на окончательной ревизии.
 
 Выполнить архитектурные, authentication, parser, wire и lifecycle группы TEST_PLAN. Переработать исходный Python scaffold по новому контракту; его прежние 56 cases не являются неизменным gate. Добавить cross-visibility PG/native, permissions, лимиты, malformed clients и resource accounting после прогрева.
 
@@ -88,7 +98,7 @@ EMPTY определяется ограниченным lexer только дл�
 
 Добавить внешнее завершение attachment/database, отмену через MON$STATEMENTS, idle/statement timeouts. Зафиксировать обнаружение shutdown при idle socket и сроки cleanup. Super и SuperClassic получают отдельные результаты.
 
-**M1:** обязательные проверки пройдены, ограничения и команды в VALIDATION. Это Simple Query с совместимым SQL, а не гарантия работы любого PostgreSQL-приложения.
+**Критерий M1:** обязательные проверки пройдены, ограничения и команды в VALIDATION. Это Simple Query с совместимым SQL, а не гарантия работы любого PostgreSQL-приложения.
 
 ## P7. Extended Query и prepared objects
 

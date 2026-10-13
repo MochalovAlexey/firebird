@@ -126,6 +126,79 @@ SqlInfo command(std::string tag, CountKind count = CountKind::None)
 	return {std::move(tag), count, false, true};
 }
 
+SqlInfo controlCommand(std::string tag, ControlKind control)
+{
+	return {std::move(tag), CountKind::None, false, true, control};
+}
+
+bool name(const Token& token)
+{
+	// Do not unquote, normalize or retain a savepoint name. Execution passes
+	// the original SQL to the engine, including native identifier semantics.
+	return token.kind == TokenKind::Word ||
+		(token.kind == TokenKind::Other && token.text.front() == '"');
+}
+
+SqlInfo endTransaction(Prefix& prefix, bool commit)
+{
+	auto token = prefix.next();
+	if (token.is("WORK"))
+		token = prefix.next();
+	if (!commit && token.is("TO"))
+	{
+		token = prefix.next();
+		if (token.is("SAVEPOINT"))
+			token = prefix.next();
+		return name(token) ? controlCommand("ROLLBACK", ControlKind::RollbackTo) : SqlInfo{};
+	}
+	const bool retain = token.is("RETAIN");
+	if (retain)
+	{
+		token = prefix.next();
+		if (token.is("SNAPSHOT"))
+			token = prefix.next();
+	}
+	// RETAINING is not a Firebird SQL keyword. Neither it nor a quoted
+	// modifier must accidentally become a full COMMIT or ROLLBACK.
+	if (token.kind != TokenKind::End && token.text != ";")
+		return {};
+	if (commit)
+	{
+		return controlCommand("COMMIT",
+			retain ? ControlKind::CommitRetaining : ControlKind::Commit);
+	}
+	return controlCommand("ROLLBACK",
+		retain ? ControlKind::RollbackRetaining : ControlKind::Rollback);
+}
+
+bool sessionCommand(Prefix& prefix, const Token& second)
+{
+	// Explicit native mng_statement prefixes from dsql/parse.y. Options and
+	// values remain the engine's responsibility; this is not PostgreSQL SET.
+	if (second.is("ROLE") || second.is("OPTIMIZE"))
+		return true;
+	if (second.is("TRUSTED"))
+		return prefix.next().is("ROLE");
+	if (second.is("DEBUG"))
+		return prefix.next().is("OPTION");
+	if (second.is("DECFLOAT"))
+	{
+		const auto third = prefix.next();
+		return third.is("ROUND") || (third.is("TRAPS") && prefix.next().is("TO"));
+	}
+	if (second.is("SESSION"))
+		return prefix.next().is("IDLE") && prefix.next().is("TIMEOUT");
+	if (second.is("STATEMENT"))
+		return prefix.next().is("TIMEOUT");
+	if (second.is("TIME"))
+		return prefix.next().is("ZONE");
+	if (second.is("BIND"))
+		return prefix.next().is("OF");
+	if (second.is("SEARCH_PATH"))
+		return prefix.next().is("TO");
+	return false;
+}
+
 bool direction(const Token& token)
 {
 	return token.is("ASC") || token.is("ASCENDING") ||
@@ -257,13 +330,31 @@ SqlInfo inspectSql(std::string_view sql)
 		return command("REVOKE");
 	if (first.is("COMMENT"))
 		return command("COMMENT");
+	if (first.is("COMMIT"))
+		return endTransaction(prefix, true);
+	if (first.is("ROLLBACK"))
+		return endTransaction(prefix, false);
+	if (first.is("SAVEPOINT"))
+	{
+		return name(prefix.next()) ?
+			controlCommand("SAVEPOINT", ControlKind::Savepoint) : SqlInfo{};
+	}
+	if (first.is("RELEASE"))
+	{
+		return prefix.next().is("SAVEPOINT") && name(prefix.next()) ?
+			controlCommand("RELEASE", ControlKind::ReleaseSavepoint) : SqlInfo{};
+	}
 	if (first.is("SET"))
 	{
 		const auto second = prefix.next();
+		if (second.is("TRANSACTION"))
+			return controlCommand("BEGIN", ControlKind::Start);
 		if (second.is("GENERATOR"))
 			return command("SET GENERATOR");
 		if (second.is("STATISTICS") && prefix.next().is("INDEX"))
 			return command("SET STATISTICS");
+		if (sessionCommand(prefix, second))
+			return controlCommand("SET", ControlKind::Session);
 		return {};
 	}
 	constexpr std::string_view actions[] = {"CREATE", "ALTER", "DROP", "RECREATE", "DECLARE"};
@@ -272,6 +363,11 @@ SqlInfo inspectSql(std::string_view sql)
 		if (!first.is(action))
 			continue;
 		auto object = prefix.next();
+		if (first.is("ALTER") && object.is("SESSION"))
+		{
+			return prefix.next().is("RESET") ?
+				controlCommand("RESET", ControlKind::ResetSession) : SqlInfo{};
+		}
 		std::string tag(action);
 		if (first.is("CREATE") && object.is("OR"))
 		{
@@ -287,7 +383,7 @@ SqlInfo inspectSql(std::string_view sql)
 		tag += name;
 		return command(std::move(tag));
 	}
-	// Includes transaction and session management, and native USING wrappers.
+	// Includes PostgreSQL-only BEGIN/START/RESET and native USING wrappers.
 	return {};
 }
 

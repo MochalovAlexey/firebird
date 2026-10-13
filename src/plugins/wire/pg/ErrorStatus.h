@@ -31,7 +31,9 @@ struct Diagnostic
 // Classify structured status arguments only. Message strings never influence
 // classification or appear in the client diagnostic. Explicit SQLSTATE is a
 // fallback; native shutdown, cancellation and privilege causes take priority.
-Diagnostic diagnose(const IStatus* status);
+// failedPrepare applies only to a prepare error inside an already failed block.
+// Its semantic-error whitelist never hides fatal, cancellation or permission causes.
+Diagnostic diagnose(const IStatus* status, bool failedPrepare = false);
 
 } // namespace Firebird::PgWire
 

@@ -298,9 +298,7 @@ FROM RDB$DATABASE""", "SELECT 1", [("1.20", "-12345.60", "-92233720368547758.08"
         for sql, state in [("INSERT INTO P4_ROWS(ID,V) VALUES(1,1)", "23505"),
                            ("INSERT INTO P4_ROWS(ID,V) VALUES(NULL,1)", "23000"),
                            ("UPDATE P4_ROWS SET V=-1 WHERE ID=1", "23514"),
-                           ("BEGIN", "42601"), ("SELECT $1 FROM RDB$DATABASE", "42601"),
-                           ("SET TRANSACTION READ COMMITTED", "0A000"), ("COMMIT", "0A000"),
-                           ("ROLLBACK", "0A000"), ("SAVEPOINT P4_NOT_SUPPORTED", "0A000")]:
+                           ("BEGIN", "42601"), ("SELECT $1 FROM RDB$DATABASE", "42601")]:
             result = client.query_error(sql.encode(), state)
             require(result["command"] is None, "failed SQL produced CommandComplete")
             self.no_transactions()
@@ -412,8 +410,8 @@ FROM RDB$DATABASE""", "SELECT 1", [("1.20", "-12345.60", "-92233720368547758.08"
         self.sql(client, 'DROP PACKAGE P4_LEXICAL_PACKAGE', 'DROP PACKAGE')
         self.sql(client, "SELECT RDB$SET_CONTEXT('USER_SESSION','P4_LEXICAL_GUARD','kept') FROM RDB$DATABASE",
                  'SELECT 1', [(0,)], [23])
-        for sql in ("/* SELECT */ ALTER SESSION RESET", "SET ROLE PGWIRE_OBSERVER", "SET TIME ZONE 'UTC'",
-                    "USING IN AUTONOMOUS TRANSACTION DO INSERT INTO P4_EFFECTS VALUES (GEN_ID(P4_GUARD,1))"):
+        # Real transaction/session controls are covered by the P5 stateful suite.
+        for sql in ("USING IN AUTONOMOUS TRANSACTION DO INSERT INTO P4_EFFECTS VALUES (GEN_ID(P4_GUARD,1))",):
             result = client.query(sql.encode())
             require(result['error'] is not None and result['error']['C'] == '0A000',
                     f"unsupported SQL {sql!r} did not return 0A000: {result!r}")

@@ -115,6 +115,7 @@ public:
 			protocol.parameterStatus("standard_conforming_strings", "on", deadline);
 			protocol.parameterStatus("application_name", startup.applicationName, deadline);
 			protocol.ready('I', deadline);
+			QueryExecutor executor(owned.attachment, limits.timeoutMs);
 
 			while (!stopping() && protocol.readMessage(message))
 			{
@@ -122,9 +123,9 @@ public:
 					return;
 				if (message.type == 'Q')
 				{
-					if (!executeQuery(protocol, owned.attachment, message.text(), limits.timeoutMs))
+					if (!executor.execute(protocol, message.text()))
 						return;
-					protocol.ready();
+					protocol.ready(executor.transactionState());
 				}
 				else
 					throw ProtocolError("0A000", "Frontend message is not supported yet");

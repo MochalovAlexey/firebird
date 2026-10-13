@@ -15,8 +15,9 @@ and acceptance. P2 added host authentication and local attachments, and a separa
 execution; the current P4 implementation supports Simple Query DML/DDL,
 RETURNING, procedures/blocks and basic result codecs. Completion classification
 now belongs to the PgWire plugin and uses the existing engine API. The refactor
-passed targeted Linux/Super checks; explicit transaction/session controls are P5, while TLS
-remains a later step. Recorded checks and coverage limits are in
+passed targeted Linux/Super checks. P5 adds explicit transaction/session controls
+and passed targeted Linux/Super checks with a documented native AUTO COMMIT
+limitation; TLS remains a later step. Recorded checks and coverage limits are in
 [`VALIDATION.md`](../pg_wire_protocol/VALIDATION.md).
 
 The interface definitions are in
@@ -410,7 +411,7 @@ Results, commands and coverage limits are recorded in
 echo do not establish SQL execution support; query acceptance is recorded
 separately.
 
-## PgWire Simple Query profile (P4, Linux/Super checks passed)
+## PgWire Simple Query and transaction profile (P5)
 
 `Execute.cpp` sends the complete Query SQL and its explicit byte length to engine
 prepare; only the framing NUL is excluded. The original SQL is never rewritten
@@ -423,9 +424,9 @@ command for CommandComplete and current capability checks. It skips native
 whitespace and comments, treats quoted strings/identifiers as opaque tokens and
 reads only the prefix needed to distinguish a command or DDL object. It does not
 parse expressions, walk CTE bodies or implement PostgreSQL grammar. The existing
-statement type independently blocks transaction operations; session commands
-and unclassified prefixes, including USING wrappers, receive `0A000` before
-execution. The engine parser, native statement types and public getInfo API
+statement type cross-checks transaction descriptors. Session commands use an
+explicit native SET/reset whitelist; unclassified prefixes, including USING
+wrappers, receive `0A000` before execution. The engine parser, native statement types and public getInfo API
 have no protocol-specific metadata additions.
 
 Cursor execution uses `IStatement::getFlags() & FLAG_HAS_CURSOR` and
@@ -445,13 +446,36 @@ on output; OCTETS and unsupported charsets/types receive `0A000` from metadata
 checks. Column aliases come from the engine; table OID and attribute number are
 zero, and typmod is -1. Column provenance mapping is not implemented.
 
-One implicit READ COMMITTED/write/nowait application transaction covers prepare,
-execute/open and fetch. RowDescription and DataRow are streamed when there are
-output columns. After completion, cursor and statement handles are closed and
-the transaction is committed; only then is CommandComplete sent. Errors roll
-back the transaction. Failed cleanup or an uncertain commit result closes the
-session. ReadyForQuery is currently `I`; native SET TRANSACTION, COMMIT/ROLLBACK,
-savepoints/retaining and session management remain unsupported until P5.
+A QueryExecutor owns at most one current application transaction per session.
+In I, prepare uses NULL and the engine's internal system transaction. Ordinary
+SQL then starts one implicit READ COMMITTED READ CONSISTENCY/write transaction,
+using WAIT with a lock timeout of ceil(IOTimeout / 1000) seconds. Cursors and
+statements are closed before its real commit and CommandComplete. Errors roll
+back the implicit transaction. In T/E, prepare uses the existing transaction.
+
+Native SET TRANSACTION starts an explicit transaction and returns BEGIN/T.
+COMMIT or ROLLBACK ends it and returns I. COMMIT/ROLLBACK RETAIN [SNAPSHOT] keeps
+T; SAVEPOINT, RELEASE SAVEPOINT and ROLLBACK TO execute through the native engine.
+An ordinary error in T preserves the transaction and changes the wire state to E.
+Prepared ordinary statements in E receive 25P02. Successful ROLLBACK TO or
+ROLLBACK RETAIN recovers T; full COMMIT in E performs rollback and returns
+ROLLBACK/I. Full COMMIT/ROLLBACK in I is a validated no-op; retaining/savepoints
+in I receive 25000. A second SET TRANSACTION in T receives 25001/E.
+
+EMPTY preserves I/T/E. A prepare syntax error in E retains 42601; only a real
+missing-relation cause is currently mapped to 25P02. Privilege, cancellation,
+fatal and unknown semantic errors keep their diagnostics. Invalid handles,
+failed cleanup and uncertain commit outcomes close the session. Disconnect
+rolls back any remaining transaction before the attachment is detached.
+
+Native SET commands change real attachment settings. ALTER SESSION RESET in T
+rolls back and creates a new transaction, possibly behind the same interface,
+and keeps T. In I it creates no application transaction; in E it receives 25P02.
+No protocol statements, portals or savepoint names are cached between Queries.
+Currently reported ParameterStatus values do not describe the reset options.
+Native AUTO COMMIT and NO AUTO UNDO semantics are preserved; AUTO COMMIT may have
+already committed changes that a later rollback cannot undo. These native SQL
+characteristics do not acquire PostgreSQL transaction semantics.
 
 SELECT tags count transmitted rows. DML tags use the engine's affected-record
 count independently of RETURNING rows: `INSERT 0 n`, `UPDATE n`, `DELETE n`,
@@ -460,14 +484,22 @@ DDL retains its operation and object, including RECREATE, CREATE OR ALTER and
 DECLARE. SET GENERATOR and SET STATISTICS have standalone tags. These completion
 strings are formed exclusively in the plugin.
 
+The tested AUTO COMMIT profile uses SNAPSHOT. The native Debug engine currently
+asserts for INSERT under READ COMMITTED READ CONSISTENCY AUTO COMMIT, independently
+of PgWire (also reproduced with embedded isql). This engine limitation is recorded
+with reproduction evidence in VALIDATION; the plugin passes transaction options
+unchanged. Release behavior has not been tested.
+
 Even an empty Query first goes through the engine prepare call. Only a syntax
 error (`42601`) combined with the plugin classifier's entirely tokenless input
-produces EmptyQueryResponse after transaction cleanup. Whitespace and fully
+produces EmptyQueryResponse after query-resource cleanup, preserving I/T/E. Whitespace and fully
 closed comments qualify; a standalone semicolon, unfinished string or
 unterminated block comment does not. Native block comments do not nest. The
 engine's existing diagnostics and isql continuation behavior are unchanged.
 
-`IOTimeout` also sets the engine statement timeout. It does not forcibly preempt
+`IOTimeout` bounds the engine statement timeout; a shorter nonzero native
+attachment statement timeout takes precedence. Native execution timers cover
+DML, not DDL or transaction/session controls. This does not forcibly preempt
 prepare or guarantee a hard deadline for synchronous engine callbacks. Error
 mapping in `ErrorStatus.cpp` examines the full structured status vector,
 including explicit SQLSTATE fallback: parser errors use `42601`, missing
@@ -477,11 +509,14 @@ coarser `23000` because it also represents domain validation. Shutdown,
 cancellation and resource failures take precedence. Transport failure or timeout
 closes the stream without writing into a possibly partial frame.
 
-The refactored profile passed the full POSIX build, four unit executables
+The earlier P4 refactor passed the full POSIX build, four unit executables
 (including 284 SQL classification checks), 12 Simple Query groups, seven lifecycle
 groups, 52 startup checks and nine native checks. Real clients were C libpq 14.24
 and psycopg2 2.9.11/libpq 17.6. Server traces showed no backend network connections.
-Commands, evidence and coverage limits are maintained in
+P5 passed its own targeted Linux/Super checks: 14 transaction/session groups,
+the full POSIX build, four unit executables (487 SQL classification checks),
+and the Simple Query/lifecycle/startup/native regressions. The native AUTO COMMIT
+limitation above remains; the full M1 acceptance stage is still P6. Commands, evidence and coverage limits are maintained in
 [`VALIDATION.md`](../pg_wire_protocol/VALIDATION.md). Extended Query, additional
 codecs, remote TCP/TLS, cancellation messages and other server modes require
 subsequent implementation and validation.

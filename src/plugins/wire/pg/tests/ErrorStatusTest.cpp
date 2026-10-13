@@ -40,12 +40,17 @@ ISC_STATUS text(const char* value)
 	return reinterpret_cast<ISC_STATUS>(value);
 }
 
-void expect(IMaster* master, const Vector& vector, const char* state, bool fatal)
+void expect(IMaster* master, const Vector& vector, const char* state, bool fatal,
+	bool failedPrepare = false)
 {
 	Status status(master->getStatus());
 	status->setErrors(vector.data());
-	const auto diagnostic = diagnose(status.get());
-	require(diagnostic.state == state, "Unexpected diagnostic SQLSTATE");
+	const auto diagnostic = diagnose(status.get(), failedPrepare);
+	if (diagnostic.state != state)
+	{
+		throw std::runtime_error("Unexpected diagnostic SQLSTATE: expected " + std::string(state) +
+			", got " + diagnostic.state);
+	}
 	require(diagnostic.fatal == fatal, "Unexpected diagnostic severity");
 	require(std::strstr(diagnostic.message, "secret diagnostic") == nullptr,
 		"Raw engine text leaked into client diagnostic");
@@ -185,6 +190,73 @@ void verifyConstraints(IMaster* master)
 		isc_arg_string, text("23505 secret diagnostic"), isc_arg_end}, "XX000", false);
 }
 
+void verifyFailedPrepare(IMaster* master)
+{
+	const Vector missing{isc_arg_gds, isc_dsql_error, isc_arg_gds, isc_sqlerr,
+		isc_arg_number, -204, isc_arg_gds, isc_dsql_relation_err,
+		isc_arg_string, text("secret diagnostic"), isc_arg_end};
+	expect(master, missing, "42P01", false);
+	expect(master, missing, "25P02", false, true);
+
+	// The whitelist requires an actual cause, not a message, numeric argument,
+	// or explicit SQLSTATE that happens to look like the selected semantic error.
+	expect(master, {isc_arg_gds, isc_random, isc_arg_number, isc_dsql_relation_err,
+		isc_arg_string, text("42P01 secret diagnostic"), isc_arg_end}, "XX000", false, true);
+	expect(master, {isc_arg_gds, isc_random, isc_arg_sql_state, text("42P01"), isc_arg_end},
+		"42P01", false, true);
+	expect(master, {isc_arg_gds, isc_random, isc_arg_number, isc_dsql_relation_err,
+		isc_arg_sql_state, text("42P01"), isc_arg_end}, "42P01", false, true);
+	expect(master, {isc_arg_gds, isc_random, isc_arg_end}, "XX000", false, true);
+	expect(master, {isc_arg_gds, isc_dsql_field_err, isc_arg_end}, "42703", false, true);
+	expect(master, {isc_arg_gds, isc_random, isc_arg_sql_state, text("22012"), isc_arg_end},
+		"22012", false, true);
+
+	struct Test { ISC_STATUS code; const char* state; bool fatal; };
+	const Test cases[] = {
+		{isc_dsql_token_unk_err, "42601", false},
+		{isc_command_end_err, "42601", false},
+		{isc_command_end_err2, "42601", false},
+		{isc_no_priv, "42501", false},
+		{isc_dyn_no_priv, "42501", false},
+		{isc_cancelled, "57014", false},
+		{isc_cfg_stmt_timeout, "57014", false},
+		{isc_att_stmt_timeout, "57014", false},
+		{isc_req_stmt_timeout, "57014", false},
+		{isc_att_shutdown, "57P01", true},
+		{isc_att_shut_idle, "57P05", true},
+		{isc_bad_db_handle, "08006", true},
+		{isc_bad_trans_handle, "08006", true},
+		{isc_bad_req_handle, "08006", true},
+		{isc_ses_reset_failed, "08003", true},
+		{isc_io_error, "58030", true},
+		{isc_virmemexh, "53200", true}
+	};
+	for (const auto& test : cases)
+	{
+		expect(master, {isc_arg_gds, isc_dsql_error, isc_arg_gds, test.code, isc_arg_end},
+			test.state, test.fatal, true);
+		// A whitelisted cause cannot swallow a more important nested error,
+		// regardless of which cause appears first in the complete vector.
+		expect(master, {isc_arg_gds, isc_dsql_relation_err, isc_arg_gds, test.code, isc_arg_end},
+			test.state, test.fatal, true);
+		expect(master, {isc_arg_gds, test.code, isc_arg_gds, isc_dsql_relation_err, isc_arg_end},
+			test.state, test.fatal, true);
+	}
+	for (const char* state : {"08003", "08006"})
+	{
+		expect(master, {isc_arg_gds, isc_dsql_relation_err,
+			isc_arg_sql_state, text(state), isc_arg_end}, state, true, true);
+		expect(master, {isc_arg_gds, isc_random, isc_arg_sql_state, text(state),
+			isc_arg_gds, isc_dsql_relation_err, isc_arg_end}, state, true, true);
+	}
+
+	Vector longStatus{isc_arg_gds, isc_dsql_error};
+	for (unsigned i = 0; i < 16; ++i)
+		longStatus.insert(longStatus.end(), {isc_arg_number, isc_dsql_relation_err});
+	longStatus.insert(longStatus.end(), {isc_arg_gds, isc_dsql_relation_err, isc_arg_end});
+	expect(master, longStatus, "25P02", false, true);
+}
+
 } // namespace
 
 int main()
@@ -197,6 +269,7 @@ int main()
 		verifyExplicitState(master);
 		verifyPriorities(master);
 		verifyConstraints(master);
+		verifyFailedPrepare(master);
 		std::puts("PgWire error status tests passed");
 		return 0;
 	}

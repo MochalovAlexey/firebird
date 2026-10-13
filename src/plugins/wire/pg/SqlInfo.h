@@ -27,16 +27,33 @@ enum class CountKind
 	Affected
 };
 
+enum class ControlKind
+{
+	None,
+	Start,
+	Commit,
+	Rollback,
+	CommitRetaining,
+	RollbackRetaining,
+	Savepoint,
+	ReleaseSavepoint,
+	RollbackTo,
+	Session,
+	ResetSession
+};
+
 struct SqlInfo
 {
 	std::string tag;
 	CountKind count = CountKind::None;
 	bool empty = false;
 	bool supported = false;
+	ControlKind control = ControlKind::None;
 };
 
 // Classify the leading command for wire completion and capability checks. This
-// does not validate SQL: use supported/tag only after successful engine prepare.
+// does not validate SQL: use supported/tag/control only after successful engine
+// prepare. ControlKind describes the command, not the current transaction state.
 // The SQL is never modified, split or executed here. empty is true only for an
 // entirely tokenless input, including whitespace and fully closed comments.
 SqlInfo inspectSql(std::string_view sql);

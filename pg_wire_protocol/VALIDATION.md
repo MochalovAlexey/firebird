@@ -1,8 +1,8 @@
 # Проверки реализации
 
-Дата: 12 октября 2026 года. HEAD до текущего рефакторинга P4: `26d4cc3704`, baseline master Firebird 6 `bf94598f8deefeb7cc4a8217ee43b3040d5d6650`. Предыдущие разделы сохраняют историю проверок, включая впоследствии удалённые engine metadata и native metadata executable.
+Дата: 12 октября 2026 года. HEAD до текущего P5: `3657d6a5c1`, baseline master Firebird 6 `bf94598f8deefeb7cc4a8217ee43b3040d5d6650`. Предыдущие разделы сохраняют историю проверок, включая впоследствии удалённые engine metadata и native metadata executable.
 
-Текущий этап: **рефакторинг P4 принят для Linux/Super, IPv4 loopback**. Ограниченная классификация SQL перенесена в PgWire; origin/command/result/DDL additions и EMPTY diagnostic удалены из движка. Полный SQL передаётся штатному prepare без изменений. Прошли полная сборка, четыре unit executables (включая 284 проверки SqlInfo), 12 групп Simple Query, 7 lifecycle, 52 startup и 9 native checks. Прямые драйверы — C libpq 14.24 и psycopg2 2.9.11/libpq 17.6. Результаты текущего рефакторинга приведены в последнем разделе. Следующий этап — P5: explicit transactions и session controls; M1–M3 не приняты.
+Текущий этап: **P5 прошёл целевую Linux/Super IPv4 loopback приёмку** с указанным ниже native AUTO COMMIT ограничением. Production changes ограничены PgWire; parser/DSQL/public metadata не менялись. Полный SQL передаётся штатному prepare без изменений. Прямые драйверы — C libpq 14.24 и psycopg2 2.9.11/libpq 17.6. Следующий этап — P6, серверная приёмка M1; M1–M3 не приняты. При проверках найден отдельный native Debug defect сочетания AUTO COMMIT с READ COMMITTED READ CONSISTENCY, воспроизводимый без PgWire.
 
 ## Окружение и сборка
 
@@ -550,3 +550,88 @@ PASS: **12 Simple Query groups**, **7 lifecycle groups**, **52 startup checks**,
 Первый `simple-01` остановился на неверной fixture `USING DO INSERT ...`: native USING требует parameters, local declarations или autonomous clause и правильно выдал 42000 при prepare. Положительный unsupported case заменён на `USING IN AUTONOMOUS TRANSACTION DO INSERT ...`, исходный оставлен отрицательной проверкой native semantic error. Отдельный SQL-only debug подтвердил исправление; приведённый полный `simple-02` повторил все группы и trace. Production-код для исправления fixture не менялся.
 
 Текущая приёмка относится к Linux/Super loopback и Simple Query. Следующий этап — P5: explicit transactions/session controls; явные COMMIT/ROLLBACK пока получают 0A000, а implicit commit/rollback работают. Extended Query, TLS, Windows/другие server modes и полная CMake сборка не проверены. Close/free fault injection и отдельное истечение engine statement timeout не выполнялись. Рабочий сервер пользователя и его базы не изменялись; для использования текущих исходников в нём нужна пересборка и перезапуск.
+
+
+## P5: explicit transactions и session controls
+
+12 октября 2026 года, HEAD до изменений `3657d6a5c1`. Production-код изменён только в `src/plugins/wire/pg`; diff по `src/dsql`, `src/jrd`, `src/include` пустой. Сборка и все runtime checks используют отдельные `/tmp` runtime/database/security/locks. Рабочий сервер и employee не менялись.
+
+```sh
+cd /tmp/firebird-pgwire-build
+make -j2 > p5-build.log 2>&1
+make -j2 > p5-final-build.log 2>&1
+make -C gen -j2 TARGET=Debug pgwire_tests > p5-tests-build.log 2>&1
+```
+
+Оба полных build passes и сборка tests завершились exit 0. Четыре executables `gen/Debug/firebird/tests/pgwire_{protocol,error,result,sql}_test`, запущенные с `LD_LIBRARY_PATH=/tmp/firebird-pgwire-build/gen/Debug/firebird/lib`, прошли; SQL classifier — 487 assertions. Проверяются native control prefixes, quoted identifiers/comments, отсутствие замены SQL, failed-prepare whitelist и приоритет syntax/privilege/cancel/fatal diagnostics над 25P02.
+
+Runtime запускается из корня workspace. Для повторения нужны **новые** work directories:
+
+```sh
+python3 -B pg_wire_protocol/tools/pgwire_transaction_smoke.py \
+  --firebird-dir /tmp/firebird-pgwire-build/gen/Debug/firebird \
+  --work-dir /tmp/firebird-pgwire-p5-transactions-03 \
+  --libpq-include-dir /tmp/firebird-pgwire-p3-deps/libpq-dev/usr/include/postgresql \
+  --libpq-library /lib/x86_64-linux-gnu/libpq.so.5
+
+python3 -B pg_wire_protocol/tools/pgwire_simple_query_smoke.py \
+  --firebird-dir /tmp/firebird-pgwire-build/gen/Debug/firebird \
+  --work-dir /tmp/firebird-pgwire-p5-simple-01 \
+  --libpq-include-dir /tmp/firebird-pgwire-p3-deps/libpq-dev/usr/include/postgresql \
+  --libpq-library /lib/x86_64-linux-gnu/libpq.so.5 \
+  --driver-python /tmp/firebird-pgwire-p3-deps/venv/bin/python
+
+python3 -B pg_wire_protocol/tools/pgwire_lifecycle_smoke.py \
+  --firebird-dir /tmp/firebird-pgwire-build/gen/Debug/firebird \
+  --work-dir /tmp/firebird-pgwire-p5-lifecycle-01
+python3 -B pg_wire_protocol/tools/pgwire_startup_smoke.py \
+  --firebird-dir /tmp/firebird-pgwire-build/gen/Debug/firebird \
+  --work-dir /tmp/firebird-pgwire-p5-startup-01
+python3 -B pg_wire_protocol/tools/native_baseline.py \
+  --firebird-dir /tmp/firebird-pgwire-build/gen/Debug/firebird \
+  --work-dir /tmp/firebird-pgwire-p5-native-01
+```
+
+P5 checks наблюдают фактические wire I/T/E и `PQtransactionStatus`, сравнивают видимость с независимым native TCP attachment и считают application transactions через MON$TRANSACTIONS после каждого запроса. В I их 0, в T/E — 1; обычный Query сохраняет transaction ID, RESET в T меняет underlying ID. Поддержаны full controls в I, native RETAIN, повторный start, commit failed block как rollback, recovery через savepoints с сохранением ранних изменений, EMPTY в I/T/E, READ ONLY/SNAPSHOT, READ COMMITTED visibility, NO AUTO UNDO и disconnect rollback. Failed prepare проверяет missing relation, missing column, syntax и permission отдельно; sequence guard доказывает отсутствие execution в E.
+
+Session checks проверяют реальные ROLE, TIME ZONE, USER_SESSION context, timeouts, SEARCH_PATH и BIND. Длинный native procedure SELECT после `SET STATEMENT TIMEOUT 100 MILLISECOND` прерывается с 57014 как в implicit, так и explicit transaction, откатывает побочные эффекты и сохраняет правильное I/E. Statement timeout выбирается как минимум IOTimeout и ненулевого native attachment timeout; раньше request timeout перекрывал attachment setting.
+
+Реальные database triggers вызывают ошибки explicit COMMIT и ALTER SESSION RESET. Клиент получает FATAL без CommandComplete/ReadyForQuery, затем EOF; native observer подтверждает rollback, следующий login работает. Fault triggers активны только на время этой группы. P4 regression отдельно повторяет реальную ошибку implicit commit. Synthetic failures cursor close/statement free не инъецировались.
+
+### Найденный native AUTO COMMIT defect
+
+Первый запуск `/tmp/firebird-pgwire-p5-transactions-01/summary.json` прошёл первые восемь групп, затем native isql оборвал Debug server с SIGABRT до соответствующего PgWire AUTO COMMIT test. Assertion: `m_transaction->tra_save_point->getNumber() == m_number`, `src/jrd/Savepoint.cpp:833`.
+
+Независимое воспроизведение в `/tmp/firebird-native-autocommit-xolgpdwd` использует только embedded isql, `Providers=Engine14`, отдельную БД, без сервера и PgWire. Явный `SET AUTODDL OFF` исключает автокоммит DDL клиентом:
+
+```sql
+SET AUTODDL OFF;
+CREATE TABLE T (ID INTEGER);
+COMMIT;
+SET TRANSACTION READ WRITE READ COMMITTED READ CONSISTENCY AUTO COMMIT;
+INSERT INTO T VALUES (1);
+```
+
+INSERT вызывает тот же SIGABRT. Backtrace (`gdb_autoddl_off.log`): `JStatement::execute` → `DsqlDmlRequest::execute` → `executeReceiveWithRestarts` → `AutoSavePoint::release`. По исходникам, wrapper read-consistency restart держит AutoSavePoint, тогда как AUTO COMMIT внутри execution завершает retaining и меняет savepoint. Падение воспроизводится без triggers; изначальная гипотеза о commit-trigger interaction не подтвердилась.
+
+Native `SET TRANSACTION ... AUTO COMMIT; ROLLBACK` без DML завершился успешно. `SNAPSHOT AUTO COMMIT` с INSERT, затем ROLLBACK также завершился успешно, после чего COUNT(*)=1 подтверждает сохранённый auto-commit effect. Поэтому итоговый P5 fixture проверяет AUTO COMMIT в SNAPSHOT; сочетание с READ COMMITTED READ CONSISTENCY остаётся известным ограничением текущего native Debug baseline. В плагин не добавлены разбор этих опций, их подмена или обход assertion; engine не менялся. Поведение Release-сборки не проверялось.
+
+Промежуточный `/tmp/firebird-pgwire-p5-transactions-02/summary.json` прошёл 13 групп с явным пропуском AUTO COMMIT DML; это не итоговая проверка AUTO COMMIT. Окончательный результат полного fixture приведён ниже.
+
+
+### Итог P5
+
+| Проверка | Результат / свидетельство |
+|---|---|
+| Полная Debug сборка и 4 unit executables | PASS; `p5-final-build.log`, `p5-tests-build.log`; 487 SqlInfo assertions |
+| P5 native transactions/session controls | PASS, 14 групп, без пропусков; `/tmp/firebird-pgwire-p5-transactions-03/summary.json` |
+| Simple Query regression | PASS, 12 групп; `/tmp/firebird-pgwire-p5-simple-01/summary.json` |
+| Lifecycle regression | PASS, 7 групп; `/tmp/firebird-pgwire-p5-lifecycle-01/summary.json` |
+| Startup/authentication regression | PASS, 52 checks; `/tmp/firebird-pgwire-p5-startup-01/summary.json` |
+| Native baseline | PASS, 9 checks; `/tmp/firebird-pgwire-p5-native-01/summary.json` |
+
+P5 C libpq использует headers/runtime 14.24, реально наблюдает IDLE/INTRANS/INERROR и savepoint recovery. Simple Query regression дополнительно проверяет psycopg2 2.9.11 с libpq 17.6 в autocommit mode. Финальный AUTO COMMIT case — native/PgWire SNAPSHOT с проверкой MON$AUTO_COMMIT, MON$ISOLATION_MODE, durable visibility и невозможности отменить предыдущий commit поздним rollback.
+
+Отдельный P5 trace phase (startup/authentication/контрольный SELECT/shutdown) показал 0 backend connect attempts; 49 Unix OS/NSS attempts учтены отдельно. Это не трасса каждого transactional statement. Simple Query и startup trace также показали 0 backend connects. В итоговых runtime groups все servers завершились exit 0 без forced kill; SIGTERM shutdown занял 0.114–0.166 s.
+
+Область результата — P5 на Linux/Super, IPv4 loopback, native compatible SQL. READ COMMITTED READ CONSISTENCY AUTO COMMIT остаётся известным native Debug defect. Остальные transaction options не обещают семантику PostgreSQL. Полная M1 приёмка P6, SuperClassic/Windows/TLS, Extended Query, PostgreSQL BEGIN/$n, close/free failure injection и отдельные live effects DECFLOAT/OPTIMIZE/TRUSTED ROLE не объявляются выполненными. Native timers ограничивают DML execution/fetch, без hard deadline для prepare, DDL или transaction/session controls. Планы и ручной двухклиентский сценарий обновлены.

@@ -2,7 +2,7 @@
 
 База — `master` Firebird 6, SHA из [BASELINE.md](BASELINE.md). Архитектура и SQL boundary определены в [ARCHITECTURE.md](ARCHITECTURE.md), transaction contract — в [CODEX_CONTEXT.md](CODEX_CONTEXT.md), заявляемые возможности — в [COMPATIBILITY.md](COMPATIBILITY.md).
 
-Исходный Python scaffold содержит 20 функций/56 параметризованных случаев и требует миграции. Начальные host tests расположены в src/common/tests/WireProtocolConfigTest.cpp, src/remote/server/wire/tests и isolated tools harness. P2/P3 и прежняя P4 приёмка сохранены в VALIDATION. Текущий рефакторинг удалил engine additions и native metadata executable и прошёл целевую Linux/Super loopback приёмку. Ниже различаются выполненный P4 профиль и будущая матрица; перечисление проверки за его пределами не означает PASS.
+Исходный Python scaffold содержит 20 функций/56 параметризованных случаев и требует миграции. Начальные host tests расположены в src/common/tests/WireProtocolConfigTest.cpp, src/remote/server/wire/tests и isolated tools harness. P2/P3/P4 приёмка сохранена в VALIDATION. P5 прошёл целевую Linux/Super приёмку с native ограничением READ CONSISTENCY + AUTO COMMIT; P6/M1 остаётся следующим этапом. PASS относится к зафиксированным cases/fixtures, а наличие строки в полной матрице не означает её прохождения.
 
 ## Этапы и обязательный минимум
 
@@ -13,7 +13,7 @@
 | M2 | Extended Query, prepared statements/portals, native placeholders и расширенные codecs |
 | M3 | TLS/удалённый TCP/cancellation и проверенный профиль приложения с явными SQL dependencies |
 
-BEGIN/$n и SQL, который parser пока не поддерживает, не входят в успешный profile. Прежние M0/P3 результаты и SELECT-only guards являются историей в VALIDATION; текущие RETURNING/blocks проверяются положительно при поддержанных metadata. Удалённый native metadata executable не является зависимостью harness.
+BEGIN/START TRANSACTION/RETAINING/$n и SQL, который parser пока не поддерживает, не входят в успешный profile. Native retaining проверяется через `COMMIT/ROLLBACK [WORK] RETAIN [SNAPSHOT]`. Прежние M0/P3 результаты и SELECT-only guards являются историей в VALIDATION; текущие RETURNING/blocks проверяются положительно при поддержанных metadata. Удалённый native metadata executable не является зависимостью harness.
 
 Минимальные серверные gates сохраняются независимо от внутреннего способа classification:
 
@@ -28,9 +28,15 @@ BEGIN/$n и SQL, который parser пока не поддерживает, �
 | M0-07 | EOF/incomplete startup/shutdown освобождают attachments/sessions/workers до unload |
 | M0-08 | Prepare использует исходный SQL; descriptor и штатные input/output/flags проверяются до execution. Unsupported capabilities не дают частичных эффектов, supported RETURNING работает |
 
-## P4 после переноса классификации в плагин — Linux/Super loopback PASS
+## P5 — целевая Linux/Super приёмка PASS с native ограничением
 
-Текущий [pgwire_simple_query_smoke.py](tools/pgwire_simple_query_smoke.py) прошёл 12 групп, включая реальные raw TCP, C libpq, psycopg2 autocommit, lexical boundary, native AUTOTERM и trace. [pgwire_lifecycle_smoke.py](tools/pgwire_lifecycle_smoke.py) прошёл 7 групп, startup/native regressions — 52/9 checks. Full make и четыре unit executable прошли; SQL classifier — 284 assertions. Версии: C headers/runtime libpq 14.24, psycopg2 2.9.11/libpq 17.6. Backend network connects — 0, все серверы завершились с exit 0. Полные evidence, ограничения и исторические результаты — в [VALIDATION.md](VALIDATION.md). Следующий этап — P5.
+Финальный transaction harness прошёл 14 групп без skips: I/T/E, raw ReadyForQuery/PQtransactionStatus, visibility через native observer, savepoint/retaining recovery, session SET/RESET, 100 ms DML timeout в I/T, error precedence, SNAPSHOT AUTO COMMIT, NO AUTO UNDO, disconnect и реальные commit/reset errors, C libpq и connect trace. Backend connects — 0; серверы завершились с exit 0. Full build и четыре unit executable (487 classifier checks), Simple Query 12, lifecycle 7, startup 52 и native 9 прошли отдельно. Evidence — в VALIDATION. Это целевой profile, не автоматический PASS всех вариантов T01–T14 и остальной матрицы; P6/M1 ещё не завершён.
+
+Текущий [pgwire_transaction_smoke.py](tools/pgwire_transaction_smoke.py) проверяет AUTO COMMIT DML с SNAPSHOT и отдельно NO AUTO UNDO. Native SNAPSHOT baseline положительный. Дефект AUTO COMMIT с READ COMMITTED READ CONSISTENCY воспроизводит assertion `Savepoint.cpp:833` в restart path через embedded isql без PgWire/server/triggers; этот profile не входит в подтверждённую совместимость и требует повторного теста после native fix. Evidence независимых native repro и точная команда прогона записываются в VALIDATION; core/SQL options для обхода не меняются.
+
+## Исторический P4 после переноса классификации — Linux/Super loopback PASS
+
+P4-ревизия [pgwire_simple_query_smoke.py](tools/pgwire_simple_query_smoke.py) прошла 12 групп, включая raw TCP, C libpq, psycopg2 autocommit, lexical boundary, native AUTOTERM и trace. [pgwire_lifecycle_smoke.py](tools/pgwire_lifecycle_smoke.py) прошёл 7 групп, startup/native regressions — 52/9 checks. Full make и четыре unit executable прошли; SQL classifier — 284 assertions. Версии: C headers/runtime libpq 14.24, psycopg2 2.9.11/libpq 17.6. Backend network connects — 0, все серверы завершились с exit 0. Evidence и ограничения — в [VALIDATION.md](VALIDATION.md). Прежние negative expectations controls в P4-08/10 заменяются P5 positive/state checks; остальная regression сохраняется.
 
 | ID | Проверка и критерий |
 |---|---|
@@ -127,7 +133,7 @@ Startup SQLSTATE проверять raw ErrorResponse field `C`: `psycopg2.conne
 | W06 | Native keepalive/crypt/compression и parallel sessions | PG stream не получает native bytes; framing/auth/SQL state разных sessions независимы |
 | W07 | Байты SQL на входе и в parser | Instrumented boundary сверяет bytes/length для comments, quotes, semicolons, whitespace и UTF8; wire frontend не нормализует и не переписывает SQL |
 | W08 | EMPTY и malformed SQL | Исходный SQL проходит engine prepare; только tokenless closed-comments/whitespace + syntax 42601 даёт EMPTY. Незаконченные tokens, vertical tab и отдельный `;` остаются errors; non-syntax errors сохраняются |
-| W09 | `BEGIN`, `$1`, `::date` и похожие tokens внутри literals/comments | Пока parser их не поддерживает в соответствующих позициях — engine syntax errors; внутри literals/comments смысл определяет parser; frontend replacement отсутствует |
+| W09 | `BEGIN`, `START TRANSACTION`, `COMMIT RETAINING`, `$1`, `::date` и похожие tokens внутри literals/comments | Engine syntax errors в неподдержанных позициях; внутри literals/comments смысл определяет parser. Ошибка в T переводит в E; в E syntax сохраняет 42601. Native RETAIN [SNAPSHOT] проверяется положительно, frontend replacement отсутствует |
 | W10 | Несколько statements в одном Query/Parse | Parser отвергает неподдержанный batch без частичного исполнения; `;` внутри совместимого SQL не разделяется frontend |
 | W11 | Native callers и isql -autoterm | Штатные parser diagnostics, continuation и trace не меняются; PgWire не добавляет public EMPTY marker или metadata API |
 
@@ -135,7 +141,7 @@ W07 требует code review неизменной передачи SQL и TCP 
 
 ## Q/T. DSQL metadata, выполнение и транзакции
 
-Используются штатные getType/getFlags/input/output/affected records и ограниченный plugin-local command/control descriptor. Новые public engine metadata, parser observer и pre-prepare analysis API не требуются. Будущий E-state использует обычный prepare и реальный transaction handle; ниже перечислены дальнейшие M1 проверки.
+Используются штатные getType/getFlags/input/output/affected records и plugin-local command/control descriptor. Новые public engine metadata, parser observer и pre-prepare analysis API не требуются. P5 E-state использует обычный prepare и реальный transaction handle; следующие проверки обязательны для его acceptance и дальнейшего M1.
 
 | ID | Сценарий | Критерий |
 |---|---|---|
@@ -143,21 +149,23 @@ W07 требует code review неизменной передачи SQL и TCP 
 | Q02 | CREATE/DROP/ALTER и другие доступные DDL | Tag задаётся ограниченным plugin descriptor после engine prepare; изменение видно native observer после commit |
 | Q03 | INSERT VALUES/SELECT, UPDATE, DELETE, MERGE, UPDATE OR INSERT с/без RETURNING | Реальные rows и affected counts, tag исходной операции; cursor не превращает DML в SELECT, coarse INSERT type не маскирует MERGE |
 | Q04 | Supported SQL с unsupported input/output capability | Отказ по metadata до side effects; не blanket rejection синтаксической формы RETURNING |
-| Q05 | SET TRANSACTION, COMMIT/ROLLBACK, RETAINING, SAVEPOINT и session-origin operations | Plugin-local descriptor различает action/retaining/session profile после engine prepare; фактический эффект и transaction handle контролируются |
+| Q05 | SET TRANSACTION, COMMIT/ROLLBACK RETAIN [SNAPSHOT], SAVEPOINT и session operations | Plugin-local descriptor различает actions после engine prepare и сверяется с legacy type. Tags: BEGIN/COMMIT/ROLLBACK/SAVEPOINT/RELEASE/SET/RESET; фактический effect и transaction handle контролируются |
 | Q06 | Native/PG cross-visibility в обе стороны | Одна база, штатные права и commit/rollback; native клиент не участвует в PG execution path |
 | Q07 | Prepare/fetch/execute/commit errors | Нет ложного CommandComplete; исходная ошибка не затёрта cleanup; uncertain transaction state завершает connection |
-| T01 | Обычный implicit Query | Настоящий commit после успешного исполнения, rollback после ошибки, state I; retaining не подменяет завершение |
+| T01 | Обычный implicit Query | Prepare с NULL, затем READ WRITE / READ COMMITTED READ CONSISTENCY / WAIT TPB с lock timeout ceil(IOTimeout/1000). Commit до CommandComplete, rollback после ошибки, state I; retaining не подменяет завершение |
 | T02 | Native SET TRANSACTION из I, native COMMIT/ROLLBACK | Реальная transaction, T/I, isolation/read-only и cross-session visibility. Повторный SET TRANSACTION при active handle — 25001/E с сохранением transaction |
 | T03 | Ошибка в explicit transaction | Native handle сохраняется, state E; успешно подготовленные обычный SQL/SAVEPOINT/RELEASE/COMMIT RETAIN получают 25P02 без execution и открытия новой transaction. Ошибки самого prepare имеют precedence из T11 |
 | T04 | Полный COMMIT/ROLLBACK из E | COMMIT выполняет rollback и возвращает ROLLBACK/I; ROLLBACK также завершает transaction; ещё незафиксированные изменения не сохранены; native AUTO COMMIT проверяется отдельно T09 |
-| T05 | Native RETAINING в T/E/I | В T реальная retaining operation остаётся T; E + ROLLBACK RETAIN возвращает T после rollback retaining; E + COMMIT RETAIN даёт 25P02/E; в I RETAIN — 25000/I |
-| T06 | SAVEPOINT → изменение → ошибка → ROLLBACK TO → продолжение | Успешный rollback-to возвращает T и сохраняет изменения до savepoint; неверный savepoint даёт error/E; нельзя незаметно откатить весь transaction |
+| T05 | Native COMMIT/ROLLBACK [WORK] RETAIN [SNAPSHOT] в T/E/I | В T retaining остаётся T с реальным commit/rollback; E + ROLLBACK RETAIN восстанавливает T; E + COMMIT RETAIN даёт 25P02/E; в I RETAIN — 25000/I. Lifecycle savepoints сверяется с native API |
+| T06 | SAVEPOINT → изменение → ошибка → ROLLBACK TO → продолжение; RELEASE [ONLY] | Rollback-to возвращает T и сохраняет прежние изменения; неверный savepoint даёт error/E. Имена в quotes и имена RETAIN/WORK не путаются с controls. RELEASE SAVEPOINT name [ONLY] имеет native effect; все savepoint actions в I дают 25000/I |
 | T07 | Полный COMMIT/ROLLBACK в I | Подготовленный native control и локальный descriptor дают no-op/I, optional notice |
 | T08 | Disconnect с незавершённой transaction | Rollback и освобождение lock; native observer подтверждает отсутствие uncommitted changes |
-| T09 | Native AUTO COMMIT / NO AUTO UNDO | Control descriptor и engine execution сохраняют выбранные характеристики; visibility/error/savepoints соответствуют native API. Уже совершённые AUTO COMMIT commits сохраняются после последующего rollback; ложной атомарности PG block нет |
-| T10 | ALTER SESSION RESET в I/T/E, включая ошибку reset | Engine-derived effect учитывает смену transaction при том же interface pointer; portals/savepoints/session metadata обновлены. В T новая transaction остаётся T, в I остаётся I, в E отказ 25P02. Если reset закрыл attachment — FATAL/close, без ложного recovery |
-| T11 | Обычный prepare в E: syntax, semantic, cancel/timeout, shutdown, invalid handle, resource/I/O | Lexer/parser error возвращает 42601/E; известный ordinary semantic failure переводится в 25P02/E по таблице. Отмена/timeout сохраняет свою причину; fatal/invalid-handle/shutdown и resource/I/O не маскируются 25P02, выполняется необходимый cleanup/close. Неизвестный error сохраняет диагностику; отвергнутый statement не выполняет DML/DDL |
-| T12 | Число current application transactions в PgWire session | В I/T/E и после control errors session управляет максимум одним handle; нет скрытой второй application transaction. Engine system/security/autonomous transactions отделяются при подсчёте; native protocol и другие host plugins этим правилом не ограничиваются |
+| T09 | Native SNAPSHOT AUTO COMMIT / NO AUTO UNDO | Lexer не сканирует опции; SNAPSHOT AUTO COMMIT проверяется native/PG visibility и сохранением прежних commits после rollback. NO AUTO UNDO/savepoint recovery проверяется независимо. AUTO COMMIT + READ COMMITTED READ CONSISTENCY имеет отдельный native Savepoint assertion и не входит в заявленное покрытие |
+| T10 | ALTER SESSION RESET в I/T/E, включая ошибку reset | Проверяются сброс USER_SESSION/settings, rollback и новая native transaction при возможном прежнем interface pointer. В T сохраняется T, в I — I, в E — 25P02 без reset. P5 не кэширует statements/portals/savepoint names; M2 caches проверяются отдельно. Invalid attachment/handle после reset требует FATAL/close |
+| T11 | Prepare в E: actual missing relation, syntax, permission, cancel/timeout, fatal и unknown error | Только native isc_dsql_relation_err с итоговым nonfatal 42P01 даёт 25P02; explicit SQLSTATE 42P01 без причины не входит в whitelist. Syntax 42601 и permission 42501 сохраняются. Отмена/timeout, shutdown/invalid handle, resource/I/O и unknown errors не маскируются. Проверяются full-vector priority и отсутствие execution |
+| T12 | Число current application transactions и phase boundaries | QueryExecutor владеет максимум одним handle; prepare в I получает NULL, в T/E — current и видит uncommitted DDL. Нет cached statement transaction. Engine system/security/autonomous transactions отделяются при подсчёте; native и другие plugins этим правилом не ограничиваются |
+| T13 | Native session SET whitelist в I/T/E | ROLE/TRUSTED ROLE, DEBUG OPTION, DECFLOAT ROUND/TRAPS, idle/statement timeout, TIME ZONE, BIND, OPTIMIZE, SEARCH_PATH: settings реально меняются и выдаётся SET, I/T сохраняются; в E после successful prepare — 25P02 без effect. Ненулевой attachment timeout ограничивает DML через min с IOTimeout; проверить 100 ms timeout в I/T, реальный interrupt и recovery. Не заявлять hard deadline prepare/DDL/controls |
+| T14 | EMPTY в I/T/E | EmptyQueryResponse сохраняет прежнее состояние и transaction; изменения/savepoints не теряются. Отдельный semicolon и unfinished SQL/comment остаются ошибками, не EMPTY |
 
 Заявленные transaction characteristics и session operations меняют реальное engine state. Неподдержанные descriptor/API/codecs получают отказ после prepare до execution. Legacy getType/getFlags и native diagnostics не изменяются; control classification покрывается отдельными tests вместе с фактическими handles/effects.
 
