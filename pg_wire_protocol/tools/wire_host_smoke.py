@@ -130,7 +130,7 @@ QUIT;
                 section += f"Config = {alias}Config\n"
             section += "}\n"
             values = {"BindAddress": "127.0.0.1", "Workers": "1", "QueueSize": "1",
-                      "IOTimeout": "30000", "Label": endpoint.get("label", alias), "Mode": "tcp_echo"}
+                      "Label": endpoint.get("label", alias), "Mode": "tcp_echo"}
             values.update(endpoint.get("config", {}))
             settings = "".join(f"{key} = {value}\n" for key, value in values.items())
             settings += endpoint.get("raw_config", "")
@@ -280,13 +280,12 @@ QUIT;
             ("PortOverride", {"Port": "12345"}), ("UnsafeBind", {"BindAddress": "0.0.0.0"}),
             ("WorkersZero", {"Workers": "0"}), ("WorkersLarge", {"Workers": "17"}),
             ("QueueZero", {"QueueSize": "0"}), ("QueueLarge", {"QueueSize": "65"}),
-            ("TimeoutZero", {"IOTimeout": "0"}), ("TimeoutLarge", {"IOTimeout": "300001"}),
             ("UnsupportedTLS", {"TLS": "Required"}),
         ]
         ports = iter(reserve_ports(6 + len(invalid_configs)))
         native, configured_native = next(ports), next(ports)
         first = {"alias": "First", "port": next(ports), "label": "first",
-                 "file_config": True, "config": {"IOTimeout": "1500"}}
+                 "file_config": True}
         missing = {"alias": "Missing", "port": next(ports), "module": self.work / "does_not_exist"}
         second = {"alias": "Second", "port": next(ports), "label": "second", "config": {"Workers": "2"}}
         invalid = [{"alias": alias, "port": next(ports), "config": config}
@@ -302,8 +301,8 @@ QUIT;
         other.sendall(b"second remains independent")
         require(receive_exact(other, 26) == b"second remains independent", "second endpoint echo mismatch")
         # The first alias has no named Config. Its greeting above proves that
-        # the factory read the module .conf; these non-default worker/queue and
-        # idle limits prove that the host read that same fallback configuration.
+        # the factory read the module .conf; these non-default worker/queue
+        # limits prove that the host read that same fallback configuration.
         # Active worker and one queued socket leave no room for a third socket.
         queued = self.connect(first["port"])
         queued.sendall(b"queued bytes")
@@ -318,27 +317,7 @@ QUIT;
         active.close()
         require(receive_exact(queued, len(b"first\nqueued bytes")) == b"first\nqueued bytes",
                 "queued socket did not start after the worker became free")
-        # The finite configured timeout must close a real idle socket.
-        started = time.monotonic()
-        require_closed(queued, 5)
-        require(0.5 < time.monotonic() - started < 5, "unexpected idle transport timeout")
-        # Keep the only worker busy with real progress while a queued peer ages
-        # out, so queue expiry cannot accidentally pass through worker release.
-        busy = self.connect(first["port"], "first")
-        expired = self.connect(first["port"])
-        deadline = time.monotonic() + 5
-        while True:
-            busy.sendall(b"a")
-            require(receive_exact(busy, 1) == b"a", "busy worker stopped before queue expiry")
-            expired.settimeout(0.1)
-            try:
-                require(expired.recv(1) == b"", "queued peer ran before the worker was released")
-                break
-            except ConnectionResetError:
-                break
-            except socket.timeout:
-                require(time.monotonic() < deadline, "queued connection did not expire")
-        busy.close()
+        queued.close()
         self.native_probe("native_after_queue_pressure")
         self.isql("wrong_password", "QUIT;\n", bad_password=True)
         self.isql("transactions", """INSERT INTO WIRE_HOST_ROWS VALUES (1);
@@ -365,7 +344,7 @@ QUIT;
         for endpoint in [missing] + invalid:
             require(f"{endpoint['alias']}:plugin.create" not in events,
                     f"invalid endpoint instantiated plugin: {endpoint['alias']}")
-        # Two sessions with a long I/O timeout must be woken by shutdown, including
+        # Two sessions blocked on I/O must be woken by shutdown, including
         # one peer that has only sent part of a message/stream.
         partial = self.connect(second["port"], "second")
         partial.sendall(b"x")
@@ -378,7 +357,6 @@ QUIT;
                                        module_file_fallback_shared_by_host_and_factory=True,
                                        native_auth_and_transactions=True, missing_middle_preserves_ports=True,
                                        invalid_endpoints_isolated=True, worker_and_queue_bounds=True,
-                                       queued_connection_expires=True, real_idle_timeout=True,
                                        shutdown_wakes_idle_and_partial_sessions=True,
                                        session_plugin_module_release_order=True)
 

@@ -808,8 +808,8 @@ type
 	IWireProtocol_createSessionPtr = function(this: IWireProtocol; status: IStatus; host: IWireServerHost; connection: IWireConnection): IWireSession; cdecl;
 	IWireSession_runPtr = procedure(this: IWireSession; status: IStatus); cdecl;
 	IWireSession_stopPtr = procedure(this: IWireSession); cdecl;
-	IWireConnection_readPtr = function(this: IWireConnection; status: IStatus; size: Cardinal; buffer: Pointer; timeoutMs: Cardinal): Cardinal; cdecl;
-	IWireConnection_writePtr = function(this: IWireConnection; status: IStatus; size: Cardinal; buffer: Pointer; timeoutMs: Cardinal): Cardinal; cdecl;
+	IWireConnection_readPtr = function(this: IWireConnection; status: IStatus; size: Cardinal; buffer: Pointer): Cardinal; cdecl;
+	IWireConnection_writePtr = function(this: IWireConnection; status: IStatus; size: Cardinal; buffer: Pointer): Cardinal; cdecl;
 	IWireConnection_shutdownPtr = procedure(this: IWireConnection); cdecl;
 	IWireConnection_getPeerAddressPtr = function(this: IWireConnection): PAnsiChar; cdecl;
 	IWireConnection_getPeerPortPtr = function(this: IWireConnection): Cardinal; cdecl;
@@ -4299,8 +4299,8 @@ type
 	IWireConnection = class(IReferenceCounted)
 		const VERSION = 3;
 
-		function read(status: IStatus; size: Cardinal; buffer: Pointer; timeoutMs: Cardinal): Cardinal;
-		function write(status: IStatus; size: Cardinal; buffer: Pointer; timeoutMs: Cardinal): Cardinal;
+		function read(status: IStatus; size: Cardinal; buffer: Pointer): Cardinal;
+		function write(status: IStatus; size: Cardinal; buffer: Pointer): Cardinal;
 		procedure shutdown();
 		function getPeerAddress(): PAnsiChar;
 		function getPeerPort(): Cardinal;
@@ -4312,8 +4312,8 @@ type
 
 		procedure addRef(); virtual; abstract;
 		function release(): Integer; virtual; abstract;
-		function read(status: IStatus; size: Cardinal; buffer: Pointer; timeoutMs: Cardinal): Cardinal; virtual; abstract;
-		function write(status: IStatus; size: Cardinal; buffer: Pointer; timeoutMs: Cardinal): Cardinal; virtual; abstract;
+		function read(status: IStatus; size: Cardinal; buffer: Pointer): Cardinal; virtual; abstract;
+		function write(status: IStatus; size: Cardinal; buffer: Pointer): Cardinal; virtual; abstract;
 		procedure shutdown(); virtual; abstract;
 		function getPeerAddress(): PAnsiChar; virtual; abstract;
 		function getPeerPort(): Cardinal; virtual; abstract;
@@ -10616,15 +10616,15 @@ begin
 	WireSessionVTable(vTable).stop(Self);
 end;
 
-function IWireConnection.read(status: IStatus; size: Cardinal; buffer: Pointer; timeoutMs: Cardinal): Cardinal;
+function IWireConnection.read(status: IStatus; size: Cardinal; buffer: Pointer): Cardinal;
 begin
-	Result := WireConnectionVTable(vTable).read(Self, status, size, buffer, timeoutMs);
+	Result := WireConnectionVTable(vTable).read(Self, status, size, buffer);
 	FbException.checkException(status);
 end;
 
-function IWireConnection.write(status: IStatus; size: Cardinal; buffer: Pointer; timeoutMs: Cardinal): Cardinal;
+function IWireConnection.write(status: IStatus; size: Cardinal; buffer: Pointer): Cardinal;
 begin
-	Result := WireConnectionVTable(vTable).write(Self, status, size, buffer, timeoutMs);
+	Result := WireConnectionVTable(vTable).write(Self, status, size, buffer);
 	FbException.checkException(status);
 end;
 
@@ -18615,21 +18615,21 @@ begin
 	end
 end;
 
-function IWireConnectionImpl_readDispatcher(this: IWireConnection; status: IStatus; size: Cardinal; buffer: Pointer; timeoutMs: Cardinal): Cardinal; cdecl;
+function IWireConnectionImpl_readDispatcher(this: IWireConnection; status: IStatus; size: Cardinal; buffer: Pointer): Cardinal; cdecl;
 begin
 	Result := 0;
 	try
-		Result := IWireConnectionImpl(this).read(status, size, buffer, timeoutMs);
+		Result := IWireConnectionImpl(this).read(status, size, buffer);
 	except
 		on e: Exception do FbException.catchException(status, e);
 	end
 end;
 
-function IWireConnectionImpl_writeDispatcher(this: IWireConnection; status: IStatus; size: Cardinal; buffer: Pointer; timeoutMs: Cardinal): Cardinal; cdecl;
+function IWireConnectionImpl_writeDispatcher(this: IWireConnection; status: IStatus; size: Cardinal; buffer: Pointer): Cardinal; cdecl;
 begin
 	Result := 0;
 	try
-		Result := IWireConnectionImpl(this).write(status, size, buffer, timeoutMs);
+		Result := IWireConnectionImpl(this).write(status, size, buffer);
 	except
 		on e: Exception do FbException.catchException(status, e);
 	end

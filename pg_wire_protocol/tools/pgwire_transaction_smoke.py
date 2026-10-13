@@ -202,7 +202,7 @@ QUIT;
         client = TransactionClient(self).login()
         self.sql(client, 'SELECT CAST(MON$ISOLATION_MODE AS INTEGER), CAST(MON$LOCK_TIMEOUT AS INTEGER) '
                  'FROM MON$TRANSACTIONS WHERE MON$TRANSACTION_ID=CURRENT_TRANSACTION',
-                 tag='SELECT 1', rows=[(4, 30)])
+                 tag='SELECT 1', rows=[(4, -1)])
         self.sql(client, 'INSERT INTO P5_ROWS VALUES(101,1)', tag='INSERT 0 1')
         self.seen(101, 1)
         self.start_transaction(client)
@@ -502,7 +502,7 @@ QUIT;
 
     def run_transactions(self):
         native, configured, port = reserve_ports(3)
-        self.start('transactions', native, configured, [{'alias': 'PgWire', 'port': port, 'timeout': 30000}])
+        self.start('transactions', native, configured, [{'alias': 'PgWire', 'port': port}])
         self.close_client(TransactionClient(self).login())
         for name, action in (
             ('implicit_explicit_commit_rollback_and_native_visibility', self.visibility),

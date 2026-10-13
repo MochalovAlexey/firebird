@@ -15,11 +15,8 @@
 #include "../../SocketConnection.h"
 #include "../common/classes/ImplementHelper.h"
 
-#include <algorithm>
 #include <atomic>
 #include <cerrno>
-#include <chrono>
-#include <climits>
 #include <string>
 #include <fcntl.h>
 #include <poll.h>
@@ -83,19 +80,19 @@ class SocketConnection final :
 	public RefCntIface<IWireConnectionImpl<SocketConnection, CheckStatusWrapper>>
 {
 public:
-	SocketConnection(SocketHandle& owner, unsigned defaultTimeoutMs, const char* peerAddress, unsigned peerPort)
-		: defaultTimeoutMs(defaultTimeoutMs), peerAddress(peerAddress), peerPort(peerPort),
+	SocketConnection(SocketHandle& owner, const char* peerAddress, unsigned peerPort)
+		: peerAddress(peerAddress), peerPort(peerPort),
 		  socket(owner.release())
 	{}
 
-	unsigned read(CheckStatusWrapper* status, unsigned size, void* buffer, unsigned timeoutMs) override
+	unsigned read(CheckStatusWrapper* status, unsigned size, void* buffer) override
 	{
-		return transfer(status, size, buffer, nullptr, timeoutMs);
+		return transfer(status, size, buffer, nullptr);
 	}
 
-	unsigned write(CheckStatusWrapper* status, unsigned size, const void* buffer, unsigned timeoutMs) override
+	unsigned write(CheckStatusWrapper* status, unsigned size, const void* buffer) override
 	{
-		return transfer(status, size, nullptr, buffer, timeoutMs, true);
+		return transfer(status, size, nullptr, buffer, true);
 	}
 
 	void shutdown() override
@@ -113,8 +110,6 @@ public:
 	FB_BOOLEAN isEncrypted() override { return FB_FALSE; }
 
 private:
-	using Clock = std::chrono::steady_clock;
-
 	~SocketConnection() override = default;
 
 	unsigned fail(CheckStatusWrapper* status, bool writing, int error) const
@@ -125,7 +120,7 @@ private:
 	}
 
 	unsigned transfer(CheckStatusWrapper* status, unsigned size, void* input, const void* output,
-		unsigned timeoutMs, bool writing = false)
+		bool writing = false)
 	{
 		if (stopped.load())
 			return fail(status, writing, ECANCELED);
@@ -134,15 +129,10 @@ private:
 		if (writing ? !output : !input)
 			return fail(status, writing, EINVAL);
 
-		const auto timeout = std::chrono::milliseconds(
-			timeoutMs ? std::min(timeoutMs, defaultTimeoutMs) : defaultTimeoutMs);
-		const auto deadline = Clock::now() + timeout;
 		for (;;)
 		{
 			if (stopped.load())
 				return fail(status, writing, ECANCELED);
-			if (Clock::now() >= deadline)
-				return fail(status, writing, ETIMEDOUT);
 
 			ssize_t count;
 			if (writing)
@@ -167,7 +157,7 @@ private:
 				return static_cast<unsigned>(count);
 			}
 			if (ioError == EINTR)
-				continue; // Keep the original deadline across interrupted syscalls.
+				continue;
 			if (ioError != EAGAIN && ioError != EWOULDBLOCK)
 				return fail(status, writing, ioError);
 
@@ -175,15 +165,8 @@ private:
 			{
 				if (stopped.load())
 					return fail(status, writing, ECANCELED);
-				const auto remaining = deadline - Clock::now();
-				if (remaining <= Clock::duration::zero())
-					return fail(status, writing, ETIMEDOUT);
-				// Round up sub-millisecond tails; poll's int limit may require more
-				// than one wait for a large host default.
-				const auto millis = std::chrono::ceil<std::chrono::milliseconds>(remaining).count();
-				const int waitMs = static_cast<int>(std::min<decltype(millis)>(millis, INT_MAX));
 				pollfd descriptor{socket.get(), static_cast<short>(writing ? POLLOUT : POLLIN), 0};
-				const int ready = ::poll(&descriptor, 1, waitMs);
+				const int ready = ::poll(&descriptor, 1, -1);
 				const int pollError = errno;
 				if (stopped.load())
 					return fail(status, writing, ECANCELED);
@@ -203,7 +186,6 @@ private:
 		}
 	}
 
-	const unsigned defaultTimeoutMs;
 	const std::string peerAddress;
 	const unsigned peerPort;
 	std::atomic<bool> stopped{false};
@@ -213,11 +195,10 @@ private:
 
 } // namespace
 
-IWireConnection* createSocketConnection(int socket, unsigned defaultTimeoutMs,
-	const char* peerAddress, unsigned peerPort)
+IWireConnection* createSocketConnection(int socket, const char* peerAddress, unsigned peerPort)
 {
 	SocketHandle owner(socket);
-	if (socket < 0 || !defaultTimeoutMs || !peerAddress || !peerAddress[0] || peerPort > 65535)
+	if (socket < 0 || !peerAddress || !peerAddress[0] || peerPort > 65535)
 		setupError("Invalid wire socket configuration", EINVAL);
 
 	setDescriptorFlags(socket, F_GETFL, F_SETFL, O_NONBLOCK);
@@ -231,7 +212,7 @@ IWireConnection* createSocketConnection(int socket, unsigned defaultTimeoutMs,
 #endif
 
 	// The guard owns the fd if allocation or copying the peer string fails.
-	auto* connection = FB_NEW SocketConnection(owner, defaultTimeoutMs, peerAddress, peerPort);
+	auto* connection = FB_NEW SocketConnection(owner, peerAddress, peerPort);
 	connection->addRef();
 	return connection;
 }

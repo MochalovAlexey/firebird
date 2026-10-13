@@ -12,6 +12,8 @@ PgWire использует ограниченный анализ начала �
 
 ## Подготовить экземпляр Firebird
 
+После изменения wire-интерфейса пересоберите сервер и плагины вместе и перезапустите сервер. Добавленные wire-таймауты удалены; простой сессии и время выполнения SQL управляются штатными ConnectionIdleTimeout и StatementTimeout.
+
 Нужна сборка текущей ветки с production-библиотекой `plugins/libPgWire.so`, локальная тестовая БД и существующий пользователь Firebird с правами на неё. Начальный host работает на Linux, только в `ServerMode = Super` и на IPv4 loopback.
 
 В `firebird.conf` этого экземпляра:
@@ -43,7 +45,6 @@ Config = PgWireConfig {
     DatabaseAliases = pgwire_test
     Workers = 4
     QueueSize = 16
-    IOTimeout = 30000
 }
 ```
 

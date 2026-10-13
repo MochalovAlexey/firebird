@@ -24,8 +24,8 @@ namespace Firebird::PgWire
 class QueryExecutor final
 {
 public:
-	QueryExecutor(IAttachment* attachment, unsigned timeoutMs)
-		: attachment(attachment), timeoutMs(timeoutMs) {}
+	explicit QueryExecutor(IAttachment* attachment)
+		: attachment(attachment) {}
 	~QueryExecutor();
 	QueryExecutor(const QueryExecutor&) = delete;
 	QueryExecutor& operator=(const QueryExecutor&) = delete;
@@ -40,7 +40,6 @@ private:
 	bool transactionIsValid() noexcept;
 
 	IAttachment* const attachment;
-	const unsigned timeoutMs;
 	ITransaction* transaction = nullptr;
 	char state = 'I';
 };

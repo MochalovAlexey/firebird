@@ -1,5 +1,7 @@
 # Проверки реализации
 
+Текущая правка от 13 октября 2026 года — полное удаление добавленных wire-таймаутов, база `5f873c9eba`. Проверки этой правки приведены в конце; описания IOTimeout и прежних timeout cases ниже сохранены как история.
+
 Дата: 12 октября 2026 года. HEAD до текущего P5: `3657d6a5c1`, baseline master Firebird 6 `bf94598f8deefeb7cc4a8217ee43b3040d5d6650`. Предыдущие разделы сохраняют историю проверок, включая впоследствии удалённые engine metadata и native metadata executable.
 
 Текущий этап: **P5 прошёл целевую Linux/Super IPv4 loopback приёмку** с указанным ниже native AUTO COMMIT ограничением. Production changes ограничены PgWire; parser/DSQL/public metadata не менялись. Полный SQL передаётся штатному prepare без изменений. Прямые драйверы — C libpq 14.24 и psycopg2 2.9.11/libpq 17.6. Следующий этап — P6, серверная приёмка M1; M1–M3 не приняты. При проверках найден отдельный native Debug defect сочетания AUTO COMMIT с READ COMMITTED READ CONSISTENCY, воспроизводимый без PgWire.
@@ -635,3 +637,21 @@ P5 C libpq использует headers/runtime 14.24, реально наблю
 Отдельный P5 trace phase (startup/authentication/контрольный SELECT/shutdown) показал 0 backend connect attempts; 49 Unix OS/NSS attempts учтены отдельно. Это не трасса каждого transactional statement. Simple Query и startup trace также показали 0 backend connects. В итоговых runtime groups все servers завершились exit 0 без forced kill; SIGTERM shutdown занял 0.114–0.166 s.
 
 Область результата — P5 на Linux/Super, IPv4 loopback, native compatible SQL. READ COMMITTED READ CONSISTENCY AUTO COMMIT остаётся известным native Debug defect. Остальные transaction options не обещают семантику PostgreSQL. Полная M1 приёмка P6, SuperClassic/Windows/TLS, Extended Query, PostgreSQL BEGIN/$n, close/free failure injection и отдельные live effects DECFLOAT/OPTIMIZE/TRUSTED ROLE не объявляются выполненными. Native timers ограничивают DML execution/fetch, без hard deadline для prepare, DDL или transaction/session controls. Планы и ручной двухклиентский сценарий обновлены.
+
+## Удаление дополнительных wire-таймаутов — 13 октября 2026
+
+База правки — `5f873c9eba`. Удалены `IOTimeout`, сетевые/frame/startup/auth/output deadlines, истечение очереди по времени и задаваемые плагином statement/lock timeout. Сохраняются штатные настройки Firebird. `IWireConnection::read/write` больше не принимают timeout; C++/Pascal bindings пересозданы. Сервер и protocol plugins необходимо пересобрать вместе и перезапустить.
+
+| Проверка | Результат / свидетельство |
+|---|---|
+| Полная Debug сборка, `make -j2` | PASS; `/tmp/firebird-pgwire-build/remove-wire-timeouts-build.log` |
+| `make -C gen -j2 TARGET=Debug wire_tests pgwire_tests` | PASS; `/tmp/firebird-pgwire-build/remove-wire-timeouts-tests-build.log` |
+| Четыре PgWire unit executables: protocol, error, result, sql | PASS; включая 487 SqlInfo checks |
+| `wire_socket_test`: partial I/O, EOF, ownership, shutdown, backpressure | PASS; запуск с разрешёнными локальными sockets |
+| Существующий wire host smoke | PASS, 9 checks; `/tmp/firebird-wire-no-timeouts-host-01/summary.json` |
+| Существующий Simple Query smoke | PASS, 12 групп; `/tmp/firebird-pgwire-no-timeouts-simple-01/summary.json` |
+| Python syntax, Markdown links, `git diff --check` | PASS |
+
+Сборка и тестовые runtime находятся в `/tmp`; запущенный сервер и базы пользователя не изменялись. Wire host проверяет совместную работу native listener и двух plugin endpoints, ограничение размера очереди и остановку blocked I/O. Simple Query проверяет DML/DDL/RETURNING и видимость через native connection с C libpq 14.24 и psycopg2 2.9.11/libpq 17.6. Все четыре тестовых server phases завершились с exit 0 без forced kill; trace показал 0 backend network connects.
+
+Новых тестов с паузами или срабатываниями таймаутов не добавлено; прежние проверки удалённых таймаутов убраны. Полный P5 transaction/session, startup и native baseline suites в этой правке повторно не запускались; их результаты выше относятся к предыдущей ревизии.

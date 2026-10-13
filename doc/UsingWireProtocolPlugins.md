@@ -19,6 +19,8 @@ passed targeted Linux/Super checks. P5 adds explicit transaction/session control
 and passed targeted Linux/Super checks with a documented native AUTO COMMIT
 limitation; TLS remains a later step. Recorded checks and coverage limits are in
 [`VALIDATION.md`](../pg_wire_protocol/VALIDATION.md).
+The subsequent timeout removal passed the full build and selected unit, host and
+Simple Query checks recorded in VALIDATION; full P5 acceptance was not repeated.
 
 The interface definitions are in
 [`FirebirdInterface.idl`](../src/include/firebird/FirebirdInterface.idl). The
@@ -62,7 +64,6 @@ Config = FirstConfig {
     BindAddress = 127.0.0.1
     Workers = 4
     QueueSize = 16
-    IOTimeout = 30000
     Label = first
 }
 
@@ -107,7 +108,6 @@ documented default.
 | `BindAddress` | `127.0.0.1` | Exactly `127.0.0.1` |
 | `Workers` | `4` | Decimal integer from 1 to 16 |
 | `QueueSize` | `16` | Decimal integer from 1 to 64 |
-| `IOTimeout` | `30000` | Decimal milliseconds from 1 to 300000 |
 | `DatabaseAliases` | Empty | Comma-separated local aliases explicitly allowed for this endpoint |
 
 Repeated host settings are errors. Any `Port` entry is rejected: the positional
@@ -128,11 +128,9 @@ the native descriptor is never changed or closed by this host.
 
 Configuration is applied at startup. There is no hot reload. A full accepted
 connection queue closes new connections; queued sockets do not create plugin
-sessions until a worker is available. `IOTimeout` bounds queue wait and each
-transport operation. Protocol plugins must additionally bound complete frames
-and startup sequences across partial operations. PgWire uses this value for
-whole-frame deadlines and one shared startup network deadline, including the
-encryption refusals, password exchange and startup replies.
+sessions until a worker is available. Queued sockets do not expire by time.
+There are no additional transport, frame, startup, authentication or output
+timers. Blocking I/O waits for progress, EOF, an error or shutdown.
 
 ## Interface responsibilities
 
@@ -140,7 +138,7 @@ encryption refusals, password exchange and startup replies.
 |---|---|---|
 | `IWireProtocol` | Plugin | Create sessions for one configured endpoint |
 | `IWireSession` | Plugin | Execute one session on a host worker and accept stop requests |
-| `IWireConnection` | Host | Byte transport, deadlines, shutdown and peer information |
+| `IWireConnection` | Host | Byte transport, shutdown and peer information |
 | `IWireServerHost` | Host | Per-connection stopping state, diagnostics, authentication and local attachments |
 
 The generated versions are 4 for `IWireProtocol` and `IWireServerHost`, and 3 for
@@ -224,10 +222,8 @@ Engine cancellation is a host responsibility with separately protected
 attachment ownership. It must not turn plugin `stop()` into a blocking
 cancellation or detach operation. Server shutdown must allow providers to
 terminate engine operations; an unconditional join before provider shutdown can
-deadlock that process. The synchronous authentication and attach callbacks cannot
-be forcibly preempted by the startup network deadline, particularly before an
-attachment handle exists. Stop checks between callbacks and provider shutdown
-remain necessary; the codec's deadline is not a hard upper bound on those calls.
+deadlock that process. Synchronous authentication and attach callbacks rely on
+stop checks between calls and provider shutdown; the codec applies no timer.
 
 The Linux host registers `preproviders` and `postproviders` shutdown callbacks.
 The first stops accept, wakes connections and requests session stop without
@@ -240,7 +236,7 @@ arbitrarily blocking plugin callback safe.
 ## Transport I/O
 
 One worker serializes the connection's `read` and `write` calls. Both methods
-take an explicit buffer size and a timeout in milliseconds. Buffers are borrowed
+take an explicit buffer size, with no timeout argument. Buffers are borrowed
 only for the duration of the call. A nonzero size requires a valid buffer.
 
 | Outcome | Contract |
@@ -249,17 +245,15 @@ only for the duration of the call. A nonzero size requires a valid buffer.
 | Read reaches EOF with nonzero size | Return 0 with no error status |
 | Write with nonzero size | Returning 0 without an error is invalid |
 | Zero-size operation on an open connection | Successful no-op returning 0; the buffer is not accessed |
-| Timeout, shutdown or I/O failure | Report an error through status and return 0; progress returned by earlier successful calls remains valid |
+| Shutdown or I/O failure | Report an error through status and return 0; progress returned by earlier successful calls remains valid |
 
-The caller checks status before interpreting a zero result. Timeout and shutdown
-are not EOF. A failing call does not claim successful progress; after a terminal
+The caller checks status before interpreting a zero result. Shutdown is not EOF.
+A failing call does not claim successful progress; after a terminal
 transport error, it must not be retried as if no bytes could have reached the
 peer.
 
-`timeoutMs == 0` selects the host's finite default. A positive timeout may shorten
-that limit, never lengthen it. Retries inside one I/O operation, including EINTR
-handling, must retain the original deadline. Protocol framing also needs an
-overall startup/frame deadline across partial reads to bound slow input.
+Read/write wait for progress, EOF, an error or shutdown. EINTR is retried without
+discarding successful progress. The host and PgWire codec impose no I/O timers.
 
 `shutdown()` is concurrent, idempotent, nonblocking and permanent. It wakes any
 pending I/O, and subsequent I/O fails, including zero-size calls. It does not consume a reference. Releasing
@@ -343,8 +337,8 @@ partial I/O, EOF, concurrent stop/wakeup and repeated stop. Destroy an
 endpoint owner while one of its sessions is active, then verify that the session
 and its borrowed arguments remain usable until final release.
 
-Real transport acceptance must additionally cover timeout values, deadline
-clamping, zero-length operations and OS I/O failures. The mock stream used by
+Real transport acceptance covers zero-length operations and OS I/O failures.
+The mock stream used by
 the loading smoke does not validate those transport semantics.
 
 Observe the order of session destruction, plugin destruction and module cleanup.
@@ -355,7 +349,7 @@ caches are process-wide.
 
 `wire_host_smoke.py` prepares an isolated runtime and starts a real Super server
 with native TCP and two aliases of the test module. Its labelled byte echo
-checks target listeners, queue limits, timeout and shutdown. The test module is
+checks target listeners, queue limits and shutdown. The test module is
 built under `tests`, is not installed as a production plugin and performs no SQL.
 Only separately recorded successful runs establish acceptance; these fixtures
 do not establish PostgreSQL or authentication support on the additional ports.
@@ -381,7 +375,6 @@ Plugin = PgWire {
 Config = PgWireConfig {
     BindAddress = 127.0.0.1
     DatabaseAliases = pgwire_test
-    IOTimeout = 30000
 }
 ```
 
@@ -449,7 +442,7 @@ zero, and typmod is -1. Column provenance mapping is not implemented.
 A QueryExecutor owns at most one current application transaction per session.
 In I, prepare uses NULL and the engine's internal system transaction. Ordinary
 SQL then starts one implicit READ COMMITTED READ CONSISTENCY/write transaction,
-using WAIT with a lock timeout of ceil(IOTimeout / 1000) seconds. Cursors and
+using WAIT without a plugin-imposed lock timeout. Cursors and
 statements are closed before its real commit and CommandComplete. Errors roll
 back the implicit transaction. In T/E, prepare uses the existing transaction.
 
@@ -497,23 +490,26 @@ closed comments qualify; a standalone semicolon, unfinished string or
 unterminated block comment does not. Native block comments do not nest. The
 engine's existing diagnostics and isql continuation behavior are unchanged.
 
-`IOTimeout` bounds the engine statement timeout; a shorter nonzero native
-attachment statement timeout takes precedence. Native execution timers cover
-DML, not DDL or transaction/session controls. This does not forcibly preempt
-prepare or guarantee a hard deadline for synchronous engine callbacks. Error
+Statement-level timeout remains zero so native configuration and session
+settings govern execution. `StatementTimeout` in firebird.conf is in seconds;
+`ConnectionIdleTimeout` is in minutes. Zero means no corresponding engine cap.
+Native idle shutdown closes the attachment and rolls back its transaction; the
+next Query receives `57P05` and closes the connection. The plugin neither
+reconnects nor issues periodic engine calls that would renew the idle timer.
+Native statement timers cover DML, not a hard deadline for prepare, DDL or controls. Error
 mapping in `ErrorStatus.cpp` examines the full structured status vector,
 including explicit SQLSTATE fallback: parser errors use `42601`, missing
 relations `42P01`, permission failures `42501`, unique violations `23505`, foreign
 keys `23503`, and CHECK violations `23514`. Native `isc_not_valid` remains the
 coarser `23000` because it also represents domain validation. Shutdown,
-cancellation and resource failures take precedence. Transport failure or timeout
+cancellation and resource failures take precedence. Transport failure
 closes the stream without writing into a possibly partial frame.
 
 The earlier P4 refactor passed the full POSIX build, four unit executables
 (including 284 SQL classification checks), 12 Simple Query groups, seven lifecycle
 groups, 52 startup checks and nine native checks. Real clients were C libpq 14.24
 and psycopg2 2.9.11/libpq 17.6. Server traces showed no backend network connections.
-P5 passed its own targeted Linux/Super checks: 14 transaction/session groups,
+The previous P5 revision passed its targeted Linux/Super checks: 14 transaction/session groups,
 the full POSIX build, four unit executables (487 SQL classification checks),
 and the Simple Query/lifecycle/startup/native regressions. The native AUTO COMMIT
 limitation above remains; the full M1 acceptance stage is still P6. Commands, evidence and coverage limits are maintained in

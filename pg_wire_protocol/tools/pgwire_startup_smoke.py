@@ -15,7 +15,6 @@ import os
 from pathlib import Path
 import re
 import secrets
-import select
 import shutil
 import socket
 import struct
@@ -359,13 +358,12 @@ QUIT;
         config = config_path.read_text().replace("WireProtocolPlugins = \n", "WireProtocolPlugins = PgWire\n")
         config = config.replace("WireProtocolPorts = \n", f"WireProtocolPorts = {self.pg_port}\n")
         config_path.write_text(config)
-        timeout = endpoints[0].get("timeout", 15000)
         module = endpoints[0].get("module", self.module)
         aliases = "wire_host,WIRE_HOST_TEST,pg_remote_off,pg_auth_off,pg_security_off,pg_local_only,configured_but_missing"
         (self.runtime / "plugins.conf").write_text(
             f"Plugin = PgWire\n{{\nModule = {module}\nRegisterName = PgWire\nConfig = Startup\n}}\n"
             f"Config = Startup\n{{\nBindAddress = 127.0.0.1\nWorkers = 4\nQueueSize = 16\n"
-            f"IOTimeout = {timeout}\nDatabaseAliases = {aliases}\n}}\n")
+            f"DatabaseAliases = {aliases}\n}}\n")
 
     def start(self, phase, native_port, configured_native_port, endpoints, *, trace=False):
         if not trace:
@@ -647,61 +645,6 @@ QUIT;
                 pass
         self.cases.append("bounded_shutdown_authenticated_auth_wait_and_partial_startup")
 
-    def slow_frame(self, mode):
-        client = Client(self)
-        started = time.monotonic()
-        if mode == "query":
-            client.login()
-            data = packet(b"Q", b"x" * 100 + b"\0")
-            started = time.monotonic()
-        elif mode == "password":
-            request = startup()
-            client.send(request[:12])
-            time.sleep(0.55)
-            client.send(request[12:])
-            require(client.message() == (b"R", struct.pack("!I", 3)), "slow startup did not request password")
-            data = packet(b"p", self.password.encode() + b"\0")
-        else:
-            data = startup()
-        maximum = 1.45 if mode == "password" else 1.8
-        received = bytearray()
-        closed = False
-        # A byte every 150ms prevents a per-read timeout from expiring. The
-        # complete startup/password exchange or frame must still end at 1s.
-        for byte in data:
-            try:
-                client.connection.sendall(bytes([byte]))
-            except (BrokenPipeError, ConnectionResetError):
-                closed = True
-                break
-            readable, _, _ = select.select([client.connection], [], [], 0.15)
-            if readable:
-                try:
-                    part = client.connection.recv(4096)
-                except ConnectionResetError:
-                    part = b""
-                if not part:
-                    closed = True
-                    break
-                received.extend(part)
-            require(time.monotonic() - started < maximum, f"{mode} reset its total IOTimeout after each partial read")
-        require(closed and 0.5 <= time.monotonic() - started < maximum, f"{mode} did not close at its total IOTimeout")
-        if received:
-            require(len(received) >= 5 and received[:1] == b"E", "unexpected timeout response")
-            length = struct.unpack("!I", received[1:5])[0]
-            require(len(received) == length + 1 and error_fields(bytes(received[5:]))["C"] == "08006",
-                    "timeout response was not a complete 08006 ErrorResponse")
-
-    def run_timeouts(self):
-        native, configured_native, port = reserve_ports(3)
-        self.start("timeouts", native, configured_native,
-                   [{"alias": "PgWire", "port": port, "timeout": 1000}])
-        for mode in ("startup", "password", "query"):
-            self.check(f"total_{mode}_deadline_with_partial_reads", lambda mode=mode: self.slow_frame(mode))
-            self.no_attachments()
-        self.native_probe("native_after_pg_timeouts")
-        self.stop()
-
     def run_trace(self):
         if not shutil.which("strace"):
             self.summary["connect_trace"] = {"skipped": "strace is not installed"}
@@ -762,7 +705,6 @@ def main():
     try:
         harness.prepare()
         harness.run_main()
-        harness.run_timeouts()
         harness.run_trace()
         harness.summary["passed"] = True
     except (Exception, KeyboardInterrupt) as error:

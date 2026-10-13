@@ -110,7 +110,7 @@ public:
 			while (position != greeting.size())
 			{
 				const unsigned written = connection->write(status, greeting.size() - position,
-					greeting.data() + position, 0);
+					greeting.data() + position);
 				if ((status->getState() & IStatus::STATE_ERRORS) || written == 0)
 					return;
 				position += written;
@@ -125,7 +125,7 @@ public:
 				std::unique_lock<std::mutex> guard(readMutex, std::defer_lock);
 				if (mode == "stop_mutex")
 					guard.lock();
-				length = connection->read(status, sizeof(buffer), buffer, 0);
+				length = connection->read(status, sizeof(buffer), buffer);
 			}
 			if ((status->getState() & IStatus::STATE_ERRORS) || length == 0)
 				return;
@@ -133,7 +133,7 @@ public:
 			while (position != length && !stopped.load())
 			{
 				const unsigned written = connection->write(status, length - position,
-					buffer + position, 0);
+					buffer + position);
 				if ((status->getState() & IStatus::STATE_ERRORS) || written == 0)
 					return;
 				position += written;

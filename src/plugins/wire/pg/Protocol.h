@@ -16,7 +16,6 @@
 
 #include "firebird/Interface.h"
 
-#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -34,7 +33,6 @@ struct Limits
 	unsigned startupBytes = 16 * 1024;
 	unsigned frameBytes = 1024 * 1024;
 	unsigned passwordBytes = 4096; // Password body, including its trailing NUL.
-	unsigned timeoutMs = 30000; // Whole frame; the host may impose a shorter wait.
 };
 
 class ProtocolError final : public std::runtime_error
@@ -84,52 +82,39 @@ struct Message
 class Protocol final
 {
 public:
-	using Clock = std::chrono::steady_clock;
-	using Deadline = Clock::time_point;
-
 	// The connection is borrowed for this object's lifetime; master is the
 	// interface passed to the plugin entrypoint. Byte limits may only be reduced.
 	Protocol(IMaster* master, IWireConnection* connection, Limits limits = {});
 	Protocol(const Protocol&) = delete;
 	Protocol& operator=(const Protocol&) = delete;
 
-	Deadline startupDeadline() const noexcept { return startupEnd; }
 	// false means EOF before the next frame. Truncation inside a frame is an error.
-	// Declines SSL/GSS once each with N, using one deadline for the whole exchange.
+	// Declines SSL/GSS once each with N.
 	bool readStartup(Startup& startup);
-	bool readMessage(Message& message, Deadline deadline = Deadline::max());
+	bool readMessage(Message& message);
 
-	// Pass startupDeadline() during authentication (including Password reads and
-	// startup replies) to share its original budget. A default deadline starts
-	// one finite budget for this complete outgoing frame, including short writes.
-	void authenticationCleartext(Deadline deadline = Deadline::max());
-	void authenticationOk(Deadline deadline = Deadline::max());
-	void parameterStatus(std::string_view name, std::string_view value,
-		Deadline deadline = Deadline::max());
-	void ready(char transaction = 'I', Deadline deadline = Deadline::max());
-	void error(std::string_view sqlState, std::string_view message, bool fatal,
-		Deadline deadline = Deadline::max());
+	void authenticationCleartext();
+	void authenticationOk();
+	void parameterStatus(std::string_view name, std::string_view value);
+	void ready(char transaction = 'I');
+	void error(std::string_view sqlState, std::string_view message, bool fatal);
 	// Preflight the complete message before allocating its buffer or writing.
 	// At most 32767 result fields are supported. Limits produce 0A000; invalid
 	// UTF8/NUL produces 22021. These checks
 	// emit no partial message, allowing the executor to report a query error.
-	void rowDescription(const std::vector<Column>& columns, Deadline deadline = Deadline::max());
-	void dataRow(const std::vector<std::optional<std::string>>& values,
-		Deadline deadline = Deadline::max());
-	void commandComplete(std::string_view tag, Deadline deadline = Deadline::max());
-	void emptyQuery(Deadline deadline = Deadline::max());
+	void rowDescription(const std::vector<Column>& columns);
+	void dataRow(const std::vector<std::optional<std::string>>& values);
+	void commandComplete(std::string_view tag);
+	void emptyQuery();
 
 private:
 	struct DisposeStatus { void operator()(IStatus* status) const { status->dispose(); } };
-	Deadline normalize(Deadline deadline) const;
-	unsigned remaining(Deadline deadline) const;
-	bool readExact(void* buffer, unsigned size, Deadline deadline, bool allowEof = false);
-	void writeExact(const void* buffer, unsigned size, Deadline deadline);
-	void send(char type, const std::vector<std::uint8_t>& body, Deadline deadline);
+	bool readExact(void* buffer, unsigned size, bool allowEof = false);
+	void writeExact(const void* buffer, unsigned size);
+	void send(char type, const std::vector<std::uint8_t>& body);
 
 	IWireConnection* const connection;
 	const Limits limits;
-	const Deadline startupEnd;
 	std::unique_ptr<IStatus, DisposeStatus> status;
 };
 

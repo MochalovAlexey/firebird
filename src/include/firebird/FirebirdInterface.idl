@@ -2012,10 +2012,10 @@ interface WireConnection : ReferenceCounted
 	// Partial progress is returned immediately. With size > 0, successful read(0)
 	// means EOF; successful write(0) is invalid. size == 0 is a successful no-op.
 	// A failing call reports status and returns 0; earlier successful progress stands.
-	// timeoutMs == 0 uses the host's finite default; a positive value can only shorten
-	// that limit. Timeouts are errors, not EOF. One worker serializes all I/O calls.
-	uint read(Status status, uint size, void* buffer, uint timeoutMs);
-	uint write(Status status, uint size, const void* buffer, uint timeoutMs);
+	// Calls wait for progress, EOF or an error; shutdown interrupts pending I/O.
+	// One worker serializes all I/O calls.
+	uint read(Status status, uint size, void* buffer);
+	uint write(Status status, uint size, const void* buffer);
 	// Concurrent, idempotent and nonblocking. Wakes I/O; all subsequent I/O fails.
 	// The host owns the underlying transport through the last reference's release.
 	void shutdown();

@@ -8003,8 +8003,8 @@ namespace Firebird
 	public:
 		struct VTable : public IReferenceCounted::VTable
 		{
-			unsigned (CLOOP_CARG *read)(IWireConnection* self, IStatus* status, unsigned size, void* buffer, unsigned timeoutMs) CLOOP_NOEXCEPT;
-			unsigned (CLOOP_CARG *write)(IWireConnection* self, IStatus* status, unsigned size, const void* buffer, unsigned timeoutMs) CLOOP_NOEXCEPT;
+			unsigned (CLOOP_CARG *read)(IWireConnection* self, IStatus* status, unsigned size, void* buffer) CLOOP_NOEXCEPT;
+			unsigned (CLOOP_CARG *write)(IWireConnection* self, IStatus* status, unsigned size, const void* buffer) CLOOP_NOEXCEPT;
 			void (CLOOP_CARG *shutdown)(IWireConnection* self) CLOOP_NOEXCEPT;
 			const char* (CLOOP_CARG *getPeerAddress)(IWireConnection* self) CLOOP_NOEXCEPT;
 			unsigned (CLOOP_CARG *getPeerPort)(IWireConnection* self) CLOOP_NOEXCEPT;
@@ -8024,18 +8024,18 @@ namespace Firebird
 	public:
 		static CLOOP_CONSTEXPR unsigned VERSION = FIREBIRD_IWIRE_CONNECTION_VERSION;
 
-		template <typename StatusType> unsigned read(StatusType* status, unsigned size, void* buffer, unsigned timeoutMs)
+		template <typename StatusType> unsigned read(StatusType* status, unsigned size, void* buffer)
 		{
 			StatusType::clearException(status);
-			unsigned ret = static_cast<VTable*>(this->cloopVTable)->read(this, status, size, buffer, timeoutMs);
+			unsigned ret = static_cast<VTable*>(this->cloopVTable)->read(this, status, size, buffer);
 			StatusType::checkException(status);
 			return ret;
 		}
 
-		template <typename StatusType> unsigned write(StatusType* status, unsigned size, const void* buffer, unsigned timeoutMs)
+		template <typename StatusType> unsigned write(StatusType* status, unsigned size, const void* buffer)
 		{
 			StatusType::clearException(status);
-			unsigned ret = static_cast<VTable*>(this->cloopVTable)->write(this, status, size, buffer, timeoutMs);
+			unsigned ret = static_cast<VTable*>(this->cloopVTable)->write(this, status, size, buffer);
 			StatusType::checkException(status);
 			return ret;
 		}
@@ -23136,13 +23136,13 @@ namespace Firebird
 			this->cloopVTable = &vTable;
 		}
 
-		static unsigned CLOOP_CARG cloopreadDispatcher(IWireConnection* self, IStatus* status, unsigned size, void* buffer, unsigned timeoutMs) CLOOP_NOEXCEPT
+		static unsigned CLOOP_CARG cloopreadDispatcher(IWireConnection* self, IStatus* status, unsigned size, void* buffer) CLOOP_NOEXCEPT
 		{
 			StatusType status2(status);
 
 			try
 			{
-				return static_cast<Name*>(self)->Name::read(&status2, size, buffer, timeoutMs);
+				return static_cast<Name*>(self)->Name::read(&status2, size, buffer);
 			}
 			catch (...)
 			{
@@ -23151,13 +23151,13 @@ namespace Firebird
 			}
 		}
 
-		static unsigned CLOOP_CARG cloopwriteDispatcher(IWireConnection* self, IStatus* status, unsigned size, const void* buffer, unsigned timeoutMs) CLOOP_NOEXCEPT
+		static unsigned CLOOP_CARG cloopwriteDispatcher(IWireConnection* self, IStatus* status, unsigned size, const void* buffer) CLOOP_NOEXCEPT
 		{
 			StatusType status2(status);
 
 			try
 			{
-				return static_cast<Name*>(self)->Name::write(&status2, size, buffer, timeoutMs);
+				return static_cast<Name*>(self)->Name::write(&status2, size, buffer);
 			}
 			catch (...)
 			{
@@ -23256,8 +23256,8 @@ namespace Firebird
 		{
 		}
 
-		virtual unsigned read(StatusType* status, unsigned size, void* buffer, unsigned timeoutMs) = 0;
-		virtual unsigned write(StatusType* status, unsigned size, const void* buffer, unsigned timeoutMs) = 0;
+		virtual unsigned read(StatusType* status, unsigned size, void* buffer) = 0;
+		virtual unsigned write(StatusType* status, unsigned size, const void* buffer) = 0;
 		virtual void shutdown() = 0;
 		virtual const char* getPeerAddress() = 0;
 		virtual unsigned getPeerPort() = 0;

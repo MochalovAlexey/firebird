@@ -4,6 +4,8 @@
 
 Linux/Super host P1 со штатным getPluginConfig и целевые P2 startup/authentication checks прошли по [VALIDATION.md](VALIDATION.md). P3 SELECT execution и минимальная engine metadata прошли целевую Linux/Super приёмку M0. P4 Simple Query DML/DDL, базовые codecs и EMPTY прошли целевую Linux/Super приёмку. По уточнённому требованию пользователя выполнен refactor классификации в плагин (описан ниже, Linux/Super проверки прошли). P5 explicit transactions и session controls прошёл целевую Linux/Super приёмку с отдельным native AUTO COMMIT ограничением; результаты записаны в VALIDATION. TLS, Windows wiring/runtime и другие server modes остаются дальнейшей работой.
 
+Текущее уточнение от 13 октября 2026 года: добавленные wire-таймауты удалены. Ниже сохранена история этапов; прежние описания IOTimeout относятся к тем ревизиям, а не к текущему контракту.
+
 ## Первый срез P1
 
 Первый срез зарегистрировал глобальные `WireProtocolPlugins` / `WireProtocolPorts` и проверку позиционных пар; сам parser не загружает plugins и не открывает listeners. Оба параметра имеют пустое значение по умолчанию; существующие ConfigKey сохраняют номера, новые добавлены в конец.
@@ -146,3 +148,10 @@ Session controls исполняются штатно с текущим либо 
 При проверках обнаружен отдельный native Debug defect: INSERT в READ COMMITTED READ CONSISTENCY AUTO COMMIT вызывает assertion Savepoint.cpp:833 и через embedded isql без PgWire. SNAPSHOT AUTO COMMIT работает; его реальный durable effect проверяется отдельно. Ядро и параметры SQL не подменяются; воспроизведение и границы — в VALIDATION.
 
 Добавлен `pgwire_transaction_smoke.py` с настоящими TCP clients, C libpq и независимым native observer; он проверяет состояния, видимость, savepoints, native transaction/session effects и реальные ошибки commit/reset через database triggers. Прошли сборка, четыре unit executables (487 classifier checks), 14 P5 групп и Simple Query/lifecycle/startup/native regressions. Результаты и ограничения покрытия зафиксированы в [VALIDATION.md](VALIDATION.md). Следующий этап P6 закрывает M1 отдельной полной приёмкой; реализация P5 сама по себе не означает готовность M1–M3.
+
+
+## Удаление добавленных таймаутов
+
+13 октября 2026 года, база `5f873c9eba`. По указанию пользователя полностью удалены IOTimeout, deadlines startup/auth/messages/output и истечение ожидания queued sockets. Из нового IWireConnection удалён аргумент timeout; C++/Pascal bindings перегенерированы. Сетевые операции ждут данные, EOF/ошибку или shutdown. Общий предел join при остановке сервера сохранён.
+
+QueryExecutor больше не устанавливает statement timeout и не задаёт lock timeout в implicit TPB. ConnectionIdleTimeout, StatementTimeout и native session/transaction settings применяет движок. Сервер и protocol plugins требуется пересобирать вместе. Новые тестовые сценарии не добавлены; из существующих удалены проверки устранённых ограничений. Результаты сборки и применимых проверок записываются в [VALIDATION.md](VALIDATION.md).

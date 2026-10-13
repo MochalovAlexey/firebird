@@ -110,7 +110,6 @@ struct Settings
 	std::vector<std::string> databaseAliases;
 	unsigned workers = 4;
 	unsigned queueSize = 16;
-	unsigned timeout = 30000;
 };
 
 RefPtr<IConfigEntry> setting(IConfig* config, const char* name)
@@ -171,7 +170,6 @@ Settings readSettings(const EndpointConfig& endpoint)
 	Settings settings{endpoint};
 	settings.workers = number(config, "Workers", settings.workers, 16);
 	settings.queueSize = number(config, "QueueSize", settings.queueSize, 64);
-	settings.timeout = number(config, "IOTimeout", settings.timeout, 300000);
 	if (const auto aliases = setting(config, "DatabaseAliases"))
 	{
 		std::vector<std::string_view> names;
@@ -450,7 +448,6 @@ private:
 		RefPtr<IWireConnection> connection;
 		RefPtr<HostContext> context;
 		std::shared_ptr<ProtocolSession> session;
-		const Clock::time_point accepted = Clock::now();
 	};
 
 	static THREAD_ENTRY_DECLARE acceptEntry(THREAD_ENTRY_PARAM arg)
@@ -482,9 +479,8 @@ private:
 	{
 		while (!stopping)
 		{
-			expireQueued();
 			pollfd wait{listener.get(), POLLIN, 0};
-			const int result = ::poll(&wait, 1, 100);
+			const int result = ::poll(&wait, 1, -1);
 			if (stopping)
 				break;
 			if (result < 0)
@@ -510,7 +506,7 @@ private:
 			if (!::inet_ntop(AF_INET, &peer.sin_addr, address, sizeof(address)))
 				socketFailure("Cannot format wire peer address");
 			RefPtr<IWireConnection> connection(REF_NO_INCR, createSocketConnection(socket.release(),
-				settings.timeout, address, ntohs(peer.sin_port)));
+				address, ntohs(peer.sin_port)));
 			auto work = std::make_shared<Work>(connection.getPtr());
 			connection.clear(); // Work adopts the returned reference.
 			{
@@ -520,25 +516,6 @@ private:
 				queue.push_back(std::move(work));
 			}
 			ready.notify_one();
-		}
-	}
-
-	void expireQueued()
-	{
-		for (;;)
-		{
-			std::shared_ptr<Work> expired;
-			{
-				std::lock_guard<std::mutex> guard(mutex);
-				if (queue.empty() || Clock::now() - queue.front()->accepted <
-					std::chrono::milliseconds(settings.timeout))
-				{
-					return;
-				}
-				expired = std::move(queue.front());
-				queue.pop_front();
-			}
-			expired->connection->shutdown();
 		}
 	}
 
@@ -559,7 +536,7 @@ private:
 			}
 			try
 			{
-				if (!stopping && Clock::now() - work->accepted < std::chrono::milliseconds(settings.timeout))
+				if (!stopping)
 				{
 					RefPtr<HostContext> context(FB_NEW HostContext(settings, work->connection, stopping));
 					{

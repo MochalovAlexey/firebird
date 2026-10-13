@@ -2,7 +2,7 @@
 
 База — `master` Firebird 6, SHA из [BASELINE.md](BASELINE.md). Архитектура и SQL boundary определены в [ARCHITECTURE.md](ARCHITECTURE.md), transaction contract — в [CODEX_CONTEXT.md](CODEX_CONTEXT.md), заявляемые возможности — в [COMPATIBILITY.md](COMPATIBILITY.md).
 
-Исходный Python scaffold содержит 20 функций/56 параметризованных случаев и требует миграции. Начальные host tests расположены в src/common/tests/WireProtocolConfigTest.cpp, src/remote/server/wire/tests и isolated tools harness. P2/P3/P4 приёмка сохранена в VALIDATION. P5 прошёл целевую Linux/Super приёмку с native ограничением READ CONSISTENCY + AUTO COMMIT; P6/M1 остаётся следующим этапом. PASS относится к зафиксированным cases/fixtures, а наличие строки в полной матрице не означает её прохождения.
+Исходный Python scaffold содержит 20 функций/56 параметризованных случаев и требует миграции. Начальные host tests расположены в src/common/tests/WireProtocolConfigTest.cpp, src/remote/server/wire/tests и isolated tools harness. P2/P3/P4 приёмка сохранена в VALIDATION. Предыдущая P5-ревизия прошла целевую Linux/Super приёмку с native ограничением READ CONSISTENCY + AUTO COMMIT; выбранные проверки после удаления wire-таймаутов прошли и записаны в [VALIDATION.md](VALIDATION.md), без повторения полной P5-приёмки. P6/M1 остаётся следующим этапом. PASS относится к зафиксированным cases/fixtures, а наличие строки в полной матрице не означает её прохождения.
 
 ## Этапы и обязательный минимум
 
@@ -28,7 +28,7 @@ BEGIN/START TRANSACTION/RETAINING/$n и SQL, который parser пока не
 | M0-07 | EOF/incomplete startup/shutdown освобождают attachments/sessions/workers до unload |
 | M0-08 | Prepare использует исходный SQL; descriptor и штатные input/output/flags проверяются до execution. Unsupported capabilities не дают частичных эффектов, supported RETURNING работает |
 
-## P5 — целевая Linux/Super приёмка PASS с native ограничением
+## Исторический P5 — целевая Linux/Super приёмка PASS с native ограничением
 
 Финальный transaction harness прошёл 14 групп без skips: I/T/E, raw ReadyForQuery/PQtransactionStatus, visibility через native observer, savepoint/retaining recovery, session SET/RESET, 100 ms DML timeout в I/T, error precedence, SNAPSHOT AUTO COMMIT, NO AUTO UNDO, disconnect и реальные commit/reset errors, C libpq и connect trace. Backend connects — 0; серверы завершились с exit 0. Full build и четыре unit executable (487 classifier checks), Simple Query 12, lifecycle 7, startup 52 и native 9 прошли отдельно. Evidence — в VALIDATION. Это целевой profile, не автоматический PASS всех вариантов T01–T14 и остальной матрицы; P6/M1 ещё не завершён.
 
@@ -65,10 +65,10 @@ P4-ревизия [pgwire_simple_query_smoke.py](tools/pgwire_simple_query_smoke
 | P2-04 | ON CONNECT trigger отклоняет вход даже с правильным паролем: ErrorResponse до AuthenticationOk, attachment освобождён; следующий разрешённый connect работает |
 | P2-05 | Неполные/coalesced frames, SSL/GSS N, duplicate/unknown startup keys, неправильная version, lengths/NUL/UTF8, границы 16 KiB startup / 1 MiB typed frame / 4096 bytes Password с NUL; bounds проверены до payload allocation |
 | P2-06 | User обязателен; absent database=user проходит лишь при разрешённом alias, explicit empty database отвергается. Empty DatabaseAliases запрещает attachment; клиентский path/URI/config не меняет provider route |
-| P2-07 | Unit golden bytes, short writes/reads и slow progress: whole-frame и общий startup network deadline не обновляются каждым chunk; Password и startup replies используют исходный budget |
+| P2-07 | Unit golden bytes, short writes/reads и сохранение partial progress; прежние transport/startup timeout expectations удалены |
 | P2-08 | EOF, Terminate, failed auth, idle и incomplete startup при shutdown: attachments/FDs освобождены, module жив до возврата callbacks. MON$REMOTE_PROTOCOL=TCPv4, MON$REMOTE_VERSION=endpoint alias; password отсутствует в diagnostics |
 
-Auth helper отдельно ограничен 16 rounds и 64 KiB на payload. Проверяются UTF8 и host bounds alias/user/application_name 255 bytes, нормализованный Srp256 login 63 bytes; Password codec limit включает NUL. Не объявлять сетевой IOTimeout hard deadline для синхронного auth/attach callback до получения handle. Такой вызов проверяется с provider shutdown и fault-injection отдельно; PASS idle transport не доказывает preemption auth plugin. Наряду с live harness выполнить code review engine-only provider route и наблюдение server connect(), чтобы исключить дополнительный backend hop.
+Auth helper отдельно ограничен 16 rounds и 64 KiB на payload. Проверяются UTF8 и host bounds alias/user/application_name 255 bytes, нормализованный Srp256 login 63 bytes; Password codec limit включает NUL. Дополнительных сетевых/auth timers нет. Такой вызов проверяется с provider shutdown и fault-injection отдельно; PASS idle transport не доказывает preemption auth plugin. Наряду с live harness выполнить code review engine-only provider route и наблюдение server connect(), чтобы исключить дополнительный backend hop.
 
 ## Fixtures и свидетельства
 
@@ -77,7 +77,7 @@ Auth helper отдельно ограничен 16 rounds и 64 KiB на payload
 - Пользователь `PGWIRE_TEST` создаёт собственные объекты; `PGWIRE_LIMITED` не имеет доступа к ним. Отдельный административный fixture нужен для monitoring shutdown/timeout cases.
 - Alias allowlist, `RemoteAccess=false`, неподходящий auth profile и missing plugins проверяются отдельными server configs. Тесты не меняют рабочий сервер пользователя.
 - Для cross-visibility observer начинает новую транзакцию; DDL fixtures коммитятся до дальнейшего DML. Cleanup удаляет только объекты текущего теста.
-- Лимиты connections/workers/frames/queues/buffers, startup/write/statement/lock deadlines и общий shutdown deadline записываются в отчёте.
+- Лимиты connections/workers/frames/queues/buffers, независимые native statement/lock settings и общий shutdown deadline записываются в отчёте.
 - Credentials передаются через отдельное окружение; DSN, command output, status vectors и трассы не должны раскрывать пароль.
 
 Для каждого этапа нужны разные уровни evidence: unit tests codec/state/metadata; прямой libpq и Python client; native observer; process/build/provider/lifecycle checks. Совпадение `MON$SERVER_PID` само по себе не исключает gateway.
@@ -152,7 +152,7 @@ W07 требует code review неизменной передачи SQL и TCP 
 | Q05 | SET TRANSACTION, COMMIT/ROLLBACK RETAIN [SNAPSHOT], SAVEPOINT и session operations | Plugin-local descriptor различает actions после engine prepare и сверяется с legacy type. Tags: BEGIN/COMMIT/ROLLBACK/SAVEPOINT/RELEASE/SET/RESET; фактический effect и transaction handle контролируются |
 | Q06 | Native/PG cross-visibility в обе стороны | Одна база, штатные права и commit/rollback; native клиент не участвует в PG execution path |
 | Q07 | Prepare/fetch/execute/commit errors | Нет ложного CommandComplete; исходная ошибка не затёрта cleanup; uncertain transaction state завершает connection |
-| T01 | Обычный implicit Query | Prepare с NULL, затем READ WRITE / READ COMMITTED READ CONSISTENCY / WAIT TPB с lock timeout ceil(IOTimeout/1000). Commit до CommandComplete, rollback после ошибки, state I; retaining не подменяет завершение |
+| T01 | Обычный implicit Query | Prepare с NULL, затем READ WRITE / READ COMMITTED READ CONSISTENCY / WAIT TPB без заданного плагином lock timeout. Commit до CommandComplete, rollback после ошибки, state I; retaining не подменяет завершение |
 | T02 | Native SET TRANSACTION из I, native COMMIT/ROLLBACK | Реальная transaction, T/I, isolation/read-only и cross-session visibility. Повторный SET TRANSACTION при active handle — 25001/E с сохранением transaction |
 | T03 | Ошибка в explicit transaction | Native handle сохраняется, state E; успешно подготовленные обычный SQL/SAVEPOINT/RELEASE/COMMIT RETAIN получают 25P02 без execution и открытия новой transaction. Ошибки самого prepare имеют precedence из T11 |
 | T04 | Полный COMMIT/ROLLBACK из E | COMMIT выполняет rollback и возвращает ROLLBACK/I; ROLLBACK также завершает transaction; ещё незафиксированные изменения не сохранены; native AUTO COMMIT проверяется отдельно T09 |
@@ -164,7 +164,7 @@ W07 требует code review неизменной передачи SQL и TCP 
 | T10 | ALTER SESSION RESET в I/T/E, включая ошибку reset | Проверяются сброс USER_SESSION/settings, rollback и новая native transaction при возможном прежнем interface pointer. В T сохраняется T, в I — I, в E — 25P02 без reset. P5 не кэширует statements/portals/savepoint names; M2 caches проверяются отдельно. Invalid attachment/handle после reset требует FATAL/close |
 | T11 | Prepare в E: actual missing relation, syntax, permission, cancel/timeout, fatal и unknown error | Только native isc_dsql_relation_err с итоговым nonfatal 42P01 даёт 25P02; explicit SQLSTATE 42P01 без причины не входит в whitelist. Syntax 42601 и permission 42501 сохраняются. Отмена/timeout, shutdown/invalid handle, resource/I/O и unknown errors не маскируются. Проверяются full-vector priority и отсутствие execution |
 | T12 | Число current application transactions и phase boundaries | QueryExecutor владеет максимум одним handle; prepare в I получает NULL, в T/E — current и видит uncommitted DDL. Нет cached statement transaction. Engine system/security/autonomous transactions отделяются при подсчёте; native и другие plugins этим правилом не ограничиваются |
-| T13 | Native session SET whitelist в I/T/E | ROLE/TRUSTED ROLE, DEBUG OPTION, DECFLOAT ROUND/TRAPS, idle/statement timeout, TIME ZONE, BIND, OPTIMIZE, SEARCH_PATH: settings реально меняются и выдаётся SET, I/T сохраняются; в E после successful prepare — 25P02 без effect. Ненулевой attachment timeout ограничивает DML через min с IOTimeout; проверить 100 ms timeout в I/T, реальный interrupt и recovery. Не заявлять hard deadline prepare/DDL/controls |
+| T13 | Native session SET whitelist в I/T/E | ROLE/TRUSTED ROLE, DEBUG OPTION, DECFLOAT ROUND/TRAPS, idle/statement timeout, TIME ZONE, BIND, OPTIMIZE, SEARCH_PATH: settings реально меняются и выдаётся SET, I/T сохраняются; в E после successful prepare — 25P02 без effect. Native configuration/session timeout ограничивает DML без дополнительного лимита плагина; проверить 100 ms timeout в I/T, реальный interrupt и recovery. Не заявлять hard deadline prepare/DDL/controls |
 | T14 | EMPTY в I/T/E | EmptyQueryResponse сохраняет прежнее состояние и transaction; изменения/savepoints не теряются. Отдельный semicolon и unfinished SQL/comment остаются ошибками, не EMPTY |
 
 Заявленные transaction characteristics и session operations меняют реальное engine state. Неподдержанные descriptor/API/codecs получают отказ после prepare до execution. Legacy getType/getFlags и native diagnostics не изменяются; control classification покрывается отдельными tests вместе с фактическими handles/effects.
@@ -185,7 +185,7 @@ T11 не утверждает, что prepare лишён compile/cache/lock/trac
 | D08 | Syntax, unknown table, unique, permission, login | Проверены 42601/42P01/23505/42501/28P01 и fallback; messages сохраняют смысл и не раскрывают credentials |
 | D09 | Native observer удаляет MON$ATTACHMENTS для PG session; отдельно shutdown базы | FATAL 57P01 и закрытие PG connection; target не выполняет последующий SQL |
 | D10 | Native observer отменяет MON$STATEMENTS или срабатывает statement timeout | 57014 в запросе, корректные I/E, освобождение statement/cursor и возможность предусмотренного recovery |
-| D11 | Engine idle timeout | FATAL 57P05 и закрытие, без повторного скрытого attach |
+| D11 | Engine idle timeout | Attachment закрыт с rollback; следующий Query получает FATAL 57P05/close, без повторного attach и периодических engine calls, продлевающих idle timer |
 
 Для D09/D11 delivery contract: active operation получает terminal error при возврате из engine; для idle socket обязательна доставка на следующем запросе, если writable channel сохраняется. Harness после administrative action/timeout посылает запрос и проверяет raw ErrorResponse и close; поддержанная eager notification может прийти раньше с тем же кодом. Транспортный обрыв при уже закрытом socket фиксируется отдельно и не подменяет проверку mapping на рабочем канале. Если engine callback позволяет иной контракт, его сначала зафиксировать в CONTEXT и согласовать тест, а не обещать unsolicited сообщения без реализации.
 
@@ -233,7 +233,7 @@ T11 не утверждает, что prepare лишён compile/cache/lock/trac
 |---|---|---|
 | R01 | Отдельный узел/network namespace | Реальная TCP-топология зафиксирована; listener и engine в одном firebird |
 | R02 | SSLRequest → TLS, sslmode=verify-full | Проверены trust/hostname, неверный/истёкший сертификат и отказ handshake; выбранная в P0 TLS dependency отражена в build |
-| R03 | Non-loopback без TLS; partial/slow TLS | Password не передаётся в открытом канале; bounded handshake и shutdown, без вмешательства native WireCrypt |
+| R03 | Non-loopback без TLS; partial/slow TLS | Password не передаётся в открытом канале; shutdown прерывает handshake, без вмешательства native WireCrypt |
 | C01 | BackendKeyData/CancelRequest при SQL и lock wait | 57014 в основном connection, безопасная cancellation ownership, correct I/E |
 | C02 | Invalid/stale/чужой key; races с complete/detach | Чужая session не отменяется; cancel socket не создаёт application attachment; нет UAF/hang |
 | U01 | Startup/session commands выбранного приложения | Фиксированы driver/libpq/version/options и trace без секретов; SQL понимает engine parser, settings имеют реальный эффект |

@@ -2,7 +2,7 @@
 
 Дополнительные wire-протоколы реализуются динамическими плагинами внутри процесса `firebird`. Первый плагин — PostgreSQL. Общая серверная инфраструктура управляет TCP listeners, соединениями и workers; плагин реализует конкретный протокол и обращается к локальному движку через интерфейсы Firebird. Родной frontend сохраняет свой путь запуска, настройки, XDR и обработку запросов.
 
-Документ определяет host/plugin contract и границы SQL. P5 реализован и прошёл целевую Linux/Super loopback приёмку: I/T/E, native transaction/session controls и recovery. **Известное ограничение native baseline: READ COMMITTED READ CONSISTENCY + AUTO COMMIT не входит в подтверждённую совместимость; SNAPSHOT AUTO COMMIT проверен.** M1 ещё не принят, следующий этап — P6. Результаты и границы покрытия — в [VALIDATION.md](VALIDATION.md). TLS, Windows и другие server modes требуют отдельной реализации и приёмки.
+Документ определяет host/plugin contract и границы SQL. Предыдущая P5-ревизия прошла целевую Linux/Super loopback приёмку: I/T/E, native transaction/session controls и recovery. Удаление wire-таймаутов проверено сборкой и выбранными unit/host/Simple Query регрессиями; полная P5-приёмка повторно не проводилась. **Известное ограничение native baseline: READ COMMITTED READ CONSISTENCY + AUTO COMMIT не входит в подтверждённую совместимость; SNAPSHOT AUTO COMMIT проверен.** M1 ещё не принят, следующий этап — P6. Результаты и границы покрытия — в [VALIDATION.md](VALIDATION.md). TLS, Windows и другие server modes требуют отдельной реализации и приёмки.
 
 ## Разделение ответственности
 
@@ -42,7 +42,7 @@ SQL передаётся в engine prepare целиком, с исходной b
 
 EMPTY определяется ограниченным lexer только для нулевой строки, whitespace и полностью закрытых comments без SQL tokens. Даже такой текст передаётся в обычный engine prepare неизменённым. Только сочетание этого признака с engine syntax error 42601 после успешного cleanup преобразуется в EmptyQueryResponse; permission, cancellation, resource и другие ошибки не маскируются. Незаконченные строка/comment/statement и отдельный `;` остаются parser errors. Native parser diagnostics и `isql -autoterm` не меняются.
 
-На каждую PgWire session создаётся `QueryExecutor`, владеющий одной текущей application transaction и состоянием I/T/E. В I prepare выполняется с NULL, в T/E — с текущим handle. Обычный SQL из I после metadata validation получает implicit READ WRITE / READ COMMITTED READ CONSISTENCY / WAIT transaction с lock timeout `ceil(IOTimeout / 1000)` секунд. Результат передаётся потоком; request handles освобождаются, implicit commit завершается до CommandComplete. В explicit block Query не завершает transaction. Ошибка сохраняет живой explicit handle и E; uncertain commit/cleanup требует закрытия connection. Statement timeout равен минимуму IOTimeout и ненулевого attachment timeout, иначе IOTimeout. Native DML timer не обещает hard deadline для prepare, DDL и controls.
+На каждую PgWire session создаётся `QueryExecutor`, владеющий одной текущей application transaction и состоянием I/T/E. В I prepare выполняется с NULL, в T/E — с текущим handle. Обычный SQL из I после metadata validation получает implicit READ WRITE / READ COMMITTED READ CONSISTENCY / WAIT transaction без заданного плагином lock timeout. Результат передаётся потоком; request handles освобождаются, implicit commit завершается до CommandComplete. В explicit block Query не завершает transaction. Ошибка сохраняет живой explicit handle и E; uncertain commit/cleanup требует закрытия connection. Statement-level timeout остаётся 0, implicit WAIT не получает plugin lock timeout: действуют native configuration/session settings. Собственные SQL execution/lock timers плагин не задаёт.
 
 Текущие text codecs: SMALLINT/INTEGER/BIGINT, BOOLEAN, CHAR/VARCHAR, NUMERIC/DECIMAL в SHORT/LONG/INT64 и NULL. CHAR читается через varying fetch metadata с сохранением logical OID и пробелов. Ограничения output/input проверяются до исполнения по штатным metadata.
 
@@ -66,10 +66,10 @@ BEGIN, START TRANSACTION, `$n` и RETAINING не поддерживаются na
 |---|---|
 | `IWireProtocol : IPluginBase` | `createSession(status, host, connection)` возвращает одну owned reference; вызовы для instance последовательны, без network I/O и engine calls. Config получает factory штатным путём |
 | `IWireSession : IReferenceCounted` | `run(status)` вызывается один раз в host worker; `stop()` — конкурентный, идемпотентный, неблокирующий запрос остановки, допустимый до `run()`, без join, engine calls и освобождения session/plugin |
-| `IWireConnection : IReferenceCounted` | Host byte stream: `read`/`write` с partial I/O и timeout, конкурентный `shutdown`, неизменные peer address/port, `isEncrypted`; socket принадлежит host |
+| `IWireConnection : IReferenceCounted` | Host byte stream: `read`/`write` с partial I/O без timeout аргумента, конкурентный `shutdown`, неизменные peer address/port, `isEncrypted`; socket принадлежит host |
 | `IWireServerHost : IReferenceCounted` | `isStopping()`, ограниченные diagnostics и P2 attachDatabase/detachDatabase; версия 4 выдаёт borrowed attachment, принадлежащий host. TLS upgrade остаётся будущим расширением |
 
-В начальном ABI закреплён partial I/O contract: успешный `read` с нулевым результатом при ненулевом buffer size означает EOF; успешный `write` без прогресса недопустим; нулевой size — успешный no-op. Ошибка возвращает status и нулевой результат, ранее выполненный успешный I/O сохраняет силу. Нулевой timeout выбирает конечный host default; положительный может только сократить его. Timeout не является EOF. Один worker последовательно выполняет I/O; `shutdown()` будит ожидания и запрещает дальнейший I/O. Host ограничивает и экранирует diagnostics, plugin не передаёт туда credentials, auth payloads или значения SQL parameters.
+В начальном ABI закреплён partial I/O contract: успешный `read` с нулевым результатом при ненулевом buffer size означает EOF; успешный `write` без прогресса недопустим; нулевой size — успешный no-op. Ошибка возвращает status и нулевой результат, ранее выполненный успешный I/O сохраняет силу. Read/write ждут progress, EOF или shutdown без timeout. Один worker последовательно выполняет I/O; `shutdown()` будит ожидания и запрещает дальнейший I/O. Host ограничивает и экранирует diagnostics, plugin не передаёт туда credentials, auth payloads или значения SQL parameters.
 
 `ProtocolPlugin` в `src/remote/server/wire/ProtocolPlugin.h` загружает ровно один configured name, проверяет имя, результат factory и версии интерфейсов. Создание sessions сериализовано. `ProtocolSession` удерживает plugin, host и connection до последнего release session; plugin освобождается через `IPluginManager::releasePlugin()`. Wrapper не отдаёт raw session вызывающему коду и запрещает повторный `run()`. Worker/registry обязаны завершить `run()` и все `stop()` до уничтожения wrapper. Bind/listen, очередь, workers и callbacks остановки реализованы отдельно в `wire/os/posix/Server.cpp`.
 
@@ -104,7 +104,6 @@ Plugin = PgWire {
 Config = PgWireConfig {
     BindAddress = 127.0.0.1
     DatabaseAliases = pgwire_test
-    IOTimeout = 30000
 }
 ```
 
@@ -167,10 +166,9 @@ Host использует существующий `IMaster::getConfigManager()-
 | `BindAddress` | `127.0.0.1` | Только `127.0.0.1` |
 | `Workers` | 4 | Десятичное целое 1–16 |
 | `QueueSize` | 16 | Десятичное целое 1–64 |
-| `IOTimeout` | 30000 ms | Десятичное целое 1–300000 ms |
 | `DatabaseAliases` | Пустой список | Comma-separated allowlist локальных aliases; пустой запрещает attachments |
 
-Повтор любой host setting отвергается. Любой `Port` запрещён; любой `TLS` отвергается до реализации TLS transport. Остальные настройки остаются плагину. Глобальный предел — 16 configured endpoints и суммарный budget 64 workers. Заполненная очередь закрывает новое принятое соединение; queued socket не создаёт plugin session до свободного worker. `IOTimeout` ограничивает ожидание в очереди и отдельную transport operation. PgWire дополнительно применяет whole-frame и единый startup network deadline, включающий Password и ответы; partial reads/writes не продлевают его.
+Повтор любой host setting отвергается. Любой `Port` запрещён; любой `TLS` отвергается до реализации TLS transport. Остальные настройки остаются плагину. Глобальный предел — 16 configured endpoints и суммарный budget 64 workers. Заполненная очередь закрывает новое принятое соединение; queued socket не создаёт plugin session до свободного worker. Очередь не имеет истечения по времени. Transport/frame/startup/auth/output timers отсутствуют; блокирующий ввод-вывод прерывается EOF, ошибкой или shutdown.
 
 Пути, macros и module names разрешает штатный PluginManager; host не воспроизводит собственный поиск `.so`/`.dll`. Factory не открывает listener и не меняет сопоставление alias/port.
 
@@ -247,4 +245,4 @@ TLS реализуется поверх byte transport дополнительн�
 | POSIX objects/targets | `builds/posix/make.shared.variables`: Remote_Server и plugin object sets; `builds/posix/Makefile.in`: plugins, updateCloopInterfaces |
 | Другие build paths | `src/CMakeLists.txt`; `builds/win32/make_boot.bat`; `builds/win32/msvc15` |
 
-Существующие правила PluginManager подтверждены исходниками baseline. ABI и Linux/Super host используют штатный config API. P5 реализован и прошёл целевую Linux/Super loopback приёмку: I/T/E, native transaction/session controls и recovery. **Известное ограничение native baseline: READ COMMITTED READ CONSISTENCY + AUTO COMMIT не входит в подтверждённую совместимость; SNAPSHOT AUTO COMMIT проверен.** M1 ещё не принят, следующий этап — P6. Результаты и границы покрытия — в [VALIDATION.md](VALIDATION.md). TLS, Windows и другие server modes требуют отдельной реализации и приёмки.
+Существующие правила PluginManager подтверждены исходниками baseline. ABI и Linux/Super host используют штатный config API. Предыдущая P5-ревизия прошла целевую Linux/Super loopback приёмку: I/T/E, native transaction/session controls и recovery. Удаление wire-таймаутов проверено сборкой и выбранными unit/host/Simple Query регрессиями; полная P5-приёмка повторно не проводилась. **Известное ограничение native baseline: READ COMMITTED READ CONSISTENCY + AUTO COMMIT не входит в подтверждённую совместимость; SNAPSHOT AUTO COMMIT проверен.** M1 ещё не принят, следующий этап — P6. Результаты и границы покрытия — в [VALIDATION.md](VALIDATION.md). TLS, Windows и другие server modes требуют отдельной реализации и приёмки.

@@ -17,13 +17,11 @@
 #include <cstdio>
 #include <cstring>
 #include <initializer_list>
-#include <thread>
 #include <type_traits>
 #include <utility>
 
 using namespace Firebird;
 using namespace Firebird::PgWire;
-using namespace std::chrono_literals;
 
 namespace
 {
@@ -95,36 +93,30 @@ Bytes startup(std::initializer_list<std::pair<std::string_view, std::string_view
 	return result;
 }
 
-// A borrowed connection, owned by each test. Partial progress and bounded waits
-// are exercised through the public ABI, just as they are by a loaded plugin.
+// A borrowed connection, owned by each test. Partial progress and errors are
+// exercised through the public ABI, just as they are by a loaded plugin.
 class Connection final : public IWireConnectionImpl<Connection, CheckStatusWrapper>
 {
 public:
 	explicit Connection(Bytes input = {}) : input(std::move(input)) {}
 	void addRef() override { ++refs; }
 	int release() override { return --refs; }
-	unsigned read(CheckStatusWrapper* status, unsigned size, void* buffer, unsigned timeout) override
+	unsigned read(CheckStatusWrapper* status, unsigned size, void* buffer) override
 	{
-		timeouts.push_back(timeout);
 		if (failRead)
 		{
 			const ISC_STATUS errors[] = {isc_arg_gds, isc_net_read_err, isc_arg_end};
 			status->setErrors(errors);
 			return 0;
 		}
-		if (delay != 0ms)
-			std::this_thread::sleep_for(delay);
 		const unsigned count = std::min<std::size_t>({size, readChunk, input.size() - position});
 		if (count)
 			std::memcpy(buffer, input.data() + position, count);
 		position += count;
 		return excessiveRead ? size + 1 : count;
 	}
-	unsigned write(CheckStatusWrapper*, unsigned size, const void* buffer, unsigned timeout) override
+	unsigned write(CheckStatusWrapper*, unsigned size, const void* buffer) override
 	{
-		timeouts.push_back(timeout);
-		if (delay != 0ms)
-			std::this_thread::sleep_for(delay);
 		const unsigned count = std::min(size, writeChunk);
 		const auto* bytes = static_cast<const std::uint8_t*>(buffer);
 		output.insert(output.end(), bytes, bytes + count);
@@ -138,8 +130,6 @@ public:
 	Bytes input, output;
 	std::size_t position = 0;
 	unsigned readChunk = 3, writeChunk = 2;
-	std::vector<unsigned> timeouts;
-	std::chrono::milliseconds delay{0};
 	bool failRead = false, excessiveRead = false, excessiveWrite = false;
 	int refs = 1;
 };
@@ -160,8 +150,6 @@ void verifyStartup(IMaster* master)
 		"Startup values changed");
 	require(connection.output == Bytes({'N', 'N'}), "SSL/GSS refusal is not one byte each");
 	require(connection.position == connection.input.size(), "Startup framing lost alignment");
-	for (const auto timeout : connection.timeouts)
-		require(timeout && timeout <= 30000, "Unbounded startup operation");
 	Message message;
 	require(!protocol.readMessage(message), "Clean EOF was rejected");
 
@@ -445,65 +433,11 @@ void verifyResultErrors(IMaster* master)
 	protocol.dataRow(values);
 	require(connection.output.size() == 131075 && connection.output[5] == 0x7F &&
 		connection.output[6] == 0xFF, "Maximum supported result count changed");
-
-	connection.output.clear();
-	expectError("08006", [&] { protocol.dataRow({std::string("42")}, Protocol::Clock::now()); });
-	require(connection.output.empty(), "Expired result deadline wrote a frame");
 }
 
-void verifyDeadlinesAndTransport(IMaster* master)
+void verifyTransport(IMaster* master)
 {
-	Limits limits;
-	limits.timeoutMs = 25;
-	Connection slow(frame('Q', text("long enough")));
-	slow.readChunk = 1;
-	slow.delay = 10ms;
-	Protocol slowProtocol(master, &slow, limits);
 	Message message;
-	expectError("08006", [&] { slowProtocol.readMessage(message); });
-	require(slow.position < slow.input.size(), "Short progress reset the frame deadline");
-	require(!slow.timeouts.empty() && (slow.timeouts.size() == 1 ||
-		slow.timeouts.back() < slow.timeouts.front()),
-		"Transport timeouts did not consume the whole-frame budget");
-
-	Connection writes;
-	writes.writeChunk = 1;
-	writes.delay = 10ms;
-	Protocol writesProtocol(master, &writes, limits);
-	expectError("08006", [&] { writesProtocol.authenticationOk(); });
-	require(writes.output.size() < 9, "Short writes reset the frame deadline");
-	const Bytes authenticationFrame{'R', 0, 0, 0, 8, 0, 0, 0, 0};
-	require(std::equal(writes.output.begin(), writes.output.end(), authenticationFrame.begin()),
-		"Partial authentication write appended an error frame");
-
-	Connection rowWrites;
-	rowWrites.writeChunk = 8;
-	rowWrites.delay = 10ms;
-	Protocol rowWritesProtocol(master, &rowWrites, limits);
-	expectError("08006", [&] { rowWritesProtocol.dataRow({std::string(64, '7')}); });
-	Bytes rowFrame{'D', 0, 0, 0, 74, 0, 1, 0, 0, 0, 64};
-	rowFrame.insert(rowFrame.end(), 64, '7');
-	require(rowWrites.output.size() < rowFrame.size() &&
-		std::equal(rowWrites.output.begin(), rowWrites.output.end(), rowFrame.begin()),
-		"Partial DataRow deadline appended an error frame or reset its budget");
-
-	Bytes input = startup({{"user", "a"}, {"database", "d"}});
-	append(input, frame('p', text("secret")));
-	Connection authentication(input);
-	Protocol authenticationProtocol(master, &authentication, limits);
-	Startup result;
-	require(authenticationProtocol.readStartup(result), "Valid startup failed");
-	std::this_thread::sleep_until(authenticationProtocol.startupDeadline() + 1ms);
-	const auto before = authentication.position;
-	expectError("08006", [&] {
-		authenticationProtocol.readMessage(message, authenticationProtocol.startupDeadline());
-	});
-	require(authentication.position == before, "Password received a fresh startup deadline");
-	expectError("08006", [&] {
-		authenticationProtocol.authenticationOk(authenticationProtocol.startupDeadline());
-	});
-	require(authentication.output.empty(), "Expired startup wrote AuthenticationOk");
-
 	Connection broken;
 	broken.failRead = true;
 	Protocol brokenProtocol(master, &broken);
@@ -539,7 +473,7 @@ int main()
 		verifyBackend(master);
 		verifyResults(master);
 		verifyResultErrors(master);
-		verifyDeadlinesAndTransport(master);
+		verifyTransport(master);
 		std::puts("PgWire protocol codec tests passed");
 		return 0;
 	}

@@ -200,13 +200,6 @@ bool QueryExecutor::execute(Protocol& protocol, std::string_view sql)
 		if (state == 'E' && !recovery(info.control))
 			throw ProtocolError("25P02", "Current transaction is aborted; rollback is required");
 		checkStatement(request.statement, info);
-		// A statement timeout overrides the attachment timeout in the engine.
-		// Keep the plugin's execution bound while honoring a shorter native SET.
-		const auto sessionTimeout = attachment->getStatementTimeout(&status);
-		check(&status);
-		request.statement->setTimeout(&status,
-			sessionTimeout && sessionTimeout < timeoutMs ? sessionTimeout : timeoutMs);
-		check(&status);
 
 		if (info.control != ControlKind::None)
 		{
@@ -292,13 +285,10 @@ bool QueryExecutor::execute(Protocol& protocol, std::string_view sql)
 		std::vector<unsigned char> buffer(output.messageLength());
 		if (!transaction)
 		{
-			// Bounded lock waits, independent of network deadlines. Native explicit
-			// SET TRANSACTION characteristics (including AUTO COMMIT) are untouched.
-			const unsigned seconds = (timeoutMs + 999) / 1000;
+			// The engine controls statement and lock waits. Explicit SET TRANSACTION
+			// characteristics (including AUTO COMMIT) are passed through unchanged.
 			const unsigned char tpb[] = {isc_tpb_version3, isc_tpb_write,
-				isc_tpb_read_committed, isc_tpb_read_consistency, isc_tpb_wait,
-				isc_tpb_lock_timeout, 4, static_cast<unsigned char>(seconds),
-				static_cast<unsigned char>(seconds >> 8), 0, 0};
+				isc_tpb_read_committed, isc_tpb_read_consistency, isc_tpb_wait};
 			transaction = attachment->startTransaction(&status, sizeof(tpb), tpb);
 			check(&status);
 		}

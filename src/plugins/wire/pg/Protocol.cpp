@@ -216,40 +216,26 @@ std::string_view Message::text() const
 }
 
 Protocol::Protocol(IMaster* master, IWireConnection* connection, Limits limits)
-	: connection(connection), limits(limits), startupEnd(Clock::now() + std::chrono::milliseconds(limits.timeoutMs)),
+	: connection(connection), limits(limits),
 	  status(master ? master->getStatus() : nullptr)
 {
 	const Limits maximum;
 	if (!connection || !status || limits.startupBytes < 9 || limits.startupBytes > maximum.startupBytes ||
 		limits.frameBytes < 5 || limits.frameBytes > maximum.frameBytes ||
-		!limits.passwordBytes || limits.passwordBytes > maximum.passwordBytes ||
-		!limits.timeoutMs || limits.timeoutMs > 300000)
+		!limits.passwordBytes || limits.passwordBytes > maximum.passwordBytes)
 	{
 		throw std::invalid_argument("Invalid PgWire protocol limits or interfaces");
 	}
 }
 
-Protocol::Deadline Protocol::normalize(Deadline deadline) const
-{
-	return std::min(deadline, Clock::now() + std::chrono::milliseconds(limits.timeoutMs));
-}
-
-unsigned Protocol::remaining(Deadline deadline) const
-{
-	const auto duration = deadline - Clock::now();
-	if (duration <= Clock::duration::zero())
-		throw ProtocolError("08006", "Wire frame deadline exceeded");
-	return static_cast<unsigned>(std::chrono::ceil<std::chrono::milliseconds>(duration).count());
-}
-
-bool Protocol::readExact(void* buffer, unsigned size, Deadline deadline, bool allowEof)
+bool Protocol::readExact(void* buffer, unsigned size, bool allowEof)
 {
 	auto* bytes = static_cast<std::uint8_t*>(buffer);
 	unsigned done = 0;
 	while (done < size)
 	{
 		ThrowStatusWrapper wrapped(status.get());
-		const unsigned count = connection->read(&wrapped, size - done, bytes + done, remaining(deadline));
+		const unsigned count = connection->read(&wrapped, size - done, bytes + done);
 		if (!count)
 		{
 			if (!done && allowEof)
@@ -259,23 +245,21 @@ bool Protocol::readExact(void* buffer, unsigned size, Deadline deadline, bool al
 		if (count > size - done)
 			malformed("Transport returned excessive read length");
 		done += count;
-		remaining(deadline);
 	}
 	return true;
 }
 
-void Protocol::writeExact(const void* buffer, unsigned size, Deadline deadline)
+void Protocol::writeExact(const void* buffer, unsigned size)
 {
 	const auto* bytes = static_cast<const std::uint8_t*>(buffer);
 	unsigned done = 0;
 	while (done < size)
 	{
 		ThrowStatusWrapper wrapped(status.get());
-		const unsigned count = connection->write(&wrapped, size - done, bytes + done, remaining(deadline));
+		const unsigned count = connection->write(&wrapped, size - done, bytes + done);
 		if (!count || count > size - done)
 			throw ProtocolError("08006", "Transport returned invalid write length");
 		done += count;
-		remaining(deadline);
 	}
 }
 
@@ -285,12 +269,12 @@ bool Protocol::readStartup(Startup& startup)
 	for (;;)
 	{
 		std::uint8_t header[8];
-		if (!readExact(header, 4, startupEnd, true))
+		if (!readExact(header, 4, true))
 			return false;
 		const auto length = integer(header);
 		if (length < 8 || length > limits.startupBytes)
 			malformed("Invalid startup frame length");
-		readExact(header + 4, 4, startupEnd);
+		readExact(header + 4, 4);
 		const auto version = integer(header + 4);
 		if (version == SSL_REQUEST || version == GSS_REQUEST)
 		{
@@ -300,26 +284,25 @@ bool Protocol::readStartup(Startup& startup)
 			if (seen)
 				malformed("Repeated encryption request");
 			seen = true;
-			writeExact("N", 1, startupEnd);
+			writeExact("N", 1);
 			continue;
 		}
 		if (version != VERSION_3)
 			throw ProtocolError("0A000", "Only wire protocol version 3.0 is supported");
 		std::vector<std::uint8_t> body(length - 8);
-		readExact(body.data(), body.size(), startupEnd);
+		readExact(body.data(), body.size());
 		startup = parseStartup(body);
 		return true;
 	}
 }
 
-bool Protocol::readMessage(Message& message, Deadline deadline)
+bool Protocol::readMessage(Message& message)
 {
-	deadline = normalize(deadline);
 	message.clear();
 	std::uint8_t header[5];
-	if (!readExact(header, 1, deadline, true))
+	if (!readExact(header, 1, true))
 		return false;
-	readExact(header + 1, 4, deadline);
+	readExact(header + 1, 4);
 	const auto length = integer(header + 1);
 	if (length < 4 || length > limits.frameBytes)
 		malformed("Invalid frontend frame length");
@@ -327,7 +310,7 @@ bool Protocol::readMessage(Message& message, Deadline deadline)
 		malformed("Password frame exceeds its limit");
 	message.type = header[0];
 	message.body.resize(length - 4);
-	readExact(message.body.data(), message.body.size(), deadline);
+	readExact(message.body.data(), message.body.size());
 	if (message.type == 'p' || message.type == 'Q')
 		message.text();
 	else if (message.type == 'X' && !message.body.empty())
@@ -335,26 +318,25 @@ bool Protocol::readMessage(Message& message, Deadline deadline)
 	return true;
 }
 
-void Protocol::send(char type, const std::vector<std::uint8_t>& body, Deadline deadline)
+void Protocol::send(char type, const std::vector<std::uint8_t>& body)
 {
-	deadline = normalize(deadline);
 	if (body.size() > limits.frameBytes - 4)
 		malformed("Backend frame exceeds its limit");
 	std::vector<std::uint8_t> header{static_cast<std::uint8_t>(type)};
 	appendInteger(header, body.size() + 4);
-	writeExact(header.data(), header.size(), deadline);
-	writeExact(body.data(), body.size(), deadline);
+	writeExact(header.data(), header.size());
+	writeExact(body.data(), body.size());
 }
 
-void Protocol::authenticationCleartext(Deadline deadline)
+void Protocol::authenticationCleartext()
 {
-	send('R', {0, 0, 0, 3}, deadline);
+	send('R', {0, 0, 0, 3});
 }
-void Protocol::authenticationOk(Deadline deadline)
+void Protocol::authenticationOk()
 {
-	send('R', {0, 0, 0, 0}, deadline);
+	send('R', {0, 0, 0, 0});
 }
-void Protocol::parameterStatus(std::string_view name, std::string_view value, Deadline deadline)
+void Protocol::parameterStatus(std::string_view name, std::string_view value)
 {
 	if (limits.frameBytes < 6 || name.size() > limits.frameBytes - 6 ||
 		value.size() > limits.frameBytes - 6 - name.size())
@@ -362,15 +344,15 @@ void Protocol::parameterStatus(std::string_view name, std::string_view value, De
 	std::vector<std::uint8_t> body;
 	appendString(body, name);
 	appendString(body, value);
-	send('S', body, deadline);
+	send('S', body);
 }
-void Protocol::ready(char transaction, Deadline deadline)
+void Protocol::ready(char transaction)
 {
 	if (transaction != 'I' && transaction != 'T' && transaction != 'E')
 		throw std::invalid_argument("Invalid transaction status for ReadyForQuery");
-	send('Z', {static_cast<std::uint8_t>(transaction)}, deadline);
+	send('Z', {static_cast<std::uint8_t>(transaction)});
 }
-void Protocol::error(std::string_view sqlState, std::string_view message, bool fatal, Deadline deadline)
+void Protocol::error(std::string_view sqlState, std::string_view message, bool fatal)
 {
 	if (sqlState.size() != 5 || !std::all_of(sqlState.begin(), sqlState.end(), [](unsigned char c)
 		{ return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z'); }))
@@ -389,12 +371,11 @@ void Protocol::error(std::string_view sqlState, std::string_view message, bool f
 	body.push_back('M');
 	appendString(body, message);
 	body.push_back(0);
-	send('E', body, deadline);
+	send('E', body);
 }
 
-void Protocol::rowDescription(const std::vector<Column>& columns, Deadline deadline)
+void Protocol::rowDescription(const std::vector<Column>& columns)
 {
-	deadline = normalize(deadline);
 	checkFieldCount(columns.size());
 	std::size_t size = 0;
 	addResultBytes(size, 2, limits.frameBytes);
@@ -418,12 +399,11 @@ void Protocol::rowDescription(const std::vector<Column>& columns, Deadline deadl
 		appendInteger(body, static_cast<std::uint32_t>(column.typeModifier));
 		appendShort(body, 0); // Text format.
 	}
-	send('T', body, deadline);
+	send('T', body);
 }
 
-void Protocol::dataRow(const std::vector<std::optional<std::string>>& values, Deadline deadline)
+void Protocol::dataRow(const std::vector<std::optional<std::string>>& values)
 {
-	deadline = normalize(deadline);
 	checkFieldCount(values.size());
 	std::size_t size = 0;
 	addResultBytes(size, 2, limits.frameBytes);
@@ -449,12 +429,11 @@ void Protocol::dataRow(const std::vector<std::optional<std::string>>& values, De
 		else
 			appendInteger(body, 0xFFFFFFFF); // NULL length -1, without value bytes.
 	}
-	send('D', body, deadline);
+	send('D', body);
 }
 
-void Protocol::commandComplete(std::string_view tag, Deadline deadline)
+void Protocol::commandComplete(std::string_view tag)
 {
-	deadline = normalize(deadline);
 	std::size_t size = 0;
 	addResultBytes(size, 1, limits.frameBytes);
 	addResultBytes(size, tag.size(), limits.frameBytes);
@@ -462,12 +441,12 @@ void Protocol::commandComplete(std::string_view tag, Deadline deadline)
 	std::vector<std::uint8_t> body;
 	body.reserve(size);
 	appendString(body, tag);
-	send('C', body, deadline);
+	send('C', body);
 }
 
-void Protocol::emptyQuery(Deadline deadline)
+void Protocol::emptyQuery()
 {
-	send('I', {}, deadline);
+	send('I', {});
 }
 
 } // namespace Firebird::PgWire

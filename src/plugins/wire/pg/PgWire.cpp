@@ -18,7 +18,6 @@
 #include "../common/status.h"
 
 #include <atomic>
-#include <chrono>
 #include <cstring>
 #include <string>
 
@@ -57,8 +56,8 @@ const char* startupSqlState(const IStatus* status)
 class Session final : public RefCntIface<IWireSessionImpl<Session, CheckStatusWrapper>>
 {
 public:
-	Session(IWireServerHost* host, IWireConnection* connection, Limits limits)
-		: host(host), connection(connection), limits(limits) {}
+	Session(IWireServerHost* host, IWireConnection* connection)
+		: host(host), connection(connection) {}
 
 	void run(CheckStatusWrapper* status) override
 	{
@@ -76,7 +75,7 @@ public:
 				}
 			}
 		} owned{host};
-		Protocol protocol(MasterInterfacePtr(), connection, limits);
+		Protocol protocol(MasterInterfacePtr(), connection);
 		try
 		{
 			if (stopping())
@@ -84,10 +83,9 @@ public:
 			Startup startup;
 			if (!protocol.readStartup(startup))
 				return;
-			const auto deadline = protocol.startupDeadline();
-			protocol.authenticationCleartext(deadline);
+			protocol.authenticationCleartext();
 			Message message;
-			if (!protocol.readMessage(message, deadline))
+			if (!protocol.readMessage(message))
 				return;
 			if (message.type == 'X')
 				return;
@@ -102,20 +100,20 @@ public:
 			message.clear();
 			if (!owned.attachment || (authStatus->getState() & IStatus::STATE_ERRORS))
 			{
-				protocol.error(startupSqlState(&authStatus), "Database connection rejected", true, deadline);
+				protocol.error(startupSqlState(&authStatus), "Database connection rejected", true);
 				return;
 			}
 			if (stopping())
 				return;
-			protocol.authenticationOk(deadline);
-			protocol.parameterStatus("server_version", "16.0 (Firebird pgwire prototype)", deadline);
-			protocol.parameterStatus("server_encoding", "UTF8", deadline);
-			protocol.parameterStatus("client_encoding", "UTF8", deadline);
-			protocol.parameterStatus("DateStyle", "ISO, MDY", deadline);
-			protocol.parameterStatus("standard_conforming_strings", "on", deadline);
-			protocol.parameterStatus("application_name", startup.applicationName, deadline);
-			protocol.ready('I', deadline);
-			QueryExecutor executor(owned.attachment, limits.timeoutMs);
+			protocol.authenticationOk();
+			protocol.parameterStatus("server_version", "16.0 (Firebird pgwire prototype)");
+			protocol.parameterStatus("server_encoding", "UTF8");
+			protocol.parameterStatus("client_encoding", "UTF8");
+			protocol.parameterStatus("DateStyle", "ISO, MDY");
+			protocol.parameterStatus("standard_conforming_strings", "on");
+			protocol.parameterStatus("application_name", startup.applicationName);
+			protocol.ready('I');
+			QueryExecutor executor(owned.attachment);
 
 			while (!stopping() && protocol.readMessage(message))
 			{
@@ -166,36 +164,19 @@ private:
 			return;
 		try
 		{
-			protocol.error(state, message, true, Protocol::Clock::now() + std::chrono::milliseconds(100));
+			protocol.error(state, message, true);
 		}
 		catch (...) {}
 	}
 	IWireServerHost* const host;
 	IWireConnection* const connection;
-	const Limits limits;
 	std::atomic<bool> stopped{false};
 };
 
 class Plugin final : public StdPlugin<IWireProtocolImpl<Plugin, CheckStatusWrapper>>
 {
 public:
-	explicit Plugin(IPluginConfig* factory)
-	{
-		FbLocalStatus status;
-		RefPtr<IConfig> config(REF_NO_INCR, factory->getDefaultConfig(&status));
-		check(&status);
-		if (!config)
-			return;
-		RefPtr<IConfigEntry> timeout(REF_NO_INCR, config->find(&status, "IOTimeout"));
-		check(&status);
-		if (timeout)
-		{
-			const auto value = timeout->getIntValue();
-			if (value < 1 || value > 300000)
-				(Arg::Gds(isc_random) << "PgWire IOTimeout must be between 1 and 300000 ms").raise();
-			limits.timeoutMs = value;
-		}
-	}
+	explicit Plugin(IPluginConfig*) {}
 	IWireSession* createSession(CheckStatusWrapper* status, IWireServerHost* host,
 		IWireConnection* connection) override
 	{
@@ -203,15 +184,13 @@ public:
 		{
 			if (!host || !connection || host->cloopVTable->version < IWireServerHost::VERSION)
 				(Arg::Gds(isc_random) << "PgWire requires host attachment services").raise();
-			auto* session = FB_NEW Session(host, connection, limits);
+			auto* session = FB_NEW Session(host, connection);
 			session->addRef();
 			return session;
 		}
 		catch (const Exception& ex) { ex.stuffException(status); }
 		return nullptr;
 	}
-private:
-	Limits limits;
 };
 
 SimpleFactory<Plugin> factory;

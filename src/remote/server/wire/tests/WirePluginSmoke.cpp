@@ -107,7 +107,7 @@ public:
 		delete this;
 		return 0;
 	}
-	unsigned read(CheckStatusWrapper* status, unsigned size, void* buffer, unsigned) override
+	unsigned read(CheckStatusWrapper* status, unsigned size, void* buffer) override
 	{
 		std::unique_lock<std::mutex> guard(mutex);
 		observations.enteredRead = true;
@@ -123,7 +123,7 @@ public:
 		position += count;
 		return count;
 	}
-	unsigned write(CheckStatusWrapper* status, unsigned size, const void* buffer, unsigned) override
+	unsigned write(CheckStatusWrapper* status, unsigned size, const void* buffer) override
 	{
 		std::lock_guard<std::mutex> guard(mutex);
 		if (closed)

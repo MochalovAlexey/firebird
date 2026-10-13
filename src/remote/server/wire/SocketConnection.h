@@ -20,12 +20,11 @@ namespace Firebird::WireProtocol
 {
 
 // POSIX host transport. Takes ownership of socket immediately, including on
-// failure, and returns one owned reference. The caller must supply a positive
-// finite default timeout and the accepted connection's numeric peer address.
+// failure, and returns one owned reference. The caller supplies the accepted
+// connection's numeric peer address.
 // Setup errors throw Firebird::Exception. I/O errors use the interface status.
 // The descriptor is closed only when the final connection reference is released.
-IWireConnection* createSocketConnection(int socket, unsigned defaultTimeoutMs,
-	const char* peerAddress, unsigned peerPort);
+IWireConnection* createSocketConnection(int socket, const char* peerAddress, unsigned peerPort);
 
 } // namespace Firebird::WireProtocol
 
