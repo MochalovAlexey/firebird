@@ -285,3 +285,13 @@ EDS wrapper нельзя вызывать до attachment. Общий host auth 
 - [Firebird native temporal constants](../src/common/classes/NoThrowTimeStamp.h), [native timestamp implementation](../src/common/classes/NoThrowTimeStamp.cpp) и [Int128](../src/common/Int128.h): native epoch/range/100 µs и переносимый доступ к native integer representation.
 
 P8 ограничивает input точной представимостью native типа; NUMERIC/temporal не округляются внутри codecs. Это явно более узкий профиль, чем все значения PostgreSQL. Независимые binary fixtures находятся в unit tests и [codec harness](tools/pgwire_codec_smoke.py).
+
+
+### S19 — клиентская приёмка P9
+
+- [libpq asynchronous command processing](https://www.postgresql.org/docs/14/libpq-async.html): PQflush/PQconsumeInput/PQisBusy и завершение потока PQgetResult.
+- [Psycopg Cursor API](https://www.psycopg.org/psycopg3/docs/api/cursors.html) и [prepared statements](https://www.psycopg.org/psycopg3/docs/advanced/prepare.html): prepare/binary и настройки cache.
+- [Psycopg 3.3.6](https://pypi.org/project/psycopg/3.3.6/): выбранная версия тестового клиента.
+- [Psycopg connection implementation 3.3.6](https://github.com/psycopg/psycopg/blob/3.3.6/psycopg/psycopg/_connection_base.py) и [prepare manager](https://github.com/psycopg/psycopg/blob/3.3.6/psycopg/psycopg/_preparing.py): SQL DEALLOCATE ALL при полной очистке cache, Close для отдельного statement с подходящей libpq.
+
+Результаты P9 основаны на live Firebird TCP и сохранённых libpq traces, а не только на документации библиотек; версии, конкретные ограничения и source-only наблюдения отделены в VALIDATION/COMPATIBILITY.

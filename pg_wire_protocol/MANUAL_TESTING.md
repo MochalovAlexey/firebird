@@ -14,9 +14,9 @@ PgWire использует ограниченный анализ начала �
 
 P7 Extended Query прошёл целевую Linux/Super приёмку: 16 групп, см. [VALIDATION.md](VALIDATION.md). Этот консольный `pgwire_client.py` использует `PQexec`/Simple Query и не добавляет отдельные Bind values. Для P7 нужен прямой libpq `PQexecParams` либо `PQprepare`/`PQexecPrepared`, например SQL `SELECT CAST(? AS INTEGER) FROM RDB$DATABASE` с одним отдельным text parameter `42`. SQL остаётся неизменным; `$1` и автоматически добавленный BEGIN по-прежнему получают parser error.
 
-Input/output поддерживают text/binary integer/BOOLEAN/CHAR/VARCHAR, точные NUMERIC/DECIMAL и INT128, FLOAT/DOUBLE, DATE/TIME/TIMESTAMP без TZ и NULL. Named prepared statements можно повторно исполнять после commit; portals ограничены transaction и удаляются при ошибке/завершении. RESET очищает все prepared objects. Лимиты session: 128 statements, 128 portals, 8 MiB учитываемых SQL/metadata/buffers. Профиль Psycopg 3 ещё не проверен; результаты существующих Simple Query примеров не доказывают совместимость его автоматически генерируемого SQL.
+Input/output поддерживают text/binary integer/BOOLEAN/CHAR/VARCHAR, точные NUMERIC/DECIMAL и INT128, FLOAT/DOUBLE, DATE/TIME/TIMESTAMP без TZ и NULL. Named prepared statements можно повторно исполнять после commit; portals ограничены transaction и удаляются при ошибке/завершении. RESET очищает все prepared objects. Лимиты session: 128 statements, 128 portals, 8 MiB учитываемых SQL/metadata/buffers. Ограниченный профиль Psycopg 3 проверен в P9 ниже; его автоматически генерируемый SQL поддерживается только в явно описанных границах.
 
-Для неоднозначного native expression задайте тип самого параметра в исходном SQL, например `CAST(? AS INTEGER) + ID`: Parse OID hints не заменяют вывод типов Firebird, плагин не вставляет CAST. В Extended Query успешный implicit cycle фиксируется на Sync; ошибка откатывает его до Sync. SET TRANSACTION при уже открытом implicit cycle получает 25001. Codecs расширены в P8; клиентская приёмка M2 — в P9.
+Для неоднозначного native expression задайте тип самого параметра в исходном SQL, например `CAST(? AS INTEGER) + ID`: Parse OID hints не заменяют вывод типов Firebird, плагин не вставляет CAST. В Extended Query успешный implicit cycle фиксируется на Sync; ошибка откатывает его до Sync. SET TRANSACTION при уже открытом implicit cycle получает 25001. Codecs расширены в P8; целевая клиентская приёмка M2 пройдена в P9.
 
 ## Подготовить экземпляр Firebird
 
@@ -445,3 +445,25 @@ COMMIT;
 ```
 
 Если необязательную процедуру не создавали, пропустите её DROP. Подробные границы текущего этапа — в [COMPATIBILITY.md](COMPATIBILITY.md), результаты автоматической приёмки — в [VALIDATION.md](VALIDATION.md).
+
+
+## Клиентская приёмка P9
+
+Для Psycopg 3 проверены версия 3.3.6, binary implementation с libpq 18.6, Python 3.10.12. Тестовое окружение создаётся отдельно:
+
+```sh
+python3 -m venv /tmp/firebird-pgwire-p9-deps/venv
+/tmp/firebird-pgwire-p9-deps/venv/bin/python -m pip install 'psycopg[binary]==3.3.6'
+python3 -B pg_wire_protocol/tools/pgwire_extended_query_smoke.py \
+  --firebird-dir /tmp/firebird-pgwire-build/gen/Debug/firebird \
+  --work-dir /tmp/firebird-pgwire-p9-clients-new \
+  --libpq-include-dir /tmp/firebird-pgwire-p3-deps/libpq-dev/usr/include/postgresql \
+  --libpq-library /lib/x86_64-linux-gnu/libpq.so.5 \
+  --psycopg3-python /tmp/firebird-pgwire-p9-deps/venv/bin/python
+```
+
+Нужны реальная сборка и установленные headers/libpq; пути выше относятся к окружению приёмки, их можно заменить. Work directory должен быть новым и находиться вне build tree. Harness сам создаёт тестовую базу и запускает сервер. Без `--psycopg3-python` он проверяет C libpq и raw-wire; такой запуск сам по себе не проверяет Psycopg 3.
+
+Child `pgwire_psycopg3.py` использует PG* environment, созданный harness, и записывает libpq traces после authentication. Проверены обычные Cursor/AsyncCursor без parameters, autocommit=True, Simple/forced preparation/text/binary results и native controls с prepare_threshold=None. В отчёте отдельно указаны ожидаемые 42601 для implicit BEGIN, `%s`→`$1`, sql.Literal(date)→`::date` и prepared-cache ROLLBACK→DEALLOCATE ALL. Последняя ошибка возникает уже после успешного rollback; fixture проверяет его эффект и последующее восстановление соединения. Эти ограничения нельзя считать поддержкой обычного PostgreSQL transaction/parameter profile.
+
+Существующий интерактивный `pgwire_client.py` по-прежнему вызывает libpq PQexec/Simple Query. Он не заменён новым test-only child.

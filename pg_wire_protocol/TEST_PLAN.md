@@ -2,7 +2,7 @@
 
 База — `master` Firebird 6, SHA из [BASELINE.md](BASELINE.md). Архитектура и SQL boundary определены в [ARCHITECTURE.md](ARCHITECTURE.md), transaction contract — в [CODEX_CONTEXT.md](CODEX_CONTEXT.md), заявляемые возможности — в [COMPATIBILITY.md](COMPATIBILITY.md).
 
-Python scaffold мигрирован под текущий контракт: 58 live cases прошли в P6. Начальные host tests расположены в src/common/tests/WireProtocolConfigTest.cpp, src/remote/server/wire/tests и isolated tools harness. P2/P3/P4 приёмка сохранена в VALIDATION. Предыдущая P5-ревизия прошла целевую Linux/Super приёмку с native ограничением READ CONSISTENCY + AUTO COMMIT; P6 повторил сборку, unit tests и целевые регрессии по [VALIDATION.md](VALIDATION.md). Целевой P6/M1 Linux/Super принят с известными native ограничениями, включая отдельно исключённый ON CONNECT shutdown. P7 Extended Query прошёл целевую Linux/Super приёмку: 16 групп. P8 codecs прошли целевую Linux/Super приёмку: восемь групп. Следующий этап — P9/M2; полная совместимость M2 пока не заявляется. PASS относится к зафиксированным cases/fixtures, а наличие строки в полной матрице не означает её прохождения.
+Python scaffold мигрирован под текущий контракт: 58 live cases прошли в P6. Начальные host tests расположены в src/common/tests/WireProtocolConfigTest.cpp, src/remote/server/wire/tests и isolated tools harness. P2/P3/P4 приёмка сохранена в VALIDATION. Предыдущая P5-ревизия прошла целевую Linux/Super приёмку с native ограничением READ CONSISTENCY + AUTO COMMIT; P6 повторил сборку, unit tests и целевые регрессии по [VALIDATION.md](VALIDATION.md). Целевой P6/M1 Linux/Super принят с известными native ограничениями, включая отдельно исключённый ON CONNECT shutdown. P7 Extended Query прошёл целевую Linux/Super приёмку: 16 групп. P8 codecs прошли целевую Linux/Super приёмку: восемь групп. P9 прошёл 17 групп с реальными C libpq, raw-wire и ограниченным профилем Psycopg 3; целевой M2 Linux/Super для совместимого SQL и реализованных codecs принят. Следующий этап — P10. PASS относится к зафиксированным cases/fixtures, а наличие строки в полной матрице не означает её прохождения.
 
 ## Этапы и обязательный минимум
 
@@ -191,7 +191,7 @@ T11 не утверждает, что prepare лишён compile/cache/lock/trac
 
 ## D. Типы, строки и диагностика
 
-P8 прошёл целевую Linux/Super приёмку: восемь групп [codec harness](tools/pgwire_codec_smoke.py), восемь unit executables и регрессии. Результаты — в [VALIDATION.md](VALIDATION.md). Новые типы проверяются в text/binary Bind/result и Simple Query/RETURNING: FLOAT/DOUBLE, numeric через INT128, finite DATE/TIME/TIMESTAMP без TZ. Следующий этап после принятого P8 — P9/M2; нижеследующие критерии сами по себе не являются PASS.
+P8 прошёл целевую Linux/Super приёмку: восемь групп [codec harness](tools/pgwire_codec_smoke.py), восемь unit executables и регрессии. Результаты — в [VALIDATION.md](VALIDATION.md). Новые типы проверяются в text/binary Bind/result и Simple Query/RETURNING: FLOAT/DOUBLE, numeric через INT128, finite DATE/TIME/TIMESTAMP без TZ. Приёмка P9/M2 завершена по профилю ниже; следующий этап — P10. Наличие строки в матрице само по себе не является PASS.
 
 | ID | Сценарий | Критерий |
 |---|---|---|
@@ -211,9 +211,9 @@ P8 прошёл целевую Linux/Super приёмку: восемь груп
 
 ## E. Extended Query с совместимым SQL
 
-**Целевая Linux/Super приёмка P7 — PASS: 16 групп; evidence в [VALIDATION.md](VALIDATION.md).** В принятом P7 были basic text input/output и binary integer/BOOLEAN/строки; текущий P8 реализует binary NUMERIC, FLOAT/temporal/INT128, прошедшие отдельную целевую приёмку. Наличие строк ниже не означает PASS. Psycopg 3 фактически ещё не проверен; P7 использует C libpq и raw-wire, с отрицательными `$1`/BEGIN cases.
+**Целевая Linux/Super приёмка P7 — PASS: 16 групп; evidence в [VALIDATION.md](VALIDATION.md).** В принятом P7 были basic text input/output и binary integer/BOOLEAN/строки; текущий P8 реализует binary NUMERIC, FLOAT/temporal/INT128, прошедшие отдельную целевую приёмку. Наличие строк ниже не означает PASS. P7 использовал C libpq и raw-wire, с отрицательными `$1`/BEGIN cases; Psycopg 3 тогда не проверялся. Ограниченный live profile P9 приведён ниже.
 
-Пять codec unit executables прошли, включая 149 input и 487 SQL-classifier checks; повторные семь server groups/58 pytest cases и девять native baseline checks прошли. Suspended-portal shutdown потребовал узкого native release_attachment fix для нескольких requests одного Statement; падение подтверждено также без PgWire. [Native prepared-shutdown harness](tools/pgwire_native_prepared_shutdown_smoke.py) после исправления прошёл три проверки, обе остановки — exit 0. Grammar/public metadata/CLOOP не менялись. Отдельный ON CONNECT !child остаётся неисправленным и не перепроверялся. Остальные команды и evidence — в VALIDATION; M2 принимается в P9 после P8.
+Пять codec unit executables прошли, включая 149 input и 487 SQL-classifier checks; повторные семь server groups/58 pytest cases и девять native baseline checks прошли. Suspended-portal shutdown потребовал узкого native release_attachment fix для нескольких requests одного Statement; падение подтверждено также без PgWire. [Native prepared-shutdown harness](tools/pgwire_native_prepared_shutdown_smoke.py) после исправления прошёл три проверки, обе остановки — exit 0. Grammar/public metadata/CLOOP не менялись. Отдельный ON CONNECT !child остаётся неисправленным и не перепроверялся. Остальные команды и evidence — в VALIDATION; целевой M2 принят в P9 после P8.
 
 Прямой C libpq harness фиксирует `PQlibVersion`, compile headers, OS и SHA. Он использует `PQexecParams`/`PQprepare` с нулём параметров и с native SQL `SELECT CAST(? AS INTEGER) FROM RDB$DATABASE`; libpq передаёт текст серверу. Это проверяет wire Bind, но не поддержку PostgreSQL `$n`.
 
@@ -224,12 +224,26 @@ P8 прошёл целевую Linux/Super приёмку: восемь груп
 | E03 | Named/unnamed objects, replacement, Close, Describe | Named statement переживает commit; Close statement/unnamed Parse replacement сохраняют bound portals; Q удаляет unnamed statement/portal; NoData/RowDescription/ParameterDescription согласованы |
 | E04 | Несколько portals, Execute maxRows, PortalSuspended | Нет потерь/дубликатов; buffers/cursors/formats изолированы; CommandComplete только по завершении |
 | E05 | Parse/Bind/Execute error, последующие сообщения до Sync | Все portals инвалидируются; discard-until-Sync без effects отброшенных команд, explicit transaction остаётся E; malformed frame fatal, semantic count/format error recoverable до Sync |
-| E06 | Flush без Sync, несколько Execute до Sync | Ответы доступны, implicit commit и ReadyForQuery появляются на правильной границе; ошибка откатывает implicit cycle до Sync. SET TRANSACTION при уже открытом implicit cycle получает 25001, без замены native TPB |
+| E06 | Flush без Sync, несколько Execute до Sync; SET TRANSACTION при pending implicit cycle | Ответы доступны, implicit commit и ReadyForQuery появляются на правильной границе; ошибка откатывает implicit cycle до Sync. Native SET TRANSACTION получает 25001 без замены TPB, pending write откатывается до Sync, затем I и recovery |
 | E07 | Sync внутри native explicit transaction, Simple/Extended switching | T и suspended portals сохраняются через Sync; transaction end удаляет portals, named statement остаётся; ошибка сохраняет transaction/E с инвалидированными portals |
-| E08 | PQsendQueryParams/PQsendQueryPrepared/PQgetResult | Async/nonblocking API без pipeline, правильный конец результатов и errors |
+| E08 | C libpq 14.24 sync/async без pipeline | PQsendPrepare/DescribePrepared/QueryParams/QueryPrepared; PQflush + poll READ/WRITE + PQconsumeInput + PQisBusy перед каждым PQgetResult; полный drain до NULL и PQclear всех результатов. Named/unnamed reuse, Parse42601/Bind22003/Execute22012, recovery, explicit T→E→25P02→ROLLBACK/I и настоящий rollback эффекта |
 | E09 | Limits, EOF/shutdown с prepared objects и suspended portal | 128 statements, 128 portals, 8 MiB учитываемых SQL/metadata/buffers; при отказе нет частично опубликованного object; закрываются handles/cursors, module lifetime сохраняется |
-| E10 | Обычный Psycopg 3 с параметрами `%s` → `$n` | Пока parser не расширен, зафиксированный syntax failure; не объявлять такую библиотеку параметризованно совместимой |
+| E10 | Psycopg 3.3.6: `%s` → `$n` и automatic BEGIN | Ожидаемый 42601 и дальнейшее recovery; positive zero-argument profile не доказывает обычную parameterized/transactional совместимость |
 | E11 | Несколько Parse/Describe/statements/portals перед ALTER SESSION RESET | Prepare использует текущую application transaction либо NULL/system prepare; собственных transactions у prepared objects нет. RESET не получает ошибку из-за скрытой prepare-transaction, корректно заменяет текущую transaction, инвалидирует все statements/portals, включая same-pointer native reset; следующий запрос работает |
+
+### Дополнение P9: целевой M2 Linux/Super PASS
+
+Версии фиксируются отдельно: C libpq 14.24 headers/runtime и Psycopg 3.3.6 binary implementation/libpq 18.6 на Python 3.10.12. Профиль Psycopg 3 прошёл пять live TCP групп с четырьмя ожидаемыми ограничениями. Реальные Cursor/AsyncCursor проверены без параметров и без pipeline; traces подтверждают Simple/Extended/Close, а native observer — effects. P9 прошёл 17 групп, целевой M2 для совместимого SQL и реализованных codecs принят. C async дал 20 commands/20 results и 40 poll calls. Повторные регрессии прошли: Simple Query 12, transactions 14, startup 49, server 7 с 58 pytest cases, P8 codecs 8, native baseline 9. Evidence фиксируется в VALIDATION; следующий этап — P10.
+
+| ID | Клиентский сценарий | Критерий |
+|---|---|---|
+| P9-01 | Psycopg 3 autocommit=True, zero-argument SELECT | PASS: реальные P8 values/OID/type conversions и пустой результат; Simple Query отдельно от Extended |
+| P9-02 | Psycopg 3 forced prepare=True / binary=True | PASS: реальный Extended обмен, named reuse через COMMIT, text/binary codecs и Close eviction; отдельная connection с включённым preparation. AsyncCursor Simple/Extended/binary и native COMMIT также PASS |
+| P9-03 | Psycopg 3 native controls с prepare_threshold=None | PASS: fresh autocommit connection, SET TRANSACTION/COMMIT/ROLLBACK, savepoint, I/T/E, failed COMMIT и effects; без автоматического BEGIN и cache maintenance SQL |
+| P9-04 | Prepared cache, затем ROLLBACK; source boundaries DROP/ALTER/RESET | Подтверждённый negative case: после завершённого ROLLBACK драйвер посылает DEALLOCATE ALL и получает 42601; состояние I и следующий запрос работают. DROP/ALTER cache clear и RESET stale cache отдельно live не проверялись |
+| P9-05 | C/raw-wire compatible SQL и регрессии P8/M1 | PASS выбранной целевой матрицы: M2 принят; SQL неизменённый, `$n`/BEGIN negative cases сохранены, driver versions и cleanup подтверждены |
+
+Дополнительно live подтверждены три syntax boundaries с 42601: автоматический BEGIN, `%s` → `$n` и `sql.Literal(date)` → `::date`. Prepared trace содержит Parse 6, Bind/Execute по 9, Sync 19 и Close 4; одного Simple Query для этого результата недостаточно. В `prepare_threshold=None` даже forced prepare=True отключён, поэтому P9-02 и P9-03 используют разные connections. Реальный event loop E08 не добавляет внутренних deadline/pause tests; тестовый subprocess ограничен существующим внешним watchdog.
 
 После отдельной поддержки `$n` в parser добавить repeated/reordered indices, gaps/overflow, references в literals/comments и обычный Psycopg 3 Cursor с переходом к named preparation. Эти проверки обязательны для будущего заявления о таком клиенте. ClientCursor и клиентская подстановка не заменяют Extended Query. Pipeline и COPY требуют самостоятельных матриц, если входят в профиль приложения.
 

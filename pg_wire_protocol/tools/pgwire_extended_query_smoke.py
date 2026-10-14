@@ -141,7 +141,16 @@ class ExtendedHarness(QueryHarness):
         super().__init__(source, work, timeout, args)
         self.summary['stage'] = 'P7 Extended Query, prepared statements and portals'
         self.summary['sql_scope'] = 'Native ? parameters; PostgreSQL $n and BEGIN remain parser errors'
-        self.summary['driver_scope'] = 'Real C libpq and raw TCP; actual Psycopg3 profile is deferred to P9'
+        self.summary['driver_scope'] = 'Real C libpq and raw TCP; Psycopg3 runs only with --psycopg3-python'
+        if getattr(args, 'psycopg3_python', None):
+            self.summary['stage'] = 'P9 client acceptance: libpq, raw protocol and actual Psycopg3 profile'
+            self.summary['driver_scope'] = 'Real C libpq, raw TCP and explicitly bounded Psycopg3 profile'
+        revision = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=Path(__file__).resolve().parents[2],
+                                  capture_output=True, text=True, timeout=5)
+        if revision.returncode == 0:
+            self.summary['source_revision'] = revision.stdout.strip()
+        self.summary['pgwire_binary_sha256'] = hashlib.sha256(
+            (source / 'plugins/libPgWire.so').read_bytes()).hexdigest()
 
     def prepare(self):
         StartupHarness.prepare(self)
@@ -168,6 +177,32 @@ GRANT SELECT ON P7_ROWS TO PROCEDURE P7_STREAM;
 COMMIT;
 QUIT;
 """, embedded=True)
+
+        if getattr(self.args, 'psycopg3_python', None):
+            self.isql('psycopg3_fixtures', f"CONNECT '{self.database}';\n"
+                'CREATE TABLE P9_ROWS (ID INTEGER NOT NULL PRIMARY KEY, V INTEGER);\n'
+                'GRANT SELECT, INSERT, UPDATE, DELETE ON P9_ROWS TO USER WIRE_HOST_TEST;\n'
+                'COMMIT;\nQUIT;\n', embedded=True)
+
+    def psycopg3(self):
+        script = Path(__file__).with_name('pgwire_psycopg3.py').resolve()
+        trace = self.work / 'psycopg3-trace'
+        env = self.driver_environment()
+        env['PGAPPNAME'] = 'pgwire_p9_psycopg3'
+        result = subprocess.run([str(self.args.psycopg3_python), '-B', str(script),
+                                 '--trace-dir', str(trace)], env=env, cwd=self.temp,
+                                capture_output=True, text=True, timeout=self.timeout)
+        (self.work / 'psycopg3.log').write_text(self.redact(result.stdout + result.stderr))
+        require(result.returncode == 0, 'Psycopg3 profile failed; see psycopg3.log')
+        self.summary['psycopg3'] = json.loads(result.stdout)
+        self.summary['psycopg3_source_sha256'] = hashlib.sha256(script.read_bytes()).hexdigest()
+        require(self.scalar_native('SELECT COUNT(*) AS OBSERVED FROM P9_ROWS '
+                'WHERE (ID=9301 AND V=11) OR (ID=9303 AND V=33)') == 2 and
+                self.scalar_native('SELECT COUNT(*) AS OBSERVED FROM P9_ROWS') == 2,
+                'native observer did not see exact Psycopg3 commit/rollback effects')
+        self.summary['psycopg3_native_visibility'] = True
+        self.no_attachments()
+        self.transaction_count(0)
 
     def transaction_count(self, expected):
         actual = self.scalar_native('SELECT COUNT(*) AS OBSERVED FROM MON$TRANSACTIONS T '
@@ -286,6 +321,18 @@ QUIT;
         self.simple(c, ANSWER, 'SELECT 1')
         self.seen(104, 1)
         self.transaction_count(0)
+        c.exchange(bind('write4', 'write', ['105']) + execute('write4') + packet(b'H'),
+                   b'2C', end=b'C', tag='INSERT 0 1')
+        self.seen(105, 0)
+        self.transaction_count(1)
+        # A native TPB cannot replace the transaction of an unfinished cycle.
+        c.exchange(parse('start', 'SET TRANSACTION') + bind('start', 'start') +
+                   execute('start') + packet(b'H'), b'12E', end=b'E', error='25001')
+        self.transaction_count(0)
+        self.seen(105, 0)
+        c.exchange(packet(b'S'), b'Z')
+        self.seen(105, 0)
+        c.run(ANSWER, rows=[['42']], tag='SELECT 1')
         self.finish(c)
 
     def discard_and_recovery(self):
@@ -538,6 +585,8 @@ QUIT;
         native, configured, port = reserve_ports(3)
         self.start('extended', native, configured, [{'alias': 'PgWire', 'port': port}])
         self.finish(ExtendedClient(self).login())
+        if getattr(self.args, 'psycopg3_python', None):
+            self.check('actual_psycopg3_profile_and_observed_sql_boundaries', self.psycopg3)
         for name, action in (
             ('direct_c_libpq_params_prepared_async_and_binary', self.c_libpq),
             ('describe_named_unnamed_replacement_close_and_simple_switch', self.descriptions_and_lifetimes),
@@ -563,6 +612,8 @@ def main():
     parser.add_argument('--work-dir', type=Path, required=True)
     parser.add_argument('--libpq-include-dir', type=Path, required=True)
     parser.add_argument('--libpq-library', type=Path, required=True)
+    parser.add_argument('--psycopg3-python', type=Path,
+                        help='optional Python with Psycopg 3 to include P9 driver profile')
     parser.add_argument('--cc', default='cc')
     parser.add_argument('--timeout', type=float, default=30)
     args = parser.parse_args()
@@ -574,6 +625,10 @@ def main():
     for name in ('bin/firebird', 'bin/isql', 'security6.fdb', 'plugins/libPgWire.so'):
         if not (source / name).is_file():
             parser.error(f'completed build required: missing {source / name}')
+    if args.psycopg3_python:
+        args.psycopg3_python = args.psycopg3_python.absolute()
+        if not args.psycopg3_python.is_file():
+            parser.error('Psycopg 3 Python executable is unavailable')
     args.libpq_include_dir = args.libpq_include_dir.resolve()
     args.libpq_library = args.libpq_library.resolve()
     if not args.libpq_library.is_file():

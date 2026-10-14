@@ -600,7 +600,7 @@ executables passed, including 149 input and 487 SQL classification checks;
 seven server groups/58 pytest cases and nine native baseline checks also passed.
 Acceptance results and remaining limitations are recorded in
 [`VALIDATION.md`](../pg_wire_protocol/VALIDATION.md). P8 passed eight dedicated codec groups and the regressions recorded in VALIDATION;
-driver/application profiles belong to P9.
+P9 client acceptance is described below. Application-specific acceptance remains separate.
 
 
 ## PgWire extended codecs (P8)
@@ -631,3 +631,34 @@ The dedicated [codec harness](../pg_wire_protocol/tools/pgwire_codec_smoke.py)
 uses a real C libpq client and independent binary fixtures, checks extended
 parameters/results and RETURNING, and verifies committed values via native TCP.
 See [VALIDATION](../pg_wire_protocol/VALIDATION.md) for actual run results.
+
+
+## PgWire client acceptance (P9/M2)
+
+The targeted Linux/Super IPv4 loopback M2 profile passed 17 client/raw-protocol
+groups and the recorded M1/P8/native regressions. No production code changed in
+P9. Direct C libpq 14.24 uses a real nonblocking poll/PQflush/PQconsumeInput/PQisBusy
+loop, calling PQgetResult only when ready and draining to NULL after every command,
+including errors. Named/unnamed reuse, formats and explicit failed-transaction
+recovery are covered.
+
+Psycopg 3.3.6 (binary implementation, libpq 18.6, Python 3.10.12) passed its
+explicitly bounded profile: autocommit=True, compatible SQL without parameters,
+Simple and prepared Extended queries, text/binary P8 scalar results, prepared
+reuse after COMMIT, named Close during cache eviction, and AsyncCursor. Native
+transaction controls and savepoint recovery are tested on a separate connection
+with prepare_threshold=None; a native TCP observer confirms the results.
+
+The ordinary driver's implicit BEGIN, %s-to-$1 parameters and date literal ::date
+remain parser errors (42601). With a populated prepared cache, ROLLBACK succeeds
+but Psycopg then sends unsupported SQL DEALLOCATE ALL and reports 42601: the
+rollback has already happened. The test records both the error and actual data
+state. This does not claim ordinary PostgreSQL transaction/parameter compatibility,
+pipeline support or arbitrary application compatibility. See the current
+[compatibility profile](../pg_wire_protocol/COMPATIBILITY.md) for cache-reset limits.
+
+Run [the Extended harness](../pg_wire_protocol/tools/pgwire_extended_query_smoke.py)
+with --psycopg3-python to include this driver profile. Its post-authentication libpq
+traces record real Query/Parse/Bind/Execute/Sync/Close and generated SQL. Commands,
+versions and actual results are in [VALIDATION](../pg_wire_protocol/VALIDATION.md).
+The next implementation step is P10: remote TCP/TLS and CancelRequest.

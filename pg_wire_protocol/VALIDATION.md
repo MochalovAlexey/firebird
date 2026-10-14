@@ -1,6 +1,6 @@
 # Проверки реализации
 
-Текущая правка от 14 октября 2026 года — P8 расширенные codecs, база `598d487095`. Целевой P8 для Linux/Super прошёл приёмку: восемь групп codec harness, восемь unit executables и регрессии ниже. Следующий этап — P9, клиентская приёмка M2; полный M2 ещё не заявляется. В P8 ядро и parser не менялись. Известные ON CONNECT shutdown и READ CONSISTENCY + AUTO COMMIT ограничения сохраняются. Предыдущие разделы, включая удалённые IOTimeout и timeout cases, сохранены как история.
+Текущая правка от 14 октября 2026 года — P9 клиентская приёмка, база `241c234627`. Целевой M2 Linux/Super IPv4 loopback принят для совместимого SQL и реализованных codecs: 17 клиентских/raw-wire групп и регрессии ниже. Проверен настоящий Psycopg 3.3.6 с libpq 18.6; его grammar/cache ограничения зафиксированы отдельно. Следующий этап — P10: remote TCP/TLS и CancelRequest. В P9 production-код не менялся. Известные native ON CONNECT shutdown и READ CONSISTENCY + AUTO COMMIT ограничения сохраняются; предыдущие разделы оставлены как история.
 
 Дата: 12 октября 2026 года. HEAD до текущего P5: `3657d6a5c1`, baseline master Firebird 6 `bf94598f8deefeb7cc4a8217ee43b3040d5d6650`. Предыдущие разделы сохраняют историю проверок, включая впоследствии удалённые engine metadata и native metadata executable.
 
@@ -805,3 +805,63 @@ python3 -B pg_wire_protocol/tools/pgwire_codec_smoke.py \
 ```
 
 Unit targets собираются через `make -C gen -j2 TARGET=Debug wire_tests pgwire_tests` в build directory. Выполняемые файлы — `gen/Debug/firebird/tests/pgwire_*_test`, с `LD_LIBRARY_PATH` на `gen/Debug/firebird/lib` этой же сборки. Для обновления make templates при существующем configure: `MAKE_SRC_DIR=builds/posix ./config.status gen/Makefile gen/make.shared.variables`.
+
+
+## P9: клиентская приёмка M2 — 14 октября 2026
+
+База — `241c23462721316cec071bf9c02a0e517bf568ae`, Linux x86_64, Debug, Engine14, Super, IPv4 loopback. Использована прошедшая P8 сборка; P9 меняет C/Python harnesses и документацию, production sources не меняются. SHA256 проверенного libPgWire.so: `b4a42e244d7f905458055aadff48697f2e857dd6a0a83e03d8bb7b2242f9c2bc`. Рабочий сервер пользователя не перезапускался, тесты создавали собственные runtime/security/databases в /tmp.
+
+**Целевой M2 принят:** Extended wire, supported codecs и совместимый SQL, прямой libpq с native `?` и ограниченный профиль Psycopg 3 без параметров. Это не означает совместимость произвольного PostgreSQL-приложения. Следующий этап — P10, remote TCP/TLS и CancelRequest; M3 остаётся отдельной прикладной приёмкой.
+
+| Проверка | Результат / свидетельство |
+|---|---|
+| C libpq fixture build, `-std=c11 -Wall -Wextra -Werror -O2` | PASS; `clients-02/libpq-compile.log` |
+| P9 C libpq/raw/Psycopg 3 | PASS, 17 групп; `/tmp/firebird-pgwire-p9-clients-02/summary.json` |
+| Реальный Psycopg 3 child | PASS, 5 checks, 4 ожидаемых limits, 7 post-auth traces; `clients-02/psycopg3.log`, `clients-02/psycopg3-trace/` |
+| P8 codecs regression | PASS, 8 групп; `/tmp/firebird-pgwire-p9-codecs-01/summary.json` |
+| Simple Query/M1 regression | PASS, 12 групп; `/tmp/firebird-pgwire-p9-simple-01/summary.json` |
+| Transaction/session/M1 regression | PASS, 14 групп; `/tmp/firebird-pgwire-p9-transactions-01/summary.json` |
+| Startup/authentication regression | PASS, 49 checks; `/tmp/firebird-pgwire-p9-startup-01/summary.json` |
+| P6 server/M1 regression и psycopg2 | PASS, 7 групп, 58 pytest cases (24.28 s); `/tmp/firebird-pgwire-p9-server-01/summary.json` |
+| Native TCP baseline | PASS, 9 checks; `/tmp/firebird-pgwire-p9-native-01/summary.json` |
+| Python AST и `git diff --check` | PASS |
+
+В таблице `clients-02/` означает `/tmp/firebird-pgwire-p9-clients-02/`. Существующие P8 production build/unit результаты сохранены выше; их код и binaries в P9 не изменялись. Полный первый прогон `clients-01` тоже прошёл; финальный `clients-02` дополнительно подтверждает native cross-visibility и сохраняет Python/build-libpq versions.
+
+### C libpq и raw-wire
+
+Headers/runtime libpq 14.24 (`140024`). Sync PQexecParams/PQprepare/PQexecPrepared и Describe работают с нулём параметров и native `?`, named/unnamed replacement/reuse, text/binary и NULL. Новый async path использует poll и PQflush, обслуживает чтение при queued output, вызывает PQconsumeInput/PQisBusy перед каждым PQgetResult и дренирует поток до NULL, в том числе после PGRES_FATAL_ERROR. Зафиксированы 20 async commands, 20 результатов, 40 poll calls; pipeline выключен. Loopback не гарантирует ветку PQflush==1, поэтому специально вызванный backpressure этим результатом не заявляется.
+
+Проверены Parse 42601, Bind 22003 и Execute 22012, последующее успешное reuse; native SET TRANSACTION → T → SQL error/E → 25P02 → ROLLBACK/I и отсутствие записанной строки. Named statement переживает rollback/commit. Исходный P7 check использовал send/get API, но его непосредственный PQgetResult мог блокироваться; P9 закрывает именно это ограничение старого test fixture.
+
+К существующим raw sequences добавлен E06: Execute INSERT+Flush без Sync оставляет одну native transaction и невидимую строку, последующий SET TRANSACTION получает 25001. До Sync уже подтверждены rollback, ноль transactions и отсутствие строки, затем Sync/I и успешный SELECT. Полный набор повторяет prepared/portal lifecycle, explicit/implicit cycles, formats, discard/recovery, object/memory limits, EOF/shutdown cleanup. Все тестовые servers завершились exit 0 без forced kill.
+
+### Реальный Psycopg 3
+
+Psycopg `3.3.6`, implementation `binary`, build/runtime libpq `180006` (18.6), Python `3.10.12`. Установлен из PyPI в отдельное `/tmp/firebird-pgwire-p9-deps/venv`; `psycopg2 2.9.11/libpq 17.6` повторно проверялся из прежнего отдельного окружения. Тест не использует подменённый драйвер, adapters или SQL rewriting.
+
+Обычные Cursor/AsyncCursor проходят native SQL без parameters при autocommit=True: Simple Query, forced preparation и text/binary декодирование всех P8 scalar families, NULL и empty result. Prepared reuse после COMMIT работает. При prepared_max=2 stock driver отправил четыре Close messages при вытеснении named statements. В отдельном native-control profile `prepare_threshold=None` подтверждены I/T/E, commit/rollback, savepoint recovery и COMMIT failed block→ROLLBACK. Независимый native TCP observer видит только строки (9301,11) и (9303,33); 9302/9304 отсутствуют. После child нет PgWire attachments/transactions.
+
+Четыре ограничения подтверждены реальным запросом и SQLSTATE 42601:
+
+- Default autocommit=False автоматически отправляет BEGIN.
+- Обычные Cursor parameters `%s` превращаются в `$1`.
+- `sql.Literal(date(...))` создаёт PostgreSQL `::date`.
+- При непустом prepared cache успешный ROLLBACK сопровождается SQL DEALLOCATE ALL от драйвера, который parser отвергает.
+
+В последнем случае trace содержит ROLLBACK → CommandComplete ROLLBACK → ReadyForQuery I, затем DEALLOCATE ALL → ErrorResponse 42601 → I. Fixture подтверждает отсутствие строки и успешный следующий SELECT. Это ошибка обслуживания cache после уже выполненного rollback. SQL по-прежнему поступает штатному parser; дополнительные engine metadata/grammar и фиктивный успех не вводились. DROP/ALTER cache invalidation и native RESET/stale driver cache описаны в COMPATIBILITY по source audit, без заявления отдельного live coverage этих комбинаций.
+
+Trace включается после authentication и не содержит password exchange. Prepared profile: Parse 6, Bind/Describe/Execute по 9, Sync 19, Close 4; async profile: Parse 2, Bind/Describe/Execute по 4, Sync 6. Эти трассы доказывают фактический wire обмен драйвера. Отдельный syscall trace показал 0 backend connects в своём startup/Simple scope; весь P9/Psycopg обмен этим syscall trace не покрыт.
+
+### Воспроизведение
+
+```sh
+python3 -B pg_wire_protocol/tools/pgwire_extended_query_smoke.py \
+  --firebird-dir /tmp/firebird-pgwire-build/gen/Debug/firebird \
+  --work-dir /tmp/firebird-pgwire-p9-clients-new \
+  --libpq-include-dir /tmp/firebird-pgwire-p3-deps/libpq-dev/usr/include/postgresql \
+  --libpq-library /lib/x86_64-linux-gnu/libpq.so.5 \
+  --psycopg3-python /tmp/firebird-pgwire-p9-deps/venv/bin/python
+```
+
+Без последнего аргумента запускается прежний C/raw profile; отсутствие Psycopg 3 нельзя выдавать за его PASS. Для установки отдельного окружения и ожидаемых driver limits см. MANUAL_TESTING. Новые timer/pause tests не добавлялись. Известные native ON CONNECT shutdown и READ CONSISTENCY + AUTO COMMIT исключения сохраняются, не исправлялись и специально не перепроверялись. Windows/другие server modes, pipeline, TLS/CancelRequest и полноценный `$n`/BEGIN application profile остаются вне этой приёмки.
