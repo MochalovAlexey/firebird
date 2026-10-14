@@ -570,6 +570,7 @@ set_exported_symbols        (udr_engine fbplugin)
 add_library                 (pgwire SHARED plugins/wire/pg/PgWire.cpp plugins/wire/pg/Protocol.cpp
     plugins/wire/pg/Execute.cpp plugins/wire/pg/Extended.cpp plugins/wire/pg/ErrorStatus.cpp
     plugins/wire/pg/InputCodec.cpp plugins/wire/pg/ResultCodec.cpp
+    plugins/wire/pg/FloatCodec.cpp plugins/wire/pg/NumericCodec.cpp plugins/wire/pg/TemporalCodec.cpp
     plugins/wire/pg/SqlInfo.cpp ${VERSION_RC})
 add_dependencies_cc         (pgwire UpdateCloopInterfaces)
 target_link_libraries       (pgwire common yvalve)

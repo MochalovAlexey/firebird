@@ -218,7 +218,8 @@ void verifyText()
 void verifyMetadataRejection()
 {
 	const Spec unsupported[] = {
-		{SQL_DOUBLE, 8}, {SQL_BLOB, 8}, {SQL_INT128, 16},
+		{SQL_BLOB, 8}, {SQL_DEC16, 8}, {SQL_INT128, 16, -39, 1},
+		{SQL_DOUBLE, 8, -2, 1}, {SQL_TYPE_DATE, 4, -1},
 		{SQL_INT64, 8, -19, 1}, {SQL_INT64, 8, 1, 1}, {SQL_INT64, 8, 0, 3},
 		{SQL_BOOLEAN, 1, -1}, {SQL_BOOLEAN, 1, 0, 1},
 		{SQL_TEXT, 16, 0, 0, 1}, {SQL_TEXT, 16, 0, 0, 21},
@@ -273,7 +274,11 @@ void verifyBinaryFormats()
 	expectError([&] { ResultCodec invalid(metadata, {0, 1}); }, "08P01");
 	expectError([&] { ResultCodec invalid(metadata, {2}); }, "0A000");
 	metadata = describe({{SQL_INT64, 8, -2, 1}});
-	expectError([&] { ResultCodec unsupported(metadata, {1}); }, "0A000");
+	ResultCodec numeric(metadata, {1});
+	buffer.assign(numeric.messageLength(), 0);
+	store<ISC_INT64>(buffer, offset(numeric, 0), -12345);
+	require(numeric.decode(buffer.data(), buffer.size())[0] == std::string("\0\2\0\0\x40\0\0\2\0\x7b\x11\x94", 12),
+		"Binary numeric result did not use base 10000 groups");
 }
 
 } // namespace

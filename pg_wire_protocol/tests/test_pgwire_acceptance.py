@@ -17,7 +17,7 @@ and the absence of outbound database connections need separate verification.
 import os
 import subprocess
 from contextlib import contextmanager
-from datetime import date
+from datetime import date, time, datetime
 from decimal import Decimal
 from urllib.parse import urlsplit
 from uuid import uuid4
@@ -394,7 +394,7 @@ def test_returning_unsupported_output_preserves_rows(pg_connect, table):
         with conn.cursor() as cur:
             cur.execute(f"INSERT INTO {table} (ID, V) VALUES (1, 'before')")
             with pytest.raises(psycopg2.Error) as error:
-                cur.execute(f"UPDATE {table} SET V='after' RETURNING CAST(ID AS DOUBLE PRECISION)")
+                cur.execute(f"UPDATE {table} SET V='after' RETURNING CAST(ID AS DECFLOAT(16))")
             assert error.value.pgcode == "0A000"
         assert conn.get_transaction_status() == extensions.TRANSACTION_STATUS_IDLE
         assert _rows(conn, f"SELECT ID, V FROM {table}") == [(1, "before")]
@@ -402,23 +402,24 @@ def test_returning_unsupported_output_preserves_rows(pg_connect, table):
 
 
 @pytest.mark.parametrize(
-    "expression",
+    "expression, expected, oid",
     [
-        "CAST('2026-10-06' AS DATE)",
-        "CAST('12:34:56' AS TIME)",
-        "CAST('2026-10-06 12:34:56' AS TIMESTAMP)",
-        "CAST(1.25 AS FLOAT)",
-        "CAST(1.25 AS DOUBLE PRECISION)",
-        "CAST(1 AS INT128)",
-        "CAST(1 AS NUMERIC(38, 0))",
+        ("CAST('2026-10-06' AS DATE)", date(2026, 10, 6), 1082),
+        ("CAST('12:34:56.1234' AS TIME)", time(12, 34, 56, 123400), 1083),
+        ("CAST('2026-10-06 12:34:56.1234' AS TIMESTAMP)", datetime(2026, 10, 6, 12, 34, 56, 123400), 1114),
+        ("CAST(1.25 AS FLOAT)", 1.25, 700),
+        ("CAST(1.25 AS DOUBLE PRECISION)", 1.25, 701),
+        ("CAST(1 AS INT128)", Decimal('1'), 1700),
+        ("CAST(12345678901234567890123456789012345678 AS NUMERIC(38, 0))",
+         Decimal('12345678901234567890123456789012345678'), 1700),
     ],
 )
-def test_unsupported_output_types(pg_connect, expression):
+def test_extended_output_types(pg_connect, expression, expected, oid):
     with pg_connect(autocommit=True) as conn:
         with conn.cursor() as cur:
-            with pytest.raises(psycopg2.Error) as error:
-                cur.execute(f'SELECT {expression} AS "value" FROM RDB$DATABASE')
-            assert error.value.pgcode == "0A000"
+            cur.execute(f'SELECT {expression} AS "value" FROM RDB$DATABASE')
+            assert cur.fetchone() == (expected,)
+            assert cur.description[0].type_code == oid
         assert conn.get_transaction_status() == extensions.TRANSACTION_STATUS_IDLE
         _assert_usable(conn)
 

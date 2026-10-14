@@ -1,6 +1,6 @@
 # Проверки реализации
 
-Текущая правка от 13 октября 2026 года — P7 Extended Query, база `c94f8e84ff`. Целевой P7 для Linux/Super прошёл приёмку; результаты и отдельное исправление native prepared-request cleanup приведены в последнем разделе. Следующий этап — P8, расширенные codecs; полный M2 ещё не заявляется. Известные ON CONNECT shutdown и READ CONSISTENCY + AUTO COMMIT ограничения сохраняются. Предыдущие разделы, включая удалённые IOTimeout и timeout cases, сохранены как история.
+Текущая правка от 14 октября 2026 года — P8 расширенные codecs, база `598d487095`. Целевой P8 для Linux/Super прошёл приёмку: восемь групп codec harness, восемь unit executables и регрессии ниже. Следующий этап — P9, клиентская приёмка M2; полный M2 ещё не заявляется. В P8 ядро и parser не менялись. Известные ON CONNECT shutdown и READ CONSISTENCY + AUTO COMMIT ограничения сохраняются. Предыдущие разделы, включая удалённые IOTimeout и timeout cases, сохранены как история.
 
 Дата: 12 октября 2026 года. HEAD до текущего P5: `3657d6a5c1`, baseline master Firebird 6 `bf94598f8deefeb7cc4a8217ee43b3040d5d6650`. Предыдущие разделы сохраняют историю проверок, включая впоследствии удалённые engine metadata и native metadata executable.
 
@@ -762,3 +762,46 @@ python3 -B pg_wire_protocol/tools/pgwire_native_prepared_shutdown_smoke.py \
 ```
 
 Промежуточные Extended `-01/-02/-03` не входят в PASS. Они выявили требование native inference (`ID + CAST(? AS INTEGER)`; исходный `CAST(ID + ? AS INTEGER)` даёт HY004 также в native isql SET PLANONLY), неверную fatal обработку отрицательного Execute maxRows и описанный cleanup assertion. Эти причины исправлены и покрыты финальным `-04`. Native inference evidence сохранён в `extended-01/native-parameter-inference.json`; SQL rewriting ради прохождения fixture не добавлялся. Первый запуск native regression остановился до старта сервера из-за отсутствовавшего linker search path для libtommath; harness теперь задаёт runtime library path через `-rpath-link`.
+
+
+## P8: расширенные codecs — 14 октября 2026
+
+База — `598d487095`, Linux x86_64, Debug, Engine14, Super, IPv4 loopback. Production changes находятся в PgWire: общие FloatCodec/NumericCodec/TemporalCodec подключены к InputCodec и ResultCodec; startup добавляет `integer_datetimes=on`. Ядро, parser, public statement metadata, host ABI и таймауты не менялись. Рабочий сервер пользователя и его базы не изменялись.
+
+**P8 прошёл целевую приёмку.** Добавлены text/binary FLOAT/DOUBLE, конечные DATE/TIME/TIMESTAMP без TZ, INT128 и точные NUMERIC/DECIMAL до precision 38, включая binary NUMERIC. Pure INT128 сохраняет полный signed диапазон. Temporal input должен точно представляться native 100 µs ticks, поддерживаются годы 0001..9999; меньшая точность не округляется. Профиль и SQLSTATE описаны в COMPATIBILITY. Следующий этап — P9/M2; `$n`, PostgreSQL BEGIN и `::date` по-прежнему не входят в grammar.
+
+| Проверка | Результат / свидетельство |
+|---|---|
+| Полная сборка `make -j2` | PASS; `/tmp/firebird-pgwire-build/p8-build.log` |
+| Сборка `wire_tests pgwire_tests` | PASS; `/tmp/firebird-pgwire-build/p8-tests-build.log` |
+| Восемь PgWire unit executables | PASS: Float 112, Numeric 502, Temporal 313, Input 154, SqlInfo 487 checks; Result/Protocol/ErrorStatus PASS |
+| Numeric standalone UBSan | PASS, 502 checks, без diagnostics |
+| Новые codecs через TCP/libpq | PASS, 8 групп; `/tmp/firebird-pgwire-p8-codecs-02/summary.json` |
+| Extended Query regression | PASS, 16 групп; `/tmp/firebird-pgwire-p8-extended-01/summary.json` |
+| Simple Query regression | PASS, 12 групп; `/tmp/firebird-pgwire-p8-simple-01/summary.json` |
+| Transaction/session regression | PASS, 14 групп; `/tmp/firebird-pgwire-p8-transactions-01/summary.json` |
+| Startup/authentication regression | PASS, 49 checks; `/tmp/firebird-pgwire-p8-startup-01/summary.json` |
+| Server regression и live psycopg2 | PASS, 7 групп и 58 pytest cases (23.98 s); `/tmp/firebird-pgwire-p8-server-01/summary.json` |
+| Python AST и `git diff --check` | PASS |
+
+Реальные клиенты: C libpq headers/runtime 14.24 и psycopg2 2.9.11/libpq 17.6. Новый C client использует PQexecParams, PQprepare, PQdescribePrepared и PQexecPrepared с native `?`, восемью раздельными параметрами, text/binary input/output и NULL. Эталонные wire bytes заданы независимо от серверных codecs. Проверены числовые OID и ParameterDescription, typmod=-1, повторное исполнение после ошибки.
+
+Новый raw-wire harness проверяет IEEE signed zero, subnormal/min/max, NaN/±Infinity; full INT128 min/max, 38 fractional digits, exact exponent и base-10000 numeric; epochs 1858/2000, отрицательный timestamp, даты 0001/9999, temporal100 µs. Unit fixtures дополнительно проверяют leap years, unaligned native buffers и отсутствие частичной записи при ошибке. Simple SELECT и Extended INSERT/Simple UPDATE RETURNING сохраняют значения; отдельный native TCP observer подтверждает обе стороны cross-visibility. В 26 negative Bind cases ошибки формата/диапазона/точности возникают до необратимого GEN_ID effect.
+
+Старые negative FLOAT/DOUBLE/DATE/TIME/TIMESTAMP/INT128 tests заменены положительными; guards неподдержанного output используют DECFLOAT/BLOB. SET BIND regression теперь проверяет исходный DOUBLE, coercion к VARCHAR и восстановление DOUBLE после RESET. Existing server resource checks: после 16 warmup и 24 измеряемых sessions FD baseline 15, все три batch 15; native monitoring не оставляет attachments/transactions/statements. Существующие P5 timeout cases повторены без добавления новых pause/timeout scenarios.
+
+Trace harness зафиксировал 0 backend network connects в своём startup/Simple Query scope; полный Extended codec обмен этим syscall trace не заявляется покрытым. Неисправленный native ON CONNECT shutdown defect и READ CONSISTENCY + AUTO COMMIT остаются ранее записанными исключениями и в P8 не исправлялись. Windows, другие server modes, TLS, CancelRequest и обычная параметризация Psycopg 3 требуют последующих этапов.
+
+В промежуточном `/tmp/firebird-pgwire-p8-codecs-01/` прямой C libpq и float checks прошли, затем сам Python runner получил ValueError: Python 3.10 `fromisoformat` не принимает четыре fractional digits. В test-only helper добавлено дополнение дроби нулями до шести цифр; production codecs не менялись. Полный повтор `codecs-02` прошёл.
+
+Воспроизводимый запуск (из корня workspace, work directory должен быть новым):
+
+```sh
+python3 -B pg_wire_protocol/tools/pgwire_codec_smoke.py \
+  --firebird-dir /tmp/firebird-pgwire-build/gen/Debug/firebird \
+  --work-dir /tmp/firebird-pgwire-p8-codecs-new \
+  --libpq-include-dir /tmp/firebird-pgwire-p3-deps/libpq-dev/usr/include/postgresql \
+  --libpq-library /lib/x86_64-linux-gnu/libpq.so.5
+```
+
+Unit targets собираются через `make -C gen -j2 TARGET=Debug wire_tests pgwire_tests` в build directory. Выполняемые файлы — `gen/Debug/firebird/tests/pgwire_*_test`, с `LD_LIBRARY_PATH` на `gen/Debug/firebird/lib` этой же сборки. Для обновления make templates при существующем configure: `MAKE_SRC_DIR=builds/posix ./config.status gen/Makefile gen/make.shared.variables`.

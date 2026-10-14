@@ -2,7 +2,7 @@
 
 База — `master` Firebird 6, SHA из [BASELINE.md](BASELINE.md). Архитектура и SQL boundary определены в [ARCHITECTURE.md](ARCHITECTURE.md), transaction contract — в [CODEX_CONTEXT.md](CODEX_CONTEXT.md), заявляемые возможности — в [COMPATIBILITY.md](COMPATIBILITY.md).
 
-Python scaffold мигрирован под текущий контракт: 58 live cases прошли в P6. Начальные host tests расположены в src/common/tests/WireProtocolConfigTest.cpp, src/remote/server/wire/tests и isolated tools harness. P2/P3/P4 приёмка сохранена в VALIDATION. Предыдущая P5-ревизия прошла целевую Linux/Super приёмку с native ограничением READ CONSISTENCY + AUTO COMMIT; P6 повторил сборку, unit tests и целевые регрессии по [VALIDATION.md](VALIDATION.md). Целевой P6/M1 Linux/Super принят с известными native ограничениями, включая отдельно исключённый ON CONNECT shutdown. P7 Extended Query прошёл целевую Linux/Super приёмку: 16 групп. Следующий этап — P8, расширенные codecs; M2 до P9 не заявляется. PASS относится к зафиксированным cases/fixtures, а наличие строки в полной матрице не означает её прохождения.
+Python scaffold мигрирован под текущий контракт: 58 live cases прошли в P6. Начальные host tests расположены в src/common/tests/WireProtocolConfigTest.cpp, src/remote/server/wire/tests и isolated tools harness. P2/P3/P4 приёмка сохранена в VALIDATION. Предыдущая P5-ревизия прошла целевую Linux/Super приёмку с native ограничением READ CONSISTENCY + AUTO COMMIT; P6 повторил сборку, unit tests и целевые регрессии по [VALIDATION.md](VALIDATION.md). Целевой P6/M1 Linux/Super принят с известными native ограничениями, включая отдельно исключённый ON CONNECT shutdown. P7 Extended Query прошёл целевую Linux/Super приёмку: 16 групп. P8 codecs прошли целевую Linux/Super приёмку: восемь групп. Следующий этап — P9/M2; полная совместимость M2 пока не заявляется. PASS относится к зафиксированным cases/fixtures, а наличие строки в полной матрице не означает её прохождения.
 
 ## Этапы и обязательный минимум
 
@@ -191,13 +191,15 @@ T11 не утверждает, что prepare лишён compile/cache/lock/trac
 
 ## D. Типы, строки и диагностика
 
+P8 прошёл целевую Linux/Super приёмку: восемь групп [codec harness](tools/pgwire_codec_smoke.py), восемь unit executables и регрессии. Результаты — в [VALIDATION.md](VALIDATION.md). Новые типы проверяются в text/binary Bind/result и Simple Query/RETURNING: FLOAT/DOUBLE, numeric через INT128, finite DATE/TIME/TIMESTAMP без TZ. Следующий этап после принятого P8 — P9/M2; нижеследующие критерии сами по себе не являются PASS.
+
 | ID | Сценарий | Критерий |
 |---|---|---|
 | D01 | M1 integers, BOOLEAN, CHAR/VARCHAR, exact numeric, NULL | Верные OID/Python types, bounds, INT64_MIN, scale=0 и fractional numeric без float intermediate |
 | D02 | UTF8 CHAR, varying fetch metadata, trailing spaces | Значения сверяются с native fetch через SQL_VARYING; нет byte-padding повреждения или rtrim логических пробелов; проверяются ASCII/многобайтные значения, пустое и полностью пробельное CHAR |
 | D03 | Quoted aliases, NULL/empty, апостроф/backslash/LF/TAB/semicolon | Metadata и значения не теряются; U+0000 даёт 22021 вместо truncation |
-| D04 | M2 FLOAT/DOUBLE, temporal без TZ, INT128/NUMERIC(38), aggregates | OID/диапазоны/precision определяются result metadata; NaN/Infinity policy явна; нет потери exact numeric |
-| D05 | Binary input/output | Независимые wire fixtures, endian/epoch/units/lengths; native buffer не копируется напрямую в PG binary |
+| D04 | P8 FLOAT/DOUBLE, temporal без TZ, INT128/NUMERIC(38), aggregates | OID 700/701/1082/1083/1114/1700 из metadata; full signed INT128 min/max и scale −38, NUMERIC(38); float NaN/Infinity поддержаны, numeric specials22003; finite temporal0001..9999 и exact100 µs, без потери precision |
+| D05 | P8 text/binary input/output | Независимые base-10000/IEEE/date/time/timestamp fixtures, endian/epoch/units/lengths; numeric malformed22P03/overflow/inexact22003; temporal strictISO22007/range/precision22008, binary length22P03; integer_datetimes=on без TimeZone; native buffer не копируется напрямую в PG binary |
 | D06 | Unsupported type/format или malformed Bind | Capability error до исполнения; действительно неподдержанные types не превращаются в text/NULL |
 | D07 | Full ISC status vector с wrapper и nested causes | SQLSTATE выбирается по полной структуре, включая update-conflict/deadlock/constraint causes; не по локализованному тексту и не только первому коду |
 | D08 | Syntax, unknown table, unique, permission, login | Проверены 42601/42P01/23505/42501/28P01 и fallback; messages сохраняют смысл и не раскрывают credentials |
@@ -209,7 +211,7 @@ T11 не утверждает, что prepare лишён compile/cache/lock/trac
 
 ## E. Extended Query с совместимым SQL
 
-**Целевая Linux/Super приёмка P7 — PASS: 16 групп; evidence в [VALIDATION.md](VALIDATION.md).** Basic text input/output и binary integer/BOOLEAN/строки входят в этот срез; binary NUMERIC, FLOAT/temporal/INT128 остаются P8. Наличие строк ниже не означает PASS. Psycopg 3 фактически ещё не проверен; P7 использует C libpq и raw-wire, с отрицательными `$1`/BEGIN cases.
+**Целевая Linux/Super приёмка P7 — PASS: 16 групп; evidence в [VALIDATION.md](VALIDATION.md).** В принятом P7 были basic text input/output и binary integer/BOOLEAN/строки; текущий P8 реализует binary NUMERIC, FLOAT/temporal/INT128, прошедшие отдельную целевую приёмку. Наличие строк ниже не означает PASS. Psycopg 3 фактически ещё не проверен; P7 использует C libpq и raw-wire, с отрицательными `$1`/BEGIN cases.
 
 Пять codec unit executables прошли, включая 149 input и 487 SQL-classifier checks; повторные семь server groups/58 pytest cases и девять native baseline checks прошли. Suspended-portal shutdown потребовал узкого native release_attachment fix для нескольких requests одного Statement; падение подтверждено также без PgWire. [Native prepared-shutdown harness](tools/pgwire_native_prepared_shutdown_smoke.py) после исправления прошёл три проверки, обе остановки — exit 0. Grammar/public metadata/CLOOP не менялись. Отдельный ON CONNECT !child остаётся неисправленным и не перепроверялся. Остальные команды и evidence — в VALIDATION; M2 принимается в P9 после P8.
 
@@ -218,7 +220,7 @@ T11 не утверждает, что prepare лишён compile/cache/lock/trac
 | ID | Сценарий | Критерий |
 |---|---|---|
 | E01 | PQexecParams без параметров и с native `?` | Реальное execution через Parse/Bind/Execute/Sync; input metadata и значения согласованы |
-| E02 | PQprepare/PQexecPrepared, OID=0/явные OID, NULL/text/binary | Partial/zero hints дают inference, integer/boolean/numeric OID точный, string 25/1042/1043 совместимы; formats 0/1/N, range/UTF8/NUL и counts проверены; ненулевой binary NUMERIC получает 0A000 до execution; binary NULL принимается |
+| E02 | PQprepare/PQexecPrepared, OID=0/явные OID, NULL/text/binary | Partial/zero hints дают inference, любой нестроковый OID точный, string 25/1042/1043 совместимы; formats 0/1/N, range/UTF8/NUL и counts проверены; binary NUMERIC и P8 типы принимаются с точным payload; malformed/range errors до execution, binary NULL принимается |
 | E03 | Named/unnamed objects, replacement, Close, Describe | Named statement переживает commit; Close statement/unnamed Parse replacement сохраняют bound portals; Q удаляет unnamed statement/portal; NoData/RowDescription/ParameterDescription согласованы |
 | E04 | Несколько portals, Execute maxRows, PortalSuspended | Нет потерь/дубликатов; buffers/cursors/formats изолированы; CommandComplete только по завершении |
 | E05 | Parse/Bind/Execute error, последующие сообщения до Sync | Все portals инвалидируются; discard-until-Sync без effects отброшенных команд, explicit transaction остаётся E; malformed frame fatal, semantic count/format error recoverable до Sync |

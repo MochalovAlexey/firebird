@@ -389,7 +389,7 @@ QUIT;
         c.exchange(parse('guard', sql) + packet(b'S'), b'1Z')
         for values, formats, results, expected in (
             (['not an integer'], (), (), '22P02'),
-            (['1'], (), [0, 1], '0A000'),
+            (['1'], (), [0, 2], '0A000'),
             (['1'], (), [0, 0, 0], '08P01'),
             ([None], [2], (), '08P01')):
             c.exchange(bind('guard', 'guard', values, formats, results) + execute('guard') + packet(b'S'),
@@ -476,14 +476,15 @@ QUIT;
             ('INTEGER', b'\x00', [1], '22P03'),
             ('BOOLEAN', b'\x02', [1], '22P03'),
             ('VARCHAR(10)', b'\xff', (), '22021'),
-            ('NUMERIC(18,2)', b'\x00' * 8, [1], '0A000')):
+            ('NUMERIC(18,2)', b'\x00' * 7, [1], '22P03')):
             sql = f'SELECT CAST(? AS {cast}) FROM RDB$DATABASE'
             c.exchange(parse('', sql) + bind(values=[value], formats=formats) + execute() + packet(b'S'),
                        b'1EZ', error=expected)
         c.exchange(parse('', 'SELECT CAST(? AS INTEGER) FROM RDB$DATABASE', [20]) + packet(b'S'),
                    b'EZ', error='0A000')
         c.exchange(parse('', 'SELECT CAST(1 AS NUMERIC(18,2)) FROM RDB$DATABASE') +
-                   bind(results=[1]) + execute() + packet(b'S'), b'1EZ', error='0A000')
+                   bind(results=[1]) + execute() + packet(b'S'), b'12DCZ',
+                   rows=[[bytes.fromhex('00010000000000020001')]], tag='SELECT 1')
         c.run(ANSWER, rows=[['42']], tag='SELECT 1')
         self.finish(c)
 
@@ -550,7 +551,7 @@ QUIT;
             ('reset_invalidates_objects_without_hidden_prepare_transactions', self.reset),
             ('statement_portal_limits_and_close_recovery', self.limits),
             ('retained_sql_byte_limit_and_close_recovery', self.retained_bytes_limit),
-            ('empty_queries_input_validation_and_deferred_binary_numeric', self.empty_and_codec_errors),
+            ('empty_queries_input_validation_and_binary_numeric', self.empty_and_codec_errors),
             ('malformed_extended_frames_are_fatal_and_release_attachment', self.malformed_frames),
             ('terminate_eof_shutdown_release_suspended_portals_and_rollback', self.disconnect_and_shutdown)):
             self.check(name, action)

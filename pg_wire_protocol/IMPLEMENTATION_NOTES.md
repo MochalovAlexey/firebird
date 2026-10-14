@@ -4,7 +4,7 @@
 
 Linux/Super host P1 со штатным getPluginConfig и целевые P2 startup/authentication checks прошли по [VALIDATION.md](VALIDATION.md). P3 SELECT execution и минимальная engine metadata прошли целевую Linux/Super приёмку M0. P4 Simple Query DML/DDL, базовые codecs и EMPTY прошли целевую Linux/Super приёмку. По уточнённому требованию пользователя выполнен refactor классификации в плагин (описан ниже, Linux/Super проверки прошли). P5 explicit transactions и session controls прошёл целевую Linux/Super приёмку с отдельным native AUTO COMMIT ограничением; результаты записаны в VALIDATION. TLS, Windows wiring/runtime и другие server modes остаются дальнейшей работой.
 
-Текущее уточнение от 13 октября 2026 года: добавленные wire-таймауты удалены. Ниже сохранена история этапов; прежние описания IOTimeout относятся к тем ревизиям, а не к текущему контракту. P7 Extended Query прошёл целевую Linux/Super приёмку (16 групп); актуальное дополнение находится в конце документа.
+Текущее уточнение от 13 октября 2026 года: добавленные wire-таймауты удалены. Ниже сохранена история этапов; прежние описания IOTimeout относятся к тем ревизиям, а не к текущему контракту. P7 Extended Query прошёл целевую Linux/Super приёмку (16 групп); P8 codecs прошли целевую Linux/Super приёмку (восемь групп). Актуальное дополнение находится в конце документа.
 
 ## Первый срез P1
 
@@ -165,7 +165,7 @@ Legacy pytest мигрирован на совместимый Simple Query: 58 
 P6 завершён, целевой M1 для Linux/Super принят с известными native ограничениями. Остановка во время ON CONNECT вызывает assertion `!child` в `alloc.cpp:2075` при failed attach cleanup; независимый native TCP сценарий без wire endpoints воспроизводит тот же стек. Исправление этого падения согласованно исключено из P6. Скрипт воспроизведения сохраняет FAIL, без skip/xfail или подмены результата. В срезе P6 core и SQL semantics не менялись. Реализация следующего этапа P7, Extended Query, описана ниже.
 
 
-## P7: Extended Query и input/output codecs
+## Исторический P7: Extended Query и input/output codecs
 
 Parse/Bind/Describe/Execute/Close/Flush/Sync и named/unnamed prepared objects прошли целевую Linux/Super приёмку: 16 групп. Extended.cpp хранит statements/portals и исполняет Extended messages, Execute.cpp задаёт общую transaction policy и Simple Query path. Grammar, public statement metadata и CLOOP не меняются; SQL не переписывается. Native `?` связывается с input metadata; BEGIN/$n остаются parser errors. C libpq и raw-wire прошли приёмку; фактический Psycopg 3 profile ещё не проверен и не заявляется по наличию Extended Query.
 
@@ -177,4 +177,13 @@ QueryExecutor сохраняет named statement между transactions. Каж
 
 Лимиты — 128 statements, 128 portals и 8 MiB учитываемых сохранённых SQL/metadata/buffers; остальные engine allocations ограничены количеством объектов. Flush не фиксирует transaction, Sync завершает implicit cycle и сообщает ReadyForQuery. CommandComplete Execute не является обещанием commit до Sync. Ошибка откатывает implicit cycle сразу, до Sync; SET TRANSACTION при открытом implicit cycle получает 25001, поскольку новый TPB не заменяет существующий native handle.
 
-P7: 16 Extended groups — PASS; пять codec unit executables — PASS, включая 149 input и 487 SQL-classifier checks. Повторно прошли семь server groups/58 pytest cases и девять native baseline checks. Отдельный native prepared-shutdown harness прошёл три проверки без PgWire, обе остановки завершились с exit 0. Полные команды и регрессии — в VALIDATION. Следующий этап — P8; M2 требует P9.
+P7: 16 Extended groups — PASS; пять codec unit executables — PASS, включая 149 input и 487 SQL-classifier checks. Повторно прошли семь server groups/58 pytest cases и девять native baseline checks. Отдельный native prepared-shutdown harness прошёл три проверки без PgWire, обе остановки завершились с exit 0. Полные команды и регрессии — в VALIDATION. Следующий срез P8 описан ниже; M2 требует P9.
+
+
+## P8: расширенные scalar codecs, Linux/Super PASS
+
+В InputCodec/ResultCodec подключены NumericCodec, FloatCodec и TemporalCodec. Реализованы text/binary FLOAT/DOUBLE, INT128/NUMERIC до precision 38 и DATE/TIME/TIMESTAMP без TZ; ранее поддержанные типы и NULL сохраняются. Simple Query использует общий text output, Extended Query выбирает formats через Bind. SQL не переписывается, новые core/CLOOP API и таймеры не добавляются. Целевой профиль Linux/Super прошёл приёмку; следующий этап — P9/M2.
+
+NumericCodec обрабатывает native unaligned buffers через memcpy; Firebird Int128 helpers сохраняют переносимость native layout и весь signed 128-bit диапазон. Scale 0..−18 для SHORT/LONG/INT64 и 0..−38 для INT128; exact text/exponent не проходит через float и не округляется. Binary layout сверён с [PostgreSQL numeric_recv/numeric_send](https://github.com/postgres/postgres/blob/REL_17_STABLE/src/backend/utils/adt/numeric.c): network count/weight/sign/dscale и base-10000 groups. Output нормализует zero и удаляет leading/trailing zero groups. Input отклоняет скрытые за dscale ненулевые digits с 22P03, вместо неявного усечения; numeric specials и потеря точности/range дают 22003. Independent golden fixtures включают native INT128 min/max, scale −38, endian и malformed inputs.
+
+FloatCodec поддерживает IEEE binary float32/float64, locale-independent text и NaN/±Infinity; конечные range errors не превращаются в specials. TemporalCodec использует strict ISO text и binary days/µs от PostgreSQL epoch; конечные годы 0001..9999, точная native единица 100 µs. До шести input fractional digits допустимы только при точном представлении, TZ/BC/infinity/24:00/leap seconds не поддержаны. integer_datetimes=on публикуется, TimeZone нет. Ошибки payload сохраняют прежний discard-until-Sync и transaction recovery. Runtime evidence и версии C libpq зафиксированы в VALIDATION: восемь P8 групп и восемь unit executables прошли, регрессии сохранены. Полный M2 требует клиентской приёмки P9.

@@ -13,6 +13,9 @@
 
 #include "firebird.h"
 #include "InputCodec.h"
+#include "FloatCodec.h"
+#include "NumericCodec.h"
+#include "TemporalCodec.h"
 #include "../common/status.h"
 #include "../common/unicode_util.h"
 #include "../intl/charsets.h"
@@ -88,7 +91,7 @@ std::int64_t signedValue(std::uint64_t magnitude, bool negative)
 	return -static_cast<std::int64_t>(magnitude);
 }
 
-std::int64_t number(std::string_view text, unsigned width, int scale, bool decimal)
+std::int64_t integer(std::string_view text, unsigned width)
 {
 	text = trim(text);
 	bool negative = false;
@@ -97,62 +100,17 @@ std::int64_t number(std::string_view text, unsigned width, int scale, bool decim
 		negative = text.front() == '-';
 		text.remove_prefix(1);
 	}
-	std::string digits;
-	digits.reserve(text.size());
-	std::size_t position = 0;
-	while (position < text.size() && digit(text[position]))
-		digits.push_back(text[position++]);
-	std::int64_t fractional = 0;
-	if (decimal && position < text.size() && text[position] == '.')
-	{
-		++position;
-		while (position < text.size() && digit(text[position]))
-		{
-			digits.push_back(text[position++]);
-			++fractional;
-		}
-	}
-	if (digits.empty())
+	if (text.empty() || !std::all_of(text.begin(), text.end(), digit))
 		invalidNumber();
-	std::int64_t exponent = 0;
-	if (decimal && position < text.size() && (text[position] == 'e' || text[position] == 'E'))
-	{
-		++position;
-		bool exponentNegative = false;
-		if (position < text.size() && (text[position] == '+' || text[position] == '-'))
-			exponentNegative = text[position++] == '-';
-		const auto start = position;
-		while (position < text.size() && digit(text[position]))
-		{
-			// Saturation exceeds every possible compensating fractional length.
-			exponent = std::min<std::int64_t>(2 * MAX_MESSAGE, exponent * 10 + text[position++] - '0');
-		}
-		if (position == start)
-			invalidNumber();
-		if (exponentNegative)
-			exponent = -exponent;
-	}
-	if (position != text.size())
-		invalidNumber();
-	const auto first = digits.find_first_not_of('0');
-	if (first == std::string::npos)
-		return 0;
-	const auto last = digits.find_last_not_of('0');
-	const auto power = exponent - scale - fractional + static_cast<std::int64_t>(digits.size() - last - 1);
-	if (power < 0 || last - first + 1 + power > 19)
-		numericRange();
 	const auto limit = (std::uint64_t(1) << (width * 8 - 1)) - (negative ? 0 : 1);
 	std::uint64_t magnitude = 0;
-	auto append = [&](unsigned value)
+	for (const auto c : text)
 	{
+		const auto value = c - '0';
 		if (magnitude > (limit - value) / 10)
 			numericRange();
 		magnitude = magnitude * 10 + value;
-	};
-	for (auto i = first; i <= last; ++i)
-		append(digits[i] - '0');
-	for (std::int64_t i = 0; i < power; ++i)
-		append(0);
+	}
 	return signedValue(magnitude, negative);
 }
 
@@ -246,13 +204,29 @@ InputCodec::InputCodec(IMessageMetadata* logicalMetadata, const std::vector<std:
 		case SQL_SHORT:
 		case SQL_LONG:
 		case SQL_INT64:
-			if (subtype < 0 || subtype > 2 || scale < -18 || scale > 0)
+		case SQL_INT128:
+			if (subtype < 0 || subtype > 2 || scale < (type == SQL_INT128 ? -38 : -18) || scale > 0)
 				throw ProtocolError("0A000", "Exact numeric parameter metadata is not supported");
 			physicalSize = type == SQL_SHORT ? sizeof(ISC_SHORT) :
-				type == SQL_LONG ? sizeof(ISC_LONG) : sizeof(ISC_INT64);
+				type == SQL_LONG ? sizeof(ISC_LONG) : type == SQL_INT64 ? sizeof(ISC_INT64) : sizeof(FB_I128);
 			if (capacity != physicalSize)
 				invalidMetadata();
-			oid = (subtype || scale) ? 1700 : type == SQL_SHORT ? 21 : type == SQL_LONG ? 23 : 20;
+			oid = (subtype || scale || type == SQL_INT128) ? 1700 : type == SQL_SHORT ? 21 : type == SQL_LONG ? 23 : 20;
+			break;
+		case SQL_FLOAT:
+		case SQL_DOUBLE:
+		case SQL_TYPE_DATE:
+		case SQL_TYPE_TIME:
+		case SQL_TIMESTAMP:
+			if (subtype || scale)
+				throw ProtocolError("0A000", "Parameter type modifiers are not supported");
+			physicalSize = type == SQL_FLOAT ? sizeof(float) : type == SQL_DOUBLE ? sizeof(double) :
+				type == SQL_TYPE_DATE ? sizeof(ISC_DATE) : type == SQL_TYPE_TIME ? sizeof(ISC_TIME) :
+				sizeof(ISC_TIMESTAMP);
+			if (capacity != physicalSize)
+				invalidMetadata();
+			oid = type == SQL_FLOAT ? 700 : type == SQL_DOUBLE ? 701 :
+				type == SQL_TYPE_DATE ? 1082 : type == SQL_TYPE_TIME ? 1083 : 1114;
 			break;
 		case SQL_BOOLEAN:
 			if (subtype || scale)
@@ -366,11 +340,14 @@ std::vector<unsigned char> InputCodec::encode(const std::vector<std::optional<st
 		case SQL_SHORT:
 		case SQL_LONG:
 		case SQL_INT64:
+		case SQL_INT128:
 		{
-			if (format && types[i] == 1700)
-				throw ProtocolError("0A000", "Binary numeric parameters are not supported yet");
-			const auto numeric = format ? binaryInteger(value, field.length) :
-				number(value, field.length, field.scale, types[i] == 1700);
+			if (types[i] == 1700)
+			{
+				parseNumeric(value, field.type, field.scale, format != 0, address);
+				break;
+			}
+			const auto numeric = format ? binaryInteger(value, field.length) : integer(value, field.length);
 			if (field.type == SQL_SHORT)
 				store<ISC_SHORT>(address, numeric);
 			else if (field.type == SQL_LONG)
@@ -379,6 +356,15 @@ std::vector<unsigned char> InputCodec::encode(const std::vector<std::optional<st
 				store<ISC_INT64>(address, numeric);
 			break;
 		}
+		case SQL_FLOAT:
+		case SQL_DOUBLE:
+			parseFloat(value, field.type, format != 0, address);
+			break;
+		case SQL_TYPE_DATE:
+		case SQL_TYPE_TIME:
+		case SQL_TIMESTAMP:
+			parseTemporal(value, field.type, format != 0, address);
+			break;
 		case SQL_BOOLEAN:
 			if (format && (value.size() != 1 || (value[0] != 0 && value[0] != 1)))
 				throw ProtocolError("22P03", "Invalid binary boolean parameter");

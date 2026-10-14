@@ -2,7 +2,7 @@
 
 Для ручной работы есть [tools/pgwire_client.py](tools/pgwire_client.py): Python 3 клиент, который загружает настоящую `libpq` через `ctypes` и подключается по TCP. Дополнительные Python-пакеты не нужны; системная `libpq` должна быть доступна загрузчику библиотек.
 
-Текущий Simple Query выполняет SELECT, INSERT/UPDATE/DELETE, MERGE, UPDATE OR INSERT, поддержанные DDL и вызовы процедур/EXECUTE BLOCK. Поддержаны результаты SMALLINT/INTEGER/BIGINT, BOOLEAN, CHAR/VARCHAR, точные NUMERIC/DECIMAL в SHORT/LONG/INT64 и NULL; DML RETURNING может возвращать одну или несколько строк. Вне явного блока запрос выполняется в implicit transaction: успех фиксируется перед CommandComplete, ошибка откатывает её. После SET TRANSACTION запросы разделяют одну transaction до COMMIT/ROLLBACK. Пустой SQL и текст только из whitespace/comments дают EmptyQueryResponse.
+Текущий Simple Query выполняет SELECT, INSERT/UPDATE/DELETE, MERGE, UPDATE OR INSERT, поддержанные DDL и вызовы процедур/EXECUTE BLOCK. Поддержаны результаты SMALLINT/INTEGER/BIGINT, BOOLEAN, CHAR/VARCHAR, точные NUMERIC/DECIMAL в SHORT/LONG/INT64/INT128, FLOAT/DOUBLE, DATE/TIME/TIMESTAMP без TZ и NULL; DML RETURNING может возвращать одну или несколько строк. Вне явного блока запрос выполняется в implicit transaction: успех фиксируется перед CommandComplete, ошибка откатывает её. После SET TRANSACTION запросы разделяют одну transaction до COMMIT/ROLLBACK. Пустой SQL и текст только из whitespace/comments дают EmptyQueryResponse.
 
 Доступны native SET TRANSACTION, COMMIT/ROLLBACK, RETAIN, savepoints и поддержанные session SET/ALTER SESSION RESET. Клиент показывает состояния I (idle), T (transaction), E (failed transaction). Несовместимые `BEGIN` и `$1` получают ошибку парсера Firebird. Клиент отправляет любой введённый SQL целиком и показывает реальную ошибку сервера; он не добавляет BEGIN и не переписывает запросы.
 
@@ -14,9 +14,9 @@ PgWire использует ограниченный анализ начала �
 
 P7 Extended Query прошёл целевую Linux/Super приёмку: 16 групп, см. [VALIDATION.md](VALIDATION.md). Этот консольный `pgwire_client.py` использует `PQexec`/Simple Query и не добавляет отдельные Bind values. Для P7 нужен прямой libpq `PQexecParams` либо `PQprepare`/`PQexecPrepared`, например SQL `SELECT CAST(? AS INTEGER) FROM RDB$DATABASE` с одним отдельным text parameter `42`. SQL остаётся неизменным; `$1` и автоматически добавленный BEGIN по-прежнему получают parser error.
 
-Input/output поддерживают text integer/BOOLEAN/CHAR/VARCHAR/NUMERIC до INT64 и NULL, binary integer/BOOLEAN/строки. Binary NUMERIC и расширенные codecs отложены. Named prepared statements можно повторно исполнять после commit; portals ограничены transaction и удаляются при ошибке/завершении. RESET очищает все prepared objects. Лимиты session: 128 statements, 128 portals, 8 MiB учитываемых SQL/metadata/buffers. Профиль Psycopg 3 ещё не проверен; результаты существующих Simple Query примеров не доказывают совместимость его автоматически генерируемого SQL.
+Input/output поддерживают text/binary integer/BOOLEAN/CHAR/VARCHAR, точные NUMERIC/DECIMAL и INT128, FLOAT/DOUBLE, DATE/TIME/TIMESTAMP без TZ и NULL. Named prepared statements можно повторно исполнять после commit; portals ограничены transaction и удаляются при ошибке/завершении. RESET очищает все prepared objects. Лимиты session: 128 statements, 128 portals, 8 MiB учитываемых SQL/metadata/buffers. Профиль Psycopg 3 ещё не проверен; результаты существующих Simple Query примеров не доказывают совместимость его автоматически генерируемого SQL.
 
-Для неоднозначного native expression задайте тип самого параметра в исходном SQL, например `CAST(? AS INTEGER) + ID`: Parse OID hints не заменяют вывод типов Firebird, плагин не вставляет CAST. В Extended Query успешный implicit cycle фиксируется на Sync; ошибка откатывает его до Sync. SET TRANSACTION при уже открытом implicit cycle получает 25001. Расширение codecs следует в P8, приёмка M2 — в P9.
+Для неоднозначного native expression задайте тип самого параметра в исходном SQL, например `CAST(? AS INTEGER) + ID`: Parse OID hints не заменяют вывод типов Firebird, плагин не вставляет CAST. В Extended Query успешный implicit cycle фиксируется на Sync; ошибка откатывает его до Sync. SET TRANSACTION при уже открытом implicit cycle получает 25001. Codecs расширены в P8; клиентская приёмка M2 — в P9.
 
 ## Подготовить экземпляр Firebird
 
@@ -135,7 +135,19 @@ FROM RDB$DATABASE
 
 Ожидаемые OID: `16`, `1042`, `1043`, `1700`, `1700`, `1043`. BOOLEAN выводится как `t/f`; CHAR содержит `Я` и три пробела, VARCHAR сохраняет конечный пробел. Значение amount — ровно `-123.40`, whole_numeric — `7` с OID numeric, несмотря на scale=0. NULL отличается от пустой строки. Выравнивание таблицы добавляет собственные пробелы при отображении; эти пробелы не являются данными результата.
 
-FLOAT/DOUBLE, даты/время, INT128, BLOB и прочие ещё не реализованные output codecs получают `0A000` до исполнения. Пример: `SELECT CAST(1 AS DOUBLE PRECISION) FROM RDB$DATABASE`. Строковые результаты, включая `CURRENT_USER`, уже поддерживаются в пределах описанных типов.
+FLOAT/DOUBLE, даты/время без TZ и INT128 теперь поддержаны. Например:
+
+```sql
+SELECT CAST(1.25 AS DOUBLE PRECISION),
+       CAST('2026-10-14' AS DATE),
+       CAST('12:34:56.1234' AS TIME),
+       CAST('1999-12-31 23:59:59.9999' AS TIMESTAMP),
+       CAST(12345678901234567890123456789012345678 AS NUMERIC(38,0))
+FROM RDB$DATABASE;
+\g
+```
+
+Даты ограничены годами 0001..9999, дробная часть времени — native точностью 100 мкс. Для Bind text используется ISO, а непредставимая точность отклоняется, не округляется. Numeric передаётся без потери decimal precision. BLOB, DECFLOAT и типы WITH TIME ZONE пока получают `0A000` до исполнения. Пример отказа: `SELECT CAST(1 AS DECFLOAT(16)) FROM RDB$DATABASE`. Строковые результаты, включая `CURRENT_USER`, уже поддерживаются в пределах описанных типов.
 
 Для EmptyQueryResponse отправьте `\g` при пустом буфере либо выполните:
 
@@ -312,7 +324,7 @@ COMMIT;
 
 ```text
 UPDATE PGWIRE_MANUAL SET VAL = 999 WHERE ID = 1
-RETURNING CAST(VAL AS DOUBLE PRECISION)
+RETURNING CAST(VAL AS DECFLOAT(16))
 \g
 BEGIN
 \g

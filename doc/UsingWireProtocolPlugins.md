@@ -446,8 +446,8 @@ compatible DDL, RETURNING and executable/selectable blocks and procedures.
 Unsupported input/output capabilities are checked before execution.
 
 Supported text outputs are SMALLINT/INTEGER/BIGINT (OID 21/23/20), BOOLEAN (16),
-CHAR/VARCHAR (1042/1043), NUMERIC/DECIMAL stored in SHORT/LONG/INT64 (1700), and
-NULL. Scale and subtype are preserved, and exact numerics do not pass through
+CHAR/VARCHAR (1042/1043), NUMERIC/DECIMAL and INT128 (1700), FLOAT/DOUBLE
+(700/701), DATE/TIME/TIMESTAMP without time zone (1082/1083/1114), and NULL. Scale and subtype are preserved, and exact numerics do not pass through
 floating point. CHAR uses varying fetch conversion while retaining its logical
 CHAR OID and meaningful spaces. UTF8/NONE/ASCII strings must contain valid UTF8
 on output; OCTETS and unsupported charsets/types receive `0A000` from metadata
@@ -531,8 +531,7 @@ the full POSIX build, four unit executables (487 SQL classification checks),
 and the Simple Query/lifecycle/startup/native regressions. The native AUTO COMMIT
 limitation above remains; targeted P6/M1 acceptance excludes the separate native
 ON CONNECT shutdown defect. Commands, evidence and coverage limits are maintained in
-[`VALIDATION.md`](../pg_wire_protocol/VALIDATION.md). P7 Extended Query passed 16 targeted Linux/Super groups. Additional
-codecs, remote TCP/TLS, cancellation messages and other server modes require
+[`VALIDATION.md`](../pg_wire_protocol/VALIDATION.md). P7 Extended Query passed 16 targeted Linux/Super groups. Remote TCP/TLS, cancellation messages and other server modes require
 subsequent implementation and validation.
 
 
@@ -573,9 +572,9 @@ hint receives `0A000`; hints cannot repair missing engine inference or rewrite
 SQL. Ambiguous expressions may therefore need a client-written CAST on the
 parameter itself, such as `CAST(? AS INTEGER) + ID`; the plugin does not inject
 that cast or pass OID hints into the native parser.
-Text input/output supports SMALLINT/INTEGER/BIGINT, BOOLEAN, CHAR/VARCHAR and
-NUMERIC/DECIMAL stored through INT64. Binary integer, boolean and string input
-and output are supported; non-null binary NUMERIC remains `0A000` until P8.
+Text and binary input/output support SMALLINT/INTEGER/BIGINT, BOOLEAN, CHAR/VARCHAR,
+NUMERIC/DECIMAL through INT128, FLOAT/DOUBLE, and DATE/TIME/TIMESTAMP without
+time zone. P8 adds the extended types and binary NUMERIC.
 Exact decimal input, including exponent notation, uses no floating point;
 nonrepresentable scale/range receives `22003`. CHAR input uses varying metadata.
 UTF8/NONE strings require valid UTF8, ASCII input additionally requires ASCII,
@@ -600,5 +599,35 @@ counts; the accounted budget is not a process RSS limit. Five codec unit
 executables passed, including 149 input and 487 SQL classification checks;
 seven server groups/58 pytest cases and nine native baseline checks also passed.
 Acceptance results and remaining limitations are recorded in
-[`VALIDATION.md`](../pg_wire_protocol/VALIDATION.md). Expanded codecs and binary
-NUMERIC belong to P8; driver/application profiles belong to P9.
+[`VALIDATION.md`](../pg_wire_protocol/VALIDATION.md). P8 passed eight dedicated codec groups and the regressions recorded in VALIDATION;
+driver/application profiles belong to P9.
+
+
+## PgWire extended codecs (P8)
+
+FLOAT/DOUBLE use PostgreSQL IEEE binary32/binary64 in network byte order, with
+locale-independent round-trippable text. NaN and positive/negative Infinity are
+supported floating point values. Finite text overflow or underflow receives
+`22003`. Exact NUMERIC/DECIMAL never passes through floating point: PostgreSQL
+binary numeric uses base-10000 digits, weight, sign and display scale. INT128
+maps to numeric OID 1700 and retains its full signed native range, including
+39-digit endpoints; declared NUMERIC/DECIMAL precision is at most 38. Inputs
+must exactly fit the native integer and scale (`22003` otherwise); numeric
+NaN/Infinity is not representable. Nonzero binary digits beyond dscale are
+rejected with `22P03`, rather than silently truncated.
+
+Temporal codecs support finite dates in years 0001..9999 and times below 24:00,
+without time zones. Text uses ISO `YYYY-MM-DD`, `HH:MM:SS[.fraction]` and a space
+or T between date and time. Input accepts up to six fractional digits, with
+nonzero precision below Firebird's 100-microsecond tick rejected (`22008`).
+Binary dates are signed days since 2000-01-01; binary time and timestamp use
+signed microseconds, with timestamp relative to that epoch. Negative timestamps
+are converted using floor division. Startup reports `integer_datetimes=on`;
+TimeZone is not advertised. Infinity, BC dates, timezone suffixes and 24:00 are
+outside the supported temporal profile. BLOB, DECFLOAT and types WITH TIME ZONE
+remain unsupported, and PostgreSQL `::date` syntax still belongs to the parser.
+
+The dedicated [codec harness](../pg_wire_protocol/tools/pgwire_codec_smoke.py)
+uses a real C libpq client and independent binary fixtures, checks extended
+parameters/results and RETURNING, and verifies committed values via native TCP.
+See [VALIDATION](../pg_wire_protocol/VALIDATION.md) for actual run results.

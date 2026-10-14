@@ -13,11 +13,13 @@
 
 #include "firebird.h"
 #include "ResultCodec.h"
+#include "FloatCodec.h"
+#include "NumericCodec.h"
+#include "TemporalCodec.h"
 #include "../common/unicode_util.h"
 #include "../common/status.h"
 #include "../intl/charsets.h"
 
-#include <charconv>
 #include <cstring>
 #include <limits>
 
@@ -69,26 +71,6 @@ template <typename T> std::string binaryInteger(T value)
 	return bytes;
 }
 
-std::string decimal(ISC_INT64 value, int scale)
-{
-	// Unsigned subtraction also represents abs(INT64_MIN), without signed overflow.
-	const auto magnitude = value < 0 ? std::uint64_t(0) - static_cast<std::uint64_t>(value) :
-		static_cast<std::uint64_t>(value);
-	char buffer[32];
-	const auto converted = std::to_chars(buffer, buffer + sizeof(buffer), magnitude);
-	std::string text(buffer, converted.ptr);
-	const auto fractional = static_cast<unsigned>(-scale);
-	if (fractional)
-	{
-		if (text.size() <= fractional)
-			text.insert(0, fractional + 1 - text.size(), '0');
-		text.insert(text.size() - fractional, 1, '.');
-	}
-	if (value < 0)
-		text.insert(0, 1, '-');
-	return text;
-}
-
 } // namespace
 
 ResultCodec::ResultCodec(IMessageMetadata* logicalMetadata,
@@ -137,14 +119,31 @@ ResultCodec::ResultCodec(IMessageMetadata* logicalMetadata,
 		case SQL_SHORT:
 		case SQL_LONG:
 		case SQL_INT64:
-			if (subtype < 0 || subtype > 2 || scale < -18 || scale > 0)
+		case SQL_INT128:
+			if (subtype < 0 || subtype > 2 || scale < (type == SQL_INT128 ? -38 : -18) || scale > 0)
 				throw ProtocolError("0A000", "Exact numeric result metadata is not supported");
 			physicalSize = type == SQL_SHORT ? sizeof(ISC_SHORT) :
-				type == SQL_LONG ? sizeof(ISC_LONG) : sizeof(ISC_INT64);
+				type == SQL_LONG ? sizeof(ISC_LONG) : type == SQL_INT64 ? sizeof(ISC_INT64) : sizeof(FB_I128);
 			if (capacity != physicalSize)
 				invalidMetadata();
-			column.oid = (subtype || scale) ? 1700 : type == SQL_SHORT ? 21 : type == SQL_LONG ? 23 : 20;
+			column.oid = (subtype || scale || type == SQL_INT128) ? 1700 : type == SQL_SHORT ? 21 : type == SQL_LONG ? 23 : 20;
 			column.typeSize = column.oid == 1700 ? -1 : physicalSize;
+			break;
+		case SQL_FLOAT:
+		case SQL_DOUBLE:
+		case SQL_TYPE_DATE:
+		case SQL_TYPE_TIME:
+		case SQL_TIMESTAMP:
+			if (subtype || scale)
+				throw ProtocolError("0A000", "Result type modifiers are not supported");
+			physicalSize = type == SQL_FLOAT ? sizeof(float) : type == SQL_DOUBLE ? sizeof(double) :
+				type == SQL_TYPE_DATE ? sizeof(ISC_DATE) : type == SQL_TYPE_TIME ? sizeof(ISC_TIME) :
+				sizeof(ISC_TIMESTAMP);
+			if (capacity != physicalSize)
+				invalidMetadata();
+			column.oid = type == SQL_FLOAT ? 700 : type == SQL_DOUBLE ? 701 :
+				type == SQL_TYPE_DATE ? 1082 : type == SQL_TYPE_TIME ? 1083 : 1114;
+			column.typeSize = type == SQL_FLOAT || type == SQL_TYPE_DATE ? 4 : 8;
 			break;
 		case SQL_BOOLEAN:
 			if (subtype || scale)
@@ -188,8 +187,6 @@ ResultCodec::ResultCodec(IMessageMetadata* logicalMetadata,
 		default:
 			throw ProtocolError("0A000", "Result data type is not supported yet");
 		}
-		if (column.format == 1 && column.oid == 1700)
-			throw ProtocolError("0A000", "Binary numeric results are not supported yet");
 		const auto offset = logicalMetadata->getOffset(&status, i);
 		check(&status);
 		const auto nullOffset = logicalMetadata->getNullOffset(&status, i);
@@ -250,19 +247,33 @@ std::vector<std::optional<std::string>> ResultCodec::decode(const void* buffer, 
 			continue;
 		}
 		const auto* address = bytes + field.offset;
+		if (descriptions[i].oid == 1700)
+		{
+			result.emplace_back(formatNumeric(address, field.type, field.scale, binary));
+			continue;
+		}
 		switch (field.type)
 		{
 		case SQL_SHORT:
 			result.emplace_back(binary ? binaryInteger(readValue<ISC_SHORT>(address)) :
-				decimal(readValue<ISC_SHORT>(address), field.scale));
+				std::to_string(readValue<ISC_SHORT>(address)));
 			break;
 		case SQL_LONG:
 			result.emplace_back(binary ? binaryInteger(readValue<ISC_LONG>(address)) :
-				decimal(readValue<ISC_LONG>(address), field.scale));
+				std::to_string(readValue<ISC_LONG>(address)));
 			break;
 		case SQL_INT64:
 			result.emplace_back(binary ? binaryInteger(readValue<ISC_INT64>(address)) :
-				decimal(readValue<ISC_INT64>(address), field.scale));
+				std::to_string(readValue<ISC_INT64>(address)));
+			break;
+		case SQL_FLOAT:
+		case SQL_DOUBLE:
+			result.emplace_back(formatFloat(address, field.type, binary));
+			break;
+		case SQL_TYPE_DATE:
+		case SQL_TYPE_TIME:
+		case SQL_TIMESTAMP:
+			result.emplace_back(formatTemporal(address, field.type, binary));
 			break;
 		case SQL_BOOLEAN:
 		{

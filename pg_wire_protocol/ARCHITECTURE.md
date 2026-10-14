@@ -2,7 +2,7 @@
 
 Дополнительные wire-протоколы реализуются динамическими плагинами внутри процесса `firebird`. Первый плагин — PostgreSQL. Общая серверная инфраструктура управляет TCP listeners, соединениями и workers; плагин реализует конкретный протокол и обращается к локальному движку через интерфейсы Firebird. Родной frontend сохраняет свой путь запуска, настройки, XDR и обработку запросов.
 
-Документ определяет host/plugin contract и границы SQL. Предыдущая P5-ревизия прошла целевую Linux/Super loopback приёмку: I/T/E, native transaction/session controls и recovery. В P6 сборка, unit tests и host/startup/Simple Query/transaction/lifecycle/native регрессии прошли. **Известное ограничение native baseline: READ COMMITTED READ CONSISTENCY + AUTO COMMIT не входит в подтверждённую совместимость; SNAPSHOT AUTO COMMIT проверен.** Целевой P6/M1 Linux/Super принят с известными native ограничениями. Shutdown во время ON CONNECT остаётся отдельным исключением: native Debug assertion воспроизводится также без wire endpoints. P7 Extended Query прошёл целевую Linux/Super приёмку: 16 групп. Следующий этап — P8, расширенные codecs; M2 до P9 не заявляется. Результаты и границы покрытия — в [VALIDATION.md](VALIDATION.md). TLS, Windows и другие server modes требуют отдельной реализации и приёмки.
+Документ определяет host/plugin contract и границы SQL. Предыдущая P5-ревизия прошла целевую Linux/Super loopback приёмку: I/T/E, native transaction/session controls и recovery. В P6 сборка, unit tests и host/startup/Simple Query/transaction/lifecycle/native регрессии прошли. **Известное ограничение native baseline: READ COMMITTED READ CONSISTENCY + AUTO COMMIT не входит в подтверждённую совместимость; SNAPSHOT AUTO COMMIT проверен.** Целевой P6/M1 Linux/Super принят с известными native ограничениями. Shutdown во время ON CONNECT остаётся отдельным исключением: native Debug assertion воспроизводится также без wire endpoints. P7 Extended Query прошёл целевую Linux/Super приёмку: 16 групп. P8 codecs прошли целевую Linux/Super приёмку: восемь групп. Следующий этап — P9/M2; полная совместимость M2 пока не заявляется. Результаты и границы покрытия — в [VALIDATION.md](VALIDATION.md). TLS, Windows и другие server modes требуют отдельной реализации и приёмки.
 
 ## Разделение ответственности
 
@@ -87,7 +87,13 @@ Named statement переживает commit. Bound portal сохраняет sta
 
 P7 содержит узкий native cleanup fix: release_attachment в jrd.cpp сначала снимает used со всех requests attachment, затем CMP_release освобождает общий Statement и его clones. Падение воспроизведено также через native TCP без PgWire. Это не исправление отдельного ON CONNECT shutdown assertion !child; тот сценарий не перепроверялся.
 
-Пределы: 128 statements, 128 portals и 8 MiB учитываемых сохранённых SQL/metadata/buffers на session. Дополнительные engine allocations ограничены числом объектов; это не общий RSS cap. Поддержаны text basic input/output и binary integer/BOOLEAN/строки; binary NUMERIC и расширенные codecs остаются P8. OID hints консервативно сверяются с native inference, кроме совместимых строковых OID 25/1042/1043. Полный контракт — в CODEX_CONTEXT §11; P7 acceptance не означает поддержку обычного `$n`-генерирующего драйвера.
+Пределы: 128 statements, 128 portals и 8 MiB учитываемых сохранённых SQL/metadata/buffers на session. Дополнительные engine allocations ограничены числом объектов; это не общий RSS cap. P8 добавляет text/binary FLOAT/DOUBLE, finite temporal без TZ и numeric через INT128 к принятому basic P7 набору; целевая runtime-приёмка P8 прошла. OID hints консервативно сверяются с native inference, кроме совместимых строковых OID 25/1042/1043. Полный контракт — в CODEX_CONTEXT §11; P7 acceptance не означает поддержку обычного `$n`-генерирующего драйвера.
+
+## Scalar codecs P8
+
+InputCodec и ResultCodec вызывают общие NumericCodec, FloatCodec и TemporalCodec; extended типы не меняют engine, SQL или wire host. Реализованы exact NUMERIC/DECIMAL через INT128 (OID 1700), binary numeric base 10000, FLOAT/DOUBLE (700/701), DATE/TIME/TIMESTAMP без TZ (1082/1083/1114). Все поддержанные scalar types имеют text/binary input/output; целевая runtime-приёмка P8 прошла, следующий этап — P9/M2.
+
+Numeric сохраняет scale и full signed INT128 range без float/rounding; specials дают 22003. Float поддерживает NaN/Infinity. Temporal ограничен конечными годами 0001..9999 и точностью 100 µs; strict ISO input допускает до шести дробных цифр при нулевых пятой/шестой, binary использует PostgreSQL epoch/units. ParameterStatus сообщает integer_datetimes=on, TimeZone не публикуется. Invalid/range/precision errors проверяются до записи Bind buffer и execution. Полный OID/error contract — в CODEX_CONTEXT §9; raw-wire/C libpq evidence записывается в VALIDATION после запуска.
 
 ## Конфигурация endpoints
 
@@ -251,6 +257,7 @@ TLS реализуется поверх byte transport дополнительн�
 | Shutdown | `src/yvalve/why.cpp`: Dispatcher::shutdown; `src/remote/server/server.cpp`: set_server, pre_shutdown |
 | Auth bridge | `src/remote/server/wire/Authentication.cpp`: authenticateAndAttach; native/EDS образцы: DatabaseAuth::accept и ValidatePassword.cpp |
 | PostgreSQL module | `src/plugins/wire/pg/Protocol.{h,cpp}`: framing; `InputCodec.{h,cpp}`: Bind values и ParameterDescription; `ResultCodec.{h,cpp}`: text/binary scalar results; `PgWire.cpp`: plugin/session; `Execute.cpp`: unchanged SQL и общая transaction policy через engine interfaces; `Extended.cpp`: prepared statements/portals и Extended message execution; `ErrorStatus.cpp`: full-vector diagnostics и explicit SQLSTATE fallback |
+| Scalar codecs | `src/plugins/wire/pg/NumericCodec.{h,cpp}`: exact decimal/base-10000/INT128; `FloatCodec.{h,cpp}`: float32/float64; `TemporalCodec.{h,cpp}`: finite ISO and binary date/time/timestamp без TZ |
 | SQL classification | `src/plugins/wire/pg/SqlInfo.{h,cpp}`: ограниченный plugin-local descriptor; `Execute.cpp` использует штатные getType/getFlags/input/output/affected records |
 | POSIX objects/targets | `builds/posix/make.shared.variables`: Remote_Server и plugin object sets; `builds/posix/Makefile.in`: plugins, updateCloopInterfaces |
 | Другие build paths | `src/CMakeLists.txt`; `builds/win32/make_boot.bat`; `builds/win32/msvc15` |

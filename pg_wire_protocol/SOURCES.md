@@ -274,3 +274,14 @@ EDS wrapper нельзя вызывать до attachment. Общий host auth 
 - [PostgreSQL 17 message formats](https://www.postgresql.org/docs/17/protocol-message-formats.html): layout protocol 3.0, включая cancellation.
 
 Для M3 нужен собственный проверенный TLS/cancel path внутри PG frontend. Native Firebird WireCrypt и наличие Srp256 не доказывают PostgreSQL TLS/SCRAM compatibility. Форматы 3.2 не переносятся в контракт 3.0 автоматически.
+
+
+### S18 — P8 scalar text/binary representations
+
+- [PostgreSQL numeric send/recv](https://github.com/postgres/postgres/blob/REL_17_STABLE/src/backend/utils/adt/numeric.c): base-10000 digits, signed weight, sign, display scale.
+- [PostgreSQL numeric types](https://www.postgresql.org/docs/current/datatype-numeric.html) и [float source](https://doxygen.postgresql.org/float_8c_source.html): IEEE floating point и text special values.
+- [PostgreSQL date/time send](https://doxygen.postgresql.org/date_8c.html): date_send передаёт int32 дней, time_send — int64 микросекунд.
+- [PostgreSQL timestamp send](https://doxygen.postgresql.org/backend_2utils_2adt_2timestamp_8c.html) и [timestamp constants](https://doxygen.postgresql.org/datatype_2timestamp_8h_source.html): int64 микросекунд, epoch 2000-01-01, 86400000000 микросекунд в сутках.
+- [Firebird native temporal constants](../src/common/classes/NoThrowTimeStamp.h), [native timestamp implementation](../src/common/classes/NoThrowTimeStamp.cpp) и [Int128](../src/common/Int128.h): native epoch/range/100 µs и переносимый доступ к native integer representation.
+
+P8 ограничивает input точной представимостью native типа; NUMERIC/temporal не округляются внутри codecs. Это явно более узкий профиль, чем все значения PostgreSQL. Независимые binary fixtures находятся в unit tests и [codec harness](tools/pgwire_codec_smoke.py).

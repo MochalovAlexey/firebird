@@ -1,6 +1,6 @@
 # Матрица совместимости PostgreSQL wire plugin
 
-Матрица M0–M3 задаёт границы этапов. База — master Firebird 6, SQL dialect 3, UTF8, wire 3.0. Архитектура — [ARCHITECTURE.md](ARCHITECTURE.md), execution contract — [CODEX_CONTEXT.md](CODEX_CONTEXT.md). Предыдущая P5-ревизия прошла целевую Linux/Super loopback приёмку: I/T/E, native transaction/session controls и recovery. В P6 сборка, unit tests и host/startup/Simple Query/transaction/lifecycle/native регрессии прошли. **Известное ограничение native baseline: READ COMMITTED READ CONSISTENCY + AUTO COMMIT не входит в подтверждённую совместимость; SNAPSHOT AUTO COMMIT проверен.** Целевой P6/M1 Linux/Super принят с известными native ограничениями. Shutdown во время ON CONNECT остаётся отдельным исключением: native Debug assertion воспроизводится также без wire endpoints. P7 Extended Query прошёл целевую Linux/Super приёмку: 16 групп. Следующий этап — P8, расширенные codecs; M2 до P9 не заявляется. Результаты и границы покрытия — в [VALIDATION.md](VALIDATION.md). TLS, Windows и другие server modes требуют отдельной реализации и приёмки.
+Матрица M0–M3 задаёт границы этапов. База — master Firebird 6, SQL dialect 3, UTF8, wire 3.0. Архитектура — [ARCHITECTURE.md](ARCHITECTURE.md), execution contract — [CODEX_CONTEXT.md](CODEX_CONTEXT.md). Предыдущая P5-ревизия прошла целевую Linux/Super loopback приёмку: I/T/E, native transaction/session controls и recovery. В P6 сборка, unit tests и host/startup/Simple Query/transaction/lifecycle/native регрессии прошли. **Известное ограничение native baseline: READ COMMITTED READ CONSISTENCY + AUTO COMMIT не входит в подтверждённую совместимость; SNAPSHOT AUTO COMMIT проверен.** Целевой P6/M1 Linux/Super принят с известными native ограничениями. Shutdown во время ON CONNECT остаётся отдельным исключением: native Debug assertion воспроизводится также без wire endpoints. P7 Extended Query прошёл целевую Linux/Super приёмку: 16 групп. P8 codecs прошли целевую Linux/Super приёмку: восемь групп. Следующий этап — P9/M2; полная совместимость M2 пока не заявляется. Результаты и границы покрытия — в [VALIDATION.md](VALIDATION.md). TLS, Windows и другие server modes требуют отдельной реализации и приёмки.
 
 ## Startup/authentication: Linux/Super P2 PASS
 
@@ -8,13 +8,13 @@
 
 User обязателен, database по умолчанию равен user; явно пустой database отвергается. Допустимы application_name и отсутствующий/точный UTF8 client_encoding; иные startup keys/options/replication явно отклоняются. Startup ограничен 16 KiB, typed frame 1 MiB, Password body 4096 bytes с NUL. Собственных transport/frame/startup/auth/output timers нет. Ввод-вывод ждёт progress, EOF или shutdown; queued sockets ограничены числом без истечения по времени.
 
-AuthenticationOk отправляется после attach, затем ParameterStatus и ReadyForQuery I. Version token — `16.0 (Firebird pgwire prototype)`, DateStyle — `ISO, MDY`. Исторический P2 отвечал одинаковым 0A000 на все корректные Query; P3 заменяет это поведение engine execution, описанным ниже. TLS и BackendKeyData/cancel ещё отсутствуют; P7 Extended Query прошёл целевую Linux/Super приёмку. P2 PASS относится к записанным startup/authentication checks, не к полной матрице M0–M3.
+AuthenticationOk отправляется после attach, затем ParameterStatus и ReadyForQuery I. Version token — `16.0 (Firebird pgwire prototype)`, DateStyle — `ISO, MDY`, с P8 `integer_datetimes=on`; TimeZone не публикуется. Исторический P2 отвечал одинаковым 0A000 на все корректные Query; P3 заменяет это поведение engine execution, описанным ниже. TLS и BackendKeyData/cancel ещё отсутствуют; P7 Extended Query прошёл целевую Linux/Super приёмку. P2 PASS относится к записанным startup/authentication checks, не к полной матрице M0–M3.
 
 ## Simple Query и P5: историческая приёмка и текущие регрессии
 
 Совместимые SELECT/DML/DDL, RETURNING и EXECUTE BLOCK/PROCEDURE выполняются движком. Используются существующие getType/getFlags, input/output metadata, affected records и plugin-local lexical descriptor. Дополнительные public statement info items и EMPTY diagnostics удалены из движка. Предыдущая P5-ревизия принята в целевом Linux/Super loopback profile: 14 transaction groups без skips, full build и четыре unit executable (487 classifier checks), повторные 12 Simple Query, 7 lifecycle, 52 startup и 9 native checks. C libpq 14.24 и psycopg2 2.9.11/libpq 17.6 проверены отдельно; backend connects — 0. SNAPSHOT AUTO COMMIT прошёл, проблемный native READ CONSISTENCY + AUTO COMMIT исключён из подтверждённого profile. Целевой M1 позднее принят в P6 с указанными исключениями; evidence — в [VALIDATION.md](VALIDATION.md).
 
-Text output: SMALLINT/INTEGER/BIGINT (OID 21/23/20), BOOLEAN (16), CHAR/VARCHAR (1042/1043), exact NUMERIC/DECIMAL в SHORT/LONG/INT64 (1700), NULL. Формат 0, typmod-1, table OID/attribute 0; logical CHAR padding сохраняется через varying fetch metadata. Unsupported types/charsets/input parameters получают 0A000 по metadata до execution.
+Текущий Simple Query использует text output из набора P8 ниже; поддержка M1 типов сохраняется. Формат 0, typmod-1, table OID/attribute 0; logical CHAR padding сохраняется через varying fetch metadata. Действительно неподдержанные types/charsets и любые input parameters в Simple Query получают 0A000 по metadata до execution.
 
 `QueryExecutor` живёт всю session и выдаёт ReadyForQuery I/T/E. В I prepare получает NULL, а обычный SQL — implicit READ WRITE / READ COMMITTED READ CONSISTENCY / WAIT transaction без заданного плагином lock timeout; commit выполняется до CommandComplete. В T/E prepare использует current native handle. DML tag отражает affected records, включая RETURNING; EXECUTE BLOCK/PROCEDURE не добавляют count. Recoverable explicit error сохраняет handle и E, implicit error откатывается в I; uncertain commit/cleanup закрывает connection. EMPTY сохраняет прежнее I/T/E.
 
@@ -26,11 +26,27 @@ Parser error —42601, unknown relation —42P01, permission —42501, unique �
 
 Реализованы Parse/Bind/Describe/Execute/Close/Flush/Sync, named/unnamed objects, maxRows/PortalSuspended и discard-until-Sync. Параметры передаются через native metadata в исходный SQL с `?`; PostgreSQL BEGIN/$n не переписываются. Проверяемые клиенты P7 — прямой C libpq и raw-wire; Psycopg 3 ещё не проверен. Это ограниченный этап M2; полная совместимость драйвера/приложения относится к P9.
 
-Input/output: text SMALLINT/INTEGER/BIGINT, BOOLEAN, CHAR/VARCHAR и NUMERIC/DECIMAL до INT64, NULL; binary integer/BOOLEAN/строки. Binary NUMERIC и FLOAT/temporal/INT128 остаются P8. Для Parse hints numeric/integer/boolean OID должен точно совпадать с inferred; строковые 25/1042/1043 совместимы. 0/отсутствующий hint — inference; несовместимый hint — 0A000. Text numeric кодируется точно, без float и потери дробных цифр; непредставимое значение — 22003.
+В принятом P7 input/output включал text SMALLINT/INTEGER/BIGINT, BOOLEAN, CHAR/VARCHAR и NUMERIC/DECIMAL до INT64, NULL; binary integer/BOOLEAN/строки. Текущий P8 расширяет этот набор, как описано ниже. Для Parse hints любого нестрокового типа OID должен точно совпадать с inferred; строковые 25/1042/1043 совместимы. 0/отсутствующий hint — inference; несовместимый hint — 0A000. Text numeric кодируется точно, без float и потери дробных цифр; непредставимое значение — 22003.
 
 Named statements переживают commit; portals живут в transaction, сохраняются через Sync в T и удаляются при завершении transaction или Extended error. Close statement и unnamed Parse replacement сохраняют ранее связанные portals; Simple Query удаляет unnamed statement и portal. RESET удаляет все statements/portals даже при том же native transaction pointer. Bind готовит отдельный native statement того же SQL на portal, без своей application transaction. Лимиты: 128 statements, 128 portals, 8 MiB учитываемых SQL/metadata/buffers; прочие engine allocations ограничены количеством объектов. SET TRANSACTION при открытом implicit cycle получает 25001; ошибка откатывает implicit cycle до Sync. Подробный state/ownership contract — в CODEX_CONTEXT, результаты — в VALIDATION.
 
 P7 включает native cleanup fix нескольких requests одного Statement в release_attachment (jrd.cpp), подтверждённый воспроизведением через native TCP без PgWire. Grammar, public statement metadata и CLOOP не меняются. ON CONNECT shutdown assertion !child остаётся отдельным неисправленным и не перепроверенным ограничением.
+
+## Codecs P8: целевая Linux/Super приёмка пройдена
+
+Для Linux/Super реализованы text/binary input/output всех поддержанных scalar types: SMALLINT/INTEGER/BIGINT, BOOLEAN, CHAR/VARCHAR, NUMERIC/DECIMAL на SHORT/LONG/INT64/INT128, FLOAT/DOUBLE и DATE/TIME/TIMESTAMP без TZ. NULL сохраняется отдельно от payload. Новый набор используется и Simple Query output, и Extended Query; синтаксис SQL и native inference не меняются.
+
+| Тип | PG OID | Границы |
+|---|---:|---|
+| FLOAT / DOUBLE PRECISION | 700 / 701 | IEEE float32/float64 binary в network order; text locale-independent; NaN и ±Infinity поддержаны |
+| INT128, NUMERIC/DECIMAL до precision 38 | 1700 | Exact text и base-10000 binary numeric; pure INT128 сохраняет весь signed диапазон −2^127..2^127−1, scale 0..−38 |
+| NUMERIC/DECIMAL на SHORT/LONG/INT64 | 1700 | Exact native range, scale 0..−18; binary numeric теперь поддержан |
+| DATE | 1082 | Конечные даты 0001-01-01..9999-12-31; binary int32 дней от 2000-01-01 |
+| TIME / TIMESTAMP без TZ | 1083 / 1114 | Native точность 100 µs; binary int64 µs, timestamp от 2000-01-01; время в пределах суток |
+
+Numeric не проходит через float и не округляется: overflow, непредставимая дробь и numeric NaN/Infinity дают 22003. Malformed numeric binary — 22P03, включая ненулевые digits, скрываемые dscale; malformed text — 22P02. Float decimal overflow/underflow вне представимого диапазона — 22003, malformed text — 22P02, неверная binary length — 22P03.
+
+Temporal text принимает строгий ISO `YYYY-MM-DD`, `HH:MM:SS[.ffffff]`, `YYYY-MM-DD HH:MM:SS[.ffffff]` либо разделитель `T`. Дробь содержит до шести цифр; пятая/шестая должны быть нулевыми для точного 100 µs native значения. Binary µs также должны делиться на 100 без остатка. Invalid text format — 22007; календарные/временные границы, непредставимая точность и infinity — 22008; неверная binary length — 22P03. Текстовые BC/TZ suffix не входят в ISO grammar и дают 22007; binary даты до 0001 года, 24:00 и leap second дают 22008. `integer_datetimes=on` отражает binary layout; TimeZone не публикуется. BLOB/ARRAY/OCTETS/DECFLOAT/TZ остаются отдельной работой.
 
 ## Главная граница
 
@@ -46,7 +62,7 @@ BEGIN/$n и другие несовместимые формы остаются 
 
 ## Возможности по этапам
 
-Колонки M0–M3 задают целевой объём этапов; текущий P7 прошёл приёмку базовой части Extended Query, расширенные codecs остаются P8, полный M2 — P9.
+Колонки M0–M3 задают целевой объём этапов. P7 прошёл приёмку базовой части Extended Query; расширенные codecs P8 прошли целевую runtime-приёмку, полный M2 — P9.
 
 | Возможность | M0 | M1 | M2 | M3 |
 |---|---|---|---|---|

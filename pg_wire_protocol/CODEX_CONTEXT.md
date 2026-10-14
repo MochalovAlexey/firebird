@@ -1,6 +1,6 @@
 # Контекст реализации wire protocol plugins в Firebird 6
 
-Контракт реализации M0–M3. Архитектура host/plugin определена в [ARCHITECTURE.md](ARCHITECTURE.md), границы приёмки — в [COMPATIBILITY.md](COMPATIBILITY.md), [PLAN.md](PLAN.md) и [TEST_PLAN.md](TEST_PLAN.md). Прямые требования пользователя имеют приоритет. Предыдущая P5-ревизия прошла целевую Linux/Super loopback приёмку: I/T/E, native transaction/session controls и recovery. В P6 сборка, unit tests и host/startup/Simple Query/transaction/lifecycle/native регрессии прошли. **Известное ограничение native baseline: READ COMMITTED READ CONSISTENCY + AUTO COMMIT не входит в подтверждённую совместимость; SNAPSHOT AUTO COMMIT проверен.** Целевой P6/M1 Linux/Super принят с известными native ограничениями. Shutdown во время ON CONNECT остаётся отдельным исключением: native Debug assertion воспроизводится также без wire endpoints. P7 Extended Query прошёл целевую Linux/Super приёмку: 16 групп. Следующий этап — P8, расширенные codecs; M2 до P9 не заявляется. Результаты и границы покрытия — в [VALIDATION.md](VALIDATION.md). TLS, Windows и другие server modes требуют отдельной реализации и приёмки.
+Контракт реализации M0–M3. Архитектура host/plugin определена в [ARCHITECTURE.md](ARCHITECTURE.md), границы приёмки — в [COMPATIBILITY.md](COMPATIBILITY.md), [PLAN.md](PLAN.md) и [TEST_PLAN.md](TEST_PLAN.md). Прямые требования пользователя имеют приоритет. Предыдущая P5-ревизия прошла целевую Linux/Super loopback приёмку: I/T/E, native transaction/session controls и recovery. В P6 сборка, unit tests и host/startup/Simple Query/transaction/lifecycle/native регрессии прошли. **Известное ограничение native baseline: READ COMMITTED READ CONSISTENCY + AUTO COMMIT не входит в подтверждённую совместимость; SNAPSHOT AUTO COMMIT проверен.** Целевой P6/M1 Linux/Super принят с известными native ограничениями. Shutdown во время ON CONNECT остаётся отдельным исключением: native Debug assertion воспроизводится также без wire endpoints. P7 Extended Query прошёл целевую Linux/Super приёмку: 16 групп. P8 codecs прошли целевую Linux/Super приёмку: восемь групп. Следующий этап — P9/M2; полная совместимость M2 пока не заявляется. Результаты и границы покрытия — в [VALIDATION.md](VALIDATION.md). TLS, Windows и другие server modes требуют отдельной реализации и приёмки.
 
 ## 1. Цель и границы
 
@@ -72,7 +72,7 @@ Coarse getType не различает все MERGE/UPDATE OR INSERT/RETURNING/D
 - До M3 SSLRequest/GSSENCRequest получают один byte `N`, затем продолжается Startup. С M3 SSLRequest может перейти в TLS в том же endpoint.
 - Проверяются bounds до allocation, overflow, NUL terminators, UTF8 и допустимые startup keys. Query содержит ровно одну NUL-terminated SQL string; лишние bytes после terminator — protocol error.
 - Непустой user обязателен; при отсутствии database используется user и всё равно проверяется alias allowlist. Явно пустой database отвергается. client_encoding отсутствует либо равен точному UTF8; application_name поддержан. Неизвестные keys/options/replication получают 0A000; иная encoding — 22023, invalid UTF8 — 22021. Duplicate keys, неверные lengths/terminators и хвост после NUL — 08P01.
-- Начальные ParameterStatus: `client_encoding=UTF8`, `server_encoding=UTF8`, `standard_conforming_strings=on`, `DateStyle=ISO, MDY`. Для integer-based binary temporal codecs закрепить `integer_datetimes=on`; TimeZone публиковать только с поддержанным поведением. IntervalStyle не заявлять без interval codec/session contract.
+- Начальные ParameterStatus: `client_encoding=UTF8`, `server_encoding=UTF8`, `standard_conforming_strings=on`, `DateStyle=ISO, MDY`. P8 публикует `integer_datetimes=on` для integer-based binary temporal codecs; TimeZone не публикуется, типы с TZ не поддержаны. IntervalStyle не заявлять без interval codec/session contract.
 - `server_version` — документированный compatibility token. Исходное значение из probe: `16.0 (Firebird pgwire prototype)`; его влияние на целевого клиента проверяется отдельно. Оно не обещает PostgreSQL SQL compatibility.
 - До реализации cancellation BackendKeyData не выдаётся. После startup отправляется ReadyForQuery `I`.
 - Поддерживаются partial/coalesced frames, short writes, EOF, EINTR и backpressure. Native crypt/compression/op_dummy не попадают в PG stream.
@@ -85,7 +85,7 @@ Coarse getType не различает все MERGE/UPDATE OR INSERT/RETURNING/D
 
 Текущий `Execute.cpp` создаёт один `QueryExecutor` на authenticated session. Prepare получает current native transaction, если она есть, иначе NULL/system prepare. В I это может быть handle ещё не завершённого Extended cycle. После successful prepare проверяются plugin-local descriptor и input/output metadata. Обычный Query из I создаёт implicit transaction только перед execution; в T использует существующую. Cursor flag выбирает openCursor/fetch, иначе execute выдаёт singleton output при наличии output columns. RowDescription/DataRow передаются потоком; отсутствие output не создаёт RowDescription. Request handles закрываются до CommandComplete; implicit transaction сначала коммитится, explicit transaction сохраняется. ReadyForQuery отражает I/T/E. Ошибка implicit Query вызывает rollback, recoverable explicit error сохраняет transaction и E. Ошибка cleanup, неопределённый commit или fatal engine error завершают session. Целевая Linux/Super приёмка P5 прошла с известным native ограничением READ CONSISTENCY + AUTO COMMIT; evidence и исторические P4 результаты в VALIDATION.
 
-Текущие text results: SMALLINT/INTEGER/BIGINT, BOOLEAN, CHAR/VARCHAR, NUMERIC/DECIMAL в SHORT/LONG/INT64 и NULL. OID соответственно 21/23/20, 16, 1042/1043 и 1700; table OID/attribute number 0, typmod=-1, alias из engine metadata. CHAR читается через varying fetch metadata с сохранением logical CHAR OID и пробелов. Поддержаны UTF8/NONE/ASCII с проверкой результата на valid UTF8; OCTETS и другие неподдержанные charsets/types получают 0A000 по metadata до исполнения. Входные parameters в Simple Query получают 0A000 по input metadata.
+Текущие text results соответствуют набору P8 в разделе 9: integer/BOOLEAN/CHAR/VARCHAR, exact numeric через INT128, FLOAT/DOUBLE и конечные DATE/TIME/TIMESTAMP без TZ, NULL. Table OID/attribute number 0, typmod=-1, alias из engine metadata. CHAR читается через varying fetch metadata с сохранением logical CHAR OID и пробелов. Поддержаны UTF8/NONE/ASCII с проверкой результата на valid UTF8; OCTETS и другие неподдержанные charsets/types получают 0A000 по metadata до исполнения. Входные parameters в Simple Query получают 0A000 по input metadata.
 
 Statement-level timeout остаётся 0: действуют штатные engine configuration/session settings, включая native SET STATEMENT TIMEOUT. Плагин не задаёт собственный SQL timeout. В firebird.conf StatementTimeout измеряется в секундах, ConnectionIdleTimeout — в минутах; 0 означает отсутствие соответствующего engine cap. Native DML timer не обещает hard deadline для prepare, DDL и controls. Native idle timeout закрывает attachment и откатывает transaction; следующий Query получает FATAL 57P05/close. Плагин не выполняет периодических engine calls, обновляющих idle timer, и не подключает session повторно.
 
@@ -140,9 +140,9 @@ Native session SET whitelist: ROLE / TRUSTED ROLE; DEBUG OPTION; DECFLOAT ROUND 
 
 ## 9. Типы и codecs
 
-P4 использует приведённые ниже text output codecs. Повторные execution/classification/codec tests прошли в Linux/Super loopback профиле; evidence записаны в VALIDATION. Исторический P3 subset ограничивался тремя integer-типами без scale/subtype и NULL.
+P8 реализует приведённые ниже text/binary input/output codecs; целевая runtime-приёмка Linux/Super прошла. P4 text output и P7 basic Extended codecs ранее прошли целевую приёмку, evidence в VALIDATION. Новый набор не расширяет grammar или public engine API.
 
-| Firebird logical type в P4 | PG OID | PG typlen |
+| Firebird logical type в P8 | PG OID | PG typlen |
 |---|---:|---:|
 | SMALLINT | 21 | 2 |
 | INTEGER | 23 | 4 |
@@ -150,17 +150,28 @@ P4 использует приведённые ниже text output codecs. По
 | BOOLEAN | 16 | 1 |
 | CHAR | 1042 | -1 |
 | VARCHAR | 1043 | -1 |
-| NUMERIC/DECIMAL в SHORT/LONG/INT64 | 1700 | -1 |
+| NUMERIC/DECIMAL в SHORT/LONG/INT64/INT128; pure INT128 | 1700 | -1 |
+| FLOAT | 700 | 4 |
+| DOUBLE PRECISION | 701 | 8 |
+| DATE | 1082 | 4 |
+| TIME без TZ | 1083 | 8 |
+| TIMESTAMP без TZ | 1114 | 8 |
 
-P4 выдаёт text format 0, table OID/attribute number 0, typmod -1. Alias берётся из metadata с сохранением quoted names. NULL передаётся длиной -1, пустая строка — 0; UTF8 lengths — bytes.
+Simple Query выдаёт text format 0; Extended Bind выбирает text 0 или binary 1. Для всех колонок table OID/attribute number 0, typmod -1. Alias берётся из metadata с сохранением quoted names. NULL передаётся длиной -1, пустая строка — 0; UTF8 lengths — bytes.
 
-BOOLEAN кодируется `t/f`; числа — locale-independent decimal. Type/subtype/scale рассматриваются вместе: scale 0 не превращает NUMERIC в INTEGER. Exact decimal не проходит через floating point; INT64_MIN обрабатывается без signed overflow.
+BOOLEAN кодируется `t/f`; числа — locale-independent decimal. Type/subtype/scale рассматриваются вместе: scale 0 не превращает NUMERIC в INTEGER. Exact decimal не проходит через floating point; INT64_MIN и INT128_MIN обрабатываются без signed overflow. Numeric scale допускается 0..−18 для SHORT/LONG/INT64 и 0..−38 для INT128. Pure INT128 сохраняет весь signed диапазон, включая 39-значные крайние значения; precision NUMERIC(38) остаётся ограничением native SQL типа.
 
 Native buffers читаются по getMessageLength/getOffset/getNullOffset с учётом alignment, VARCHAR prefix, NULL indicator и lifetime. Для изменения fetch metadata используется IMetadataBuilder. Для CHAR сохраняется исходный logical type/OID 1042, а transport fetch metadata переводится в varying, чтобы движок выполнил преобразование фиксированного буфера. Проверить, что полученная длина сохраняет логическую CHAR-добивку и не выдаёт лишние пробелы от UTF8 byte capacity. Не применять безусловный `rstrip`. Преобразование проверяется через существующий metadata builder; тесты включают ASCII, multibyte, пустую строку и значимые конечные пробелы.
 
 U+0000 в text output даёт 22021 без усечения; LF/TAB разрешены. Неподдержанный тип даёт 0A000 до execute/openCursor, если metadata уже известна. Не подменять unknown types строками и не выдавать всем колонкам OID text.
 
-M2 добавляет FLOAT/DOUBLE, DATE/TIME/TIMESTAMP без TZ и INT128/NUMERIC до 38 цифр; общие codecs используются и Simple, и Extended Query. Для заявленных scalar types обязательны text/binary input/output. PG binary layout не совпадает с native message layout: отдельно проверяются byte order, numeric representation, epoch/units, диапазоны, NaN/Infinity и точность. BLOB/ARRAY/OCTETS/DECFLOAT/TZ имеют отдельные будущие контракты.
+`NumericCodec` выдаёт canonical binary base-10000 groups с signed weight, sign и dscale; zero имеет ndigits=0/weight=0/positive sign, display scale сохраняется. Input допускает неканонические нулевые groups, но не скрытые ненулевые digits за dscale. Malformed binary — 22P03, malformed text — 22P02; numeric NaN/Infinity, overflow и непредставимая дробная часть — 22003 без округления. Максимальный numeric payload — 1 MiB.
+
+`FloatCodec` передаёт FLOAT/DOUBLE как IEEE float32/float64 в network order; text conversion не зависит от locale. NaN и ±Infinity поддержаны; конечное decimal overflow/underflow вне native диапазона — 22003, malformed text — 22P02, неверная binary length — 22P03.
+
+`TemporalCodec` поддерживает конечные DATE/TIME/TIMESTAMP без TZ, годы 0001..9999 и точные native ticks по 100 µs. ISO text: `YYYY-MM-DD`, `HH:MM:SS[.ffffff]`, timestamp с пробелом либо `T`. До шести fractional digits; лишняя относительно native точности пятая/шестая допускается только нулевой. Binary DATE — int32 дней от 2000-01-01, TIME — int64 µs от полуночи, TIMESTAMP — int64 µs от 2000-01-01; все multibyte поля в network order. Nonmultiple-100 µs, invalid calendar/range, 24:00, leap second, binary даты до 0001 года и infinity не округляются и дают 22008; malformed ISO, включая текстовые BC/TZ suffix, — 22007, неверная binary length — 22P03. `integer_datetimes=on`, TimeZone не публикуется.
+
+Все эти codecs общие для Simple/Extended Query и DML RETURNING. Независимые binary fixtures проверяют layout, диапазоны и точность; native message не выдаётся за PG binary. BLOB/ARRAY/OCTETS/DECFLOAT/TZ имеют отдельные будущие контракты. Полный M2 остаётся приёмкой P9 после проверки P8.
 
 ## 10. Ошибки и внешнее завершение
 
@@ -180,9 +191,9 @@ Parse, Bind, Describe statement/portal, Execute, Close, Flush и Sync прошл
 
 - Statement хранит SQL, prepared handle и engine metadata. Bind готовит собственный native handle с тем же SQL для portal, чтобы разные cursors и bound buffers не разделяли execution state. Parse/Bind prepare используют current application transaction либо NULL/system prepare; отдельные application transactions для объектов не создаются.
 - Named statements переживают commit. Close statement и замена unnamed statement не уничтожают уже связанные portals; portal удерживает нужный statement owner. Simple Query удаляет unnamed statement и portal. Завершение transaction удаляет все portals; Sync в explicit T сохраняет portals, включая suspended cursors.
-- ParameterDescription использует проверенные OID. Отсутствующий/нулевой Parse hint означает inference; hints могут описывать начальную часть параметров. Integer/boolean/numeric требуют точного inferred OID; строковые 25/1042/1043 взаимно совместимы, принятый explicit OID сохраняется. Невозможный native inference не исправляется CAST/rewrite; несовместимый OID получает 0A000.
-- InputCodec поддерживает text SMALLINT/INTEGER/BIGINT, BOOLEAN, CHAR/VARCHAR, NUMERIC/DECIMAL в SHORT/LONG/INT64 и NULL. Exact decimal, включая exponent, не проходит через float; значение, не представимое в native scale/range, получает 22003. Binary поддержан для integer/BOOLEAN/строк; ненулевой binary NUMERIC получает 0A000 до execution. Binary NULL не требует декодирования payload. UTF8/NONE проверяются как valid UTF8, ASCII дополнительно ограничивается ASCII; NUL запрещён. CHAR передаётся через varying message metadata с исходным charset.
-- Bind проверяет количество значений, formats 0/1/N и коды 0/1, длины и range до execution. Неверные semantic counts/formats дают ERROR 08P01 и discard-until-Sync; повреждённый frame остаётся fatal. Text/binary integer/BOOLEAN/строковые results и text NUMERIC используют ResultCodec; binary NUMERIC и расширенные типы отложены в P8.
+- ParameterDescription использует проверенные OID. Отсутствующий/нулевой Parse hint означает inference; hints могут описывать начальную часть параметров. Все нестроковые типы требуют точного inferred OID; строковые 25/1042/1043 взаимно совместимы, принятый explicit OID сохраняется. Невозможный native inference не исправляется CAST/rewrite; несовместимый OID получает 0A000.
+- InputCodec поддерживает text/binary набор P8 из раздела 9, включая numeric через INT128, FLOAT/DOUBLE и temporal без TZ. Binary NULL не требует декодирования payload. UTF8/NONE проверяются как valid UTF8, ASCII дополнительно ограничивается ASCII; NUL запрещён. CHAR передаётся через varying message metadata с исходным charset.
+- Bind проверяет количество значений, formats 0/1/N и коды 0/1, длины и range до execution. Неверные semantic counts/formats дают ERROR 08P01 и discard-until-Sync; повреждённый frame остаётся fatal. ResultCodec использует общие text/binary codecs P8; выбор output formats не меняет native execution.
 - Describe statement выдаёт ParameterDescription и RowDescription/NoData; Describe portal учитывает выбранные result formats. Execute maxRows > 0 может вернуть PortalSuspended; следующий Execute продолжает cursor. maxRows 0 выбирает остаток.
 - Flush отправляет ответы без завершения transaction и ReadyForQuery. Sync завершает implicit cycle и выдаёт один ReadyForQuery; explicit transaction остаётся открытой. CommandComplete отдельного Execute не означает commit всего cycle. SET TRANSACTION при уже открытом implicit cycle получает 25001: новый TPB не заменяет текущую native transaction.
 - Любая recoverable Extended error инвалидирует все portals и включает discard-until-Sync: последующие execution messages не выполняются. Implicit cycle откатывается сразу при ошибке, до Sync; explicit transaction сохраняется в E. Sync завершает protocol recovery. Syntax/permission/fatal/cancel precedence остаётся общим с Simple Query. RESET инвалидирует все prepared statements и portals, в том числе при прежнем native transaction interface pointer.

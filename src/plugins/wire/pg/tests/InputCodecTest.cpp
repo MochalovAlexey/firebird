@@ -161,9 +161,13 @@ void decimals()
 		"Decimal normalization lost precision");
 	for (const auto text : {"32.768", "0.0001", "1e1000000000", "1e-1000000000"})
 		expectError([&] { codec.encode({text, "0", "0", "0"}); }, "22003");
-	for (const auto text : {".", "1e", "1e+", "1.2.3", "NaN", "Infinity", "1,25"})
+	for (const auto text : {".", "1e", "1e+", "1.2.3", "1,25"})
 		expectError([&] { codec.encode({text, "0", "0", "0"}); }, "22P02");
-	expectError([&] { codec.encode({"0", std::nullopt, std::nullopt, std::nullopt}, {1}); }, "0A000");
+	for (const auto text : {"NaN", "Infinity", "-Infinity"})
+		expectError([&] { codec.encode({text, "0", "0", "0"}); }, "22003");
+	expectError([&] { codec.encode({"0", std::nullopt, std::nullopt, std::nullopt}, {1}); }, "22P03");
+	buffer = codec.encode({std::string("\0\1\0\0\x40\0\0\3\0\x20", 10), std::nullopt, std::nullopt, std::nullopt}, {1});
+	require(value<ISC_SHORT>(codec, buffer, 0) == -32000, "Binary numeric did not preserve native scale");
 	buffer = codec.encode({std::nullopt, std::nullopt, std::nullopt, std::nullopt}, {1});
 	require(value<ISC_SHORT>(codec, buffer, 0, true) == -1, "Binary NULL required a numeric payload decoder");
 }
@@ -215,7 +219,8 @@ void text()
 
 void metadataValidation()
 {
-	const Spec unsupported[] = {{SQL_DOUBLE, 8}, {SQL_BLOB, 8}, {SQL_INT128, 16},
+	const Spec unsupported[] = {{SQL_BLOB, 8}, {SQL_DEC16, 8}, {SQL_INT128, 16, -39, 1},
+		{SQL_DOUBLE, 8, -2, 1}, {SQL_TYPE_DATE, 4, -1},
 		{SQL_INT64, 8, -19, 1}, {SQL_INT64, 8, 1, 1}, {SQL_LONG, 4, 0, 3},
 		{SQL_BOOLEAN, 1, -1}, {SQL_BOOLEAN, 1, 0, 1}, {SQL_VARYING, 8, 0, 0, 1},
 		{SQL_TEXT, 8, 0, 0, 21}, {SQL_VARYING, 8, -1, 0, 4}, {SQL_VARYING, 65534, 0, 0, 4}};

@@ -382,7 +382,7 @@ QUIT;
         self.sql(client, 'SELECT ID FROM P5_PATH_ROWS', tag='SELECT 1', rows=[(20,)])
         self.sql(client, 'SELECT ID FROM PUBLIC.P5_PATH_ROWS', tag='SELECT 1', rows=[(10,)])
         value_sql = 'SELECT CAST(12.5 AS DOUBLE PRECISION) AS "coerced" FROM RDB$DATABASE'
-        self.sql(client, value_sql, error='0A000')
+        self.sql(client, value_sql, tag='SELECT 1', rows=[('12.5',)])
         self.sql(client, 'SET BIND OF DOUBLE PRECISION TO VARCHAR(40)', tag='SET')
         result = client.query(value_sql.encode())
         require(result['error'] is None and result['command'] == 'SELECT 1' and result['state'] == 'I',
@@ -395,7 +395,7 @@ QUIT;
         require(self.attachment_setting('MON$STATEMENT_TIMEOUT') == 0 and
                 self.attachment_setting('MON$IDLE_TIMEOUT') == 0, 'RESET did not restore timeout settings')
         self.sql(client, 'SELECT ID FROM P5_PATH_ROWS', tag='SELECT 1', rows=[(10,)])
-        self.sql(client, value_sql, error='0A000')
+        self.sql(client, value_sql, tag='SELECT 1', rows=[('12.5',)])
         self.close_client(client)
 
     def disconnect_rollback(self):

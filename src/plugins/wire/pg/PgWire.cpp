@@ -110,6 +110,7 @@ public:
 			protocol.parameterStatus("server_encoding", "UTF8");
 			protocol.parameterStatus("client_encoding", "UTF8");
 			protocol.parameterStatus("DateStyle", "ISO, MDY");
+			protocol.parameterStatus("integer_datetimes", "on");
 			protocol.parameterStatus("standard_conforming_strings", "on");
 			protocol.parameterStatus("application_name", startup.applicationName);
 			protocol.ready('I');

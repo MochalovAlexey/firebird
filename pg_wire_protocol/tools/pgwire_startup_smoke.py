@@ -203,7 +203,7 @@ class Client:
         require(result["columns"] == [{"name": "answer", "table": 0, "attribute": 0, "oid": 23,
                                        "size": 4, "modifier": -1, "format": 0}], "integer RowDescription mismatch")
 
-    def query_error(self, text=b"SELECT CAST(1 AS DOUBLE PRECISION) FROM RDB$DATABASE", expected="0A000"):
+    def query_error(self, text=b"SELECT CAST(1 AS DECFLOAT(16)) FROM RDB$DATABASE", expected="0A000"):
         result = self.query(text)
         require(result["error"] is not None and result["error"]["C"] == expected,
                 f"Query did not return expected SQLSTATE {expected}")
