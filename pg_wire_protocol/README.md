@@ -35,7 +35,9 @@ SQL передаётся в engine prepare целиком, с исходной b
 
 После успешного engine prepare плагин сочетает lexical descriptor с существующими `getType()`, `getFlags()`, input/output metadata и affected records. `FLAG_HAS_CURSOR` выбирает cursor/fetch; output metadata определяет singleton output и codecs. RETURNING не превращает DML в SELECT. В I/T неподдержанный control либо UNKNOWN, включая USING wrapper, получает 0A000 до execution; в E успешно подготовленные команды, кроме разрешённого recovery, получают 25P02. Ошибка самого prepare имеет отдельный приоритет по CODEX_CONTEXT. Новые публичные DSQL getInfo items, AST annotations и parser diagnostics для PgWire не добавляются.
 
-Запрещены SQL rewriting, удаление comments из передаваемого текста, разбиение batches, замена `$n` на `?`, подстановка параметров SQL-литералами и эмуляция успешного SET/BEGIN. Совместимость синтаксиса и реальное исполнение определяет только Firebird. Неподдержанный batch передаётся parser целиком и отвергается без частичных эффектов.
+Запрещены SQL rewriting, удаление comments из передаваемого текста, замена `$n` на `?`, подстановка параметров SQL-литералами и эмуляция успешного SET/BEGIN. Совместимость синтаксиса и реальное исполнение определяет только Firebird. Текущая реализация передаёт неподдержанный batch parser целиком и отвергает без частичных эффектов.
+
+Для следующего этапа согласована [последовательная обработка скриптов](1c/README.md): лексическое выделение исходных диапазонов по модели isql/AUTOTERM, обычный engine prepare и остановка на первой ошибке. Предварительная проверка синтаксиса всего Query отложена; ранний COMMIT сохранится и при поздней syntax error. Это пока план, не реализованная возможность.
 
 Совместимые SELECT/DML/DDL, RETURNING и EXECUTE BLOCK/PROCEDURE выполняются движком. P5 добавляет native `SET TRANSACTION`, COMMIT/ROLLBACK, RETAIN, savepoints, session SET и RESET. PostgreSQL `BEGIN`, `START TRANSACTION`, `$n` и слово `RETAINING` остаются parser errors. Native retaining записывается `COMMIT/ROLLBACK [WORK] RETAIN [SNAPSHOT]`. Кроме первого среза 1С выше, PostgreSQL grammar/functions/catalog compatibility остаётся отдельной работой.
 
