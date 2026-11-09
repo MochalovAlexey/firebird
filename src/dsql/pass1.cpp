@@ -2025,6 +2025,13 @@ static RseNode* pass1_rse_impl(DsqlCompilerScratch* dsqlScratch, RecordSourceNod
 
 	// Process select list, if any. If not, generate one
 	ValueListNode* selectList = inputRse->dsqlSelectList;
+	if (!selectList && streamList->items.isEmpty())
+	{
+		// An unqualified asterisk requires a source to supply its columns.
+		ERRD_post(Arg::Gds(isc_sqlerr) << Arg::Num(-104) <<
+				  Arg::Gds(isc_dsql_command_err));
+	}
+
 	// First expand select list, this will expand nodes with asterisk.
 	++dsqlScratch->inSelectList;
 	selectList = PASS1_expand_select_list(dsqlScratch, selectList, rse->dsqlStreams);

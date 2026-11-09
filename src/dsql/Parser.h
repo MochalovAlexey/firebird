@@ -387,6 +387,7 @@ private:
 private:
 	MemoryPool* statementPool;
 	DsqlCompilerScratch* scratch;
+	const bool pgDialect;
 	USHORT client_dialect;
 	USHORT db_dialect;
 	const bool requireSemicolon;

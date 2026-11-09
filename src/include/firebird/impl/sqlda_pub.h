@@ -105,5 +105,6 @@ typedef struct
 										   CURRENT_TIMESTAMP, and 64-bit exact
 										   numeric type */
 #define SQL_DIALECT_CURRENT		SQL_DIALECT_V6	/* latest IB DIALECT */
+#define SQL_DIALECT_PG				4	/* PostgreSQL client SQL syntax; not a database dialect */
 
 #endif /* FIREBIRD_IMPL_SQLDA_PUB_H */

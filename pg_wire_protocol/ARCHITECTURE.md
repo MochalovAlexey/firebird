@@ -34,6 +34,8 @@ Native не включается в список дополнительных п
 
 ## SQL: ограниченная классификация в плагине, проверка и исполнение в движке
 
+PG-дополнения parser изолируются клиентским `SQL_DIALECT_PG` (4) в существующем API prepare. База/DPB и native dialects сохраняются; типовая семантика нового режима пока соответствует dialect 3. Первый небольшой срез — SELECT без FROM и устанавливаемая PSQL-функция для [записанного профиля 1С](1c/README.md).
+
 SQL передаётся в engine prepare целиком, с исходной byte length и без изменения текста. Ограниченный lexer внутри PgWire определяет вид команды, command tag, профиль transaction/session controls и признак tokenless EMPTY. Он учитывает comments, строки и quoted identifiers, но не проверяет grammar, имена объектов, privileges или типы. Общий wire host SQL не анализирует.
 
 После успешного engine prepare плагин сочетает lexical descriptor с существующими `getType()`, `getFlags()`, input/output metadata и affected records. `FLAG_HAS_CURSOR` выбирает cursor/fetch; output metadata определяет singleton output и codecs. RETURNING не превращает DML в SELECT. В I/T неподдержанный control либо UNKNOWN, включая USING wrapper, получает 0A000 до execution; в E успешно подготовленные команды, кроме разрешённого recovery, получают 25P02. Ошибка самого prepare имеет отдельный приоритет по CODEX_CONTEXT. Новые публичные DSQL getInfo items, AST annotations и parser diagnostics для PgWire не добавляются.

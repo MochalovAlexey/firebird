@@ -6922,7 +6922,7 @@ query_spec
 	: SELECT limit_clause
 			 distinct_clause
 			 select_list
-			 from_clause
+			 from_clause_opt
 			 where_clause
 			 group_clause
 			 having_clause
@@ -7008,9 +7008,12 @@ as_noise
 
 // FROM clause
 
-%type <recSourceListNode> from_clause
-from_clause
-	: FROM from_list	{ $$ = $2; }
+%type <recSourceListNode> from_clause_opt
+from_clause_opt
+	: /* nothing */
+		[if (!pgDialect) YYERROR;]
+		{ $$ = newNode<RecSourceListNode>(0u); }
+	| FROM from_list	{ $$ = $2; }
 	;
 
 %type <recSourceListNode> from_list

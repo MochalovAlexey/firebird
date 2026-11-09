@@ -1,6 +1,114 @@
 # Проверки реализации
 
-Текущая правка от 14 октября 2026 года — P9 клиентская приёмка, база `241c234627`. Целевой M2 Linux/Super IPv4 loopback принят для совместимого SQL и реализованных codecs: 17 клиентских/raw-wire групп и регрессии ниже. Проверен настоящий Psycopg 3.3.6 с libpq 18.6; его grammar/cache ограничения зафиксированы отдельно. Следующий этап — P10: remote TCP/TLS и CancelRequest. В P9 production-код не менялся. Известные native ON CONNECT shutdown и READ CONSISTENCY + AUTO COMMIT ограничения сохраняются; предыдущие разделы оставлены как история.
+## 9 ноября 2026: первый подэтап записанного профиля 1С
+
+База изменения — `0e505759d0deb1693d912bbc9fee978a55d1e1f0`. Проверен небольшой
+подэтап: клиентский `SQL_DIALECT_PG` (4), SELECT без FROM только в этом режиме и
+реальная PSQL-функция `pg_catalog.pg_backend_pid()`. Диалект базы/DPB остаётся 3.
+[Контракт и установка](1c/README.md) явно ограничивают identity одной базой;
+имя колонки пока `PG_BACKEND_PID`, в эталоне — `pg_backend_pid`.
+Полный этап 1 задания, открытие базы 1С и тест Гилёва **ещё не выполнены**.
+
+Изменения используют существующие механизмы:
+
+| Файлы | Необходимость и реализация |
+|---|---|
+| `sqlda_pub.h`, `dsql.cpp`, `Parser.*`, `parse.y`, `btyacc_fb.ske`, `pass1.cpp` | Разрешить исходный SELECT из примера 01, изолировав грамматику через аргумент dialect. Типы нормализуются к 3, штатный cache сохраняет исходный dialect. Пустой RSE уже исполняется как одна строка; SELECT * без источника отвергается до создания пустой output metadata. YYERROR восстанавливает стандартное отбрасывание альтернативы при trial/backtracking |
+| `Execute.cpp`, `Extended.cpp` | Три существующих prepare передают PG dialect; SQL и Bind не изменяются |
+| `1c/compat.sql` | Schema/function/grants штатного PSQL; проверяемый cast CURRENT_CONNECTION в int4, без новых счётчиков или библиотек |
+| `tools/pgwire_1c_smoke.py` | Расширение существующих StartupHarness, libpq client и ExtendedClient; baseline-наблюдения и целевые runtime проверки без нового framework |
+
+Штатный генератор parser обновил `parse-conflicts.txt`: 153/8 → 154/11
+(shift/reduce и reduce/reduce). Добавленные неоднозначности связаны с окончанием
+select list и словами AS/RETURNING/SQL/OPTIMIZE; прежние alias-формы проверены
+через native и PgWire. PG gate выполняется также во время пробного разбора.
+
+Сборка: Linux x86-64, GCC 13.4.0, developer/Debug, Firebird
+`LI-T6.0.0.2199-dev`. Полная сборка и финальная пересборка после изоляции dialect
+завершились с exit 0; логи `configure.log`, `build.log`, `dialect-build.log`:
+
+```sh
+mkdir -p /tmp/firebird-pgwire-1c-build
+cd /tmp/firebird-pgwire-1c-build
+/home/aleksey/dev/my_firebird/firebird/configure \
+  --enable-developer --with-builtin-tommath --with-builtin-tomcrypt
+make -j2
+```
+
+Целевой прогон из корня репозитория:
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 python3 -B pg_wire_protocol/tools/pgwire_1c_smoke.py \
+  --firebird-dir /tmp/firebird-pgwire-1c-build/gen/Debug/firebird \
+  --work-dir /tmp/firebird-pgwire-1c-select-03
+```
+
+Для повторного запуска нужен новый work directory. Harness создаёт собственные
+runtime/security DB/UTF8 database, loopback endpoints, Workers=6 и устанавливает
+compat.sql. Рабочие экземпляры пользователя не менялись. Реальные клиенты:
+libpq 14.24, Python 3.10, psycopg2 2.9.2/libpq 14.24 в Simple Query regression.
+
+| Проверка | Результат / свидетельство |
+|---|---|
+| Новый harness | PASS: 14 SELECT cases (значения, OID, tags), точный NUMERIC(18,2)/DDL/DML/rollback, оригинальный пример 01 без изменения bytes, две libpq-сессии и native MON observer, стабильность ID после COMMIT/ROLLBACK/RESET, четыре ошибки с recovery, native dialects 1/2/3 и aliases, Extended `?` с/без FROM, cleanup. `/tmp/firebird-pgwire-1c-select-03/summary.json` |
+| Кэш на одной attachment | PASS, 7 проверок: PG4 → native1/2/3 rejection → PG4, отказ dialect5, native3 с FROM. Statements освобождаются между prepare, cache 2 MiB. Разовая OO API проверка: `/tmp/firebird-pgwire-1c-cache-01/{probe.cpp,probe.log,command.json,summary.json}` |
+| Simple Query regression | PASS, 12 групп, C libpq и psycopg2. `/tmp/firebird-pgwire-1c-simple-03/summary.json` |
+| Extended Query regression | PASS, 16 групп, C libpq/raw, включая nonblocking и I/T/E. `/tmp/firebird-pgwire-1c-extended-03/summary.json` |
+| Native TCP baseline | PASS, 9 проверок. `/tmp/firebird-pgwire-1c-native-03/summary.json` |
+| Source checks | Python syntax, локальные Markdown links, git diff --check: PASS |
+
+Все тестовые серверы остановились штатно, exit 0. В strace Simple/Extended
+backend connect attempts = 0. Прогоны `*-02` этих трёх регрессий остановились
+на sandbox EPERM при создании socket; `*-03` выполнены с разрешённым локальным
+TCP. Это ограничение среды, не отказ SQL. Предварительные `select-01/02` выявили
+SELECT * без FROM с нулём колонок и fatal XX000; guard в pass1 исправил этот
+новый случай: теперь ERROR 42000 и recovery в I, проверено в `select-03`.
+
+Повторить регрессии можно существующими инструментами
+`pgwire_simple_query_smoke.py`, `pgwire_extended_query_smoke.py`,
+`native_baseline.py` с тем же `--firebird-dir` и новыми `--work-dir`.
+Для первых двух использованы
+`--libpq-include-dir /tmp/firebird-pgwire-1c-deps/libpq-dev/usr/include/postgresql`
+и `--libpq-library /lib/x86_64-linux-gnu/libpq.so.5`; Simple дополнительно
+`--driver-python /usr/bin/python3`. Заголовки libpq-dev 14.24 только распакованы
+в `/tmp` через `apt-get download`/`dpkg-deb -x`, без системной установки.
+
+До изменения на отдельной пустой БД сделаны 24 наблюдения исходных selected SQL:
+21 syntax error, один unknown relation, COMMIT/ROLLBACK — успешные no-op;
+после каждого восстановлен SELECT 42/I. Для recorded execute использовался
+только PQprepare/Describe, без догадок о Bind. Это baseline, не replay/приёмка:
+`/tmp/firebird-pgwire-1c-baseline-01/summary.json`. Вызов harness с `--baseline
+--capture-dir /home/aleksey/dev/1c/captures/20261109T105635Z` сохраняет provenance
+и SHA исходного SQL; полный capture в Git не копируется.
+
+Эталонный Postgres Pro 18.6 проверен в собственном initdb-кластере:
+`/tmp/pgwire-1c-reference-4icgiiyt/summary.json`, шесть групп PASS (original
+01–03, metadata/identity, фактические SHOW values, batch preparse/rollback/E,
+backslash escapes). Рабочая `gilev_demo_ru` не менялась. Эти измерения
+подготавливают следующие этапы, но не означают их реализации в Firebird.
+Эффекты planner settings, PG locks, mchar/bytea и реальный запуск 1С здесь
+не проверялись. Прежние ON CONNECT shutdown и READ CONSISTENCY + AUTO COMMIT
+ограничения не исправлялись и заново не исследовались.
+
+Новых build/runtime зависимостей или явно загружаемых модулей нет; тесты
+используют прежние Python/libpq/compiler/strace. `readelf -d` и `ldd` сравнены
+с исходной сборкой в `gen/Debug/firebird`; полный manifest:
+`/tmp/firebird-pgwire-1c-deps/dependencies.json`. Прямые зависимости PgWire:
+libfbclient.so.2, libtommath, libtomcrypt.so.1, libm.so.6, libgcc_s.so.1,
+libc.so.6, ld-linux-x86-64.so.2. В данной Debug сборке tommath.so.0 вместо
+системной tommath.so.1 из baseline: это существующая configure-опция builtin,
+а не новая зависимость кода. У baseline также есть транзитивная libgmp.so.10,
+у bundled-варианта её нет. Список plugin libraries одинаков; Engine14/Srp
+используются как прежде, libpq остаётся только клиентом проверок.
+
+Проверенные SHA256: PgWire
+`4e01d83bf9e293a2b9f5744ef09fe1962dd41f92e589c0850c8517d91812e9cb`,
+Engine14 `a395ba7a1349090bc4eec3dca3975e83486514add55151906da2d16e024310c1`.
+Новый harness сохраняет также source HEAD/diff, tool и compat script hashes.
+
+## История предыдущих этапов
+
+Правка от 14 октября 2026 года — P9 клиентская приёмка, база `241c234627`. Целевой M2 Linux/Super IPv4 loopback принят для совместимого SQL и реализованных codecs: 17 клиентских/raw-wire групп и регрессии ниже. Проверен настоящий Psycopg 3.3.6 с libpq 18.6; его grammar/cache ограничения зафиксированы отдельно. Следующий этап — P10: remote TCP/TLS и CancelRequest. В P9 production-код не менялся. Известные native ON CONNECT shutdown и READ CONSISTENCY + AUTO COMMIT ограничения сохраняются; предыдущие разделы оставлены как история.
 
 Дата: 12 октября 2026 года. HEAD до текущего P5: `3657d6a5c1`, baseline master Firebird 6 `bf94598f8deefeb7cc4a8217ee43b3040d5d6650`. Предыдущие разделы сохраняют историю проверок, включая впоследствии удалённые engine metadata и native metadata executable.
 

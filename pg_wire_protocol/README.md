@@ -27,6 +27,8 @@ Config = PgWireConfig {
 
 ## Граница SQL
 
+Отдельная работа по [записанному профилю 1С](1c/README.md) начинается с небольших коммитов. Первый срез добавляет клиентский `SQL_DIALECT_PG` (4): PgWire выбирает его при prepare, база остаётся в dialect 3, native 1/2/3 сохраняются. В PG-режиме поддержан SELECT без FROM; `pg_catalog.pg_backend_pid()` устанавливается отдельным PSQL-скриптом и возвращает attachment ID в пределах одной базы. Остальные формы 1С и её фактический запуск пока не поддержаны и не проверены.
+
 Предыдущая P5-ревизия прошла целевую Linux/Super loopback приёмку: I/T/E, native transaction/session controls и recovery. В P6 сборка, unit tests и host/startup/Simple Query/transaction/lifecycle/native регрессии прошли. **Известное ограничение native baseline: READ COMMITTED READ CONSISTENCY + AUTO COMMIT не входит в подтверждённую совместимость; SNAPSHOT AUTO COMMIT проверен.** Целевой P6/M1 Linux/Super принят с известными native ограничениями. Shutdown во время ON CONNECT остаётся отдельным исключением: native Debug assertion воспроизводится также без wire endpoints. P7 Extended Query прошёл целевую Linux/Super приёмку: 16 групп. P8 codecs прошли целевую Linux/Super приёмку: восемь групп; P9/M2 принят для Linux/Super и совместимого SQL; следующий этап — P10, TLS и cancellation. Результаты и границы покрытия — в [VALIDATION.md](VALIDATION.md). TLS, Windows и другие server modes требуют отдельной реализации и приёмки.
 
 SQL передаётся в engine prepare целиком, с исходной byte length и без изменения текста. Ограниченный lexer внутри PgWire определяет вид команды, command tag, профиль transaction/session controls и признак tokenless EMPTY. Он учитывает comments, строки и quoted identifiers, но не проверяет grammar, имена объектов, privileges или типы. Общий wire host SQL не анализирует.
@@ -35,7 +37,7 @@ SQL передаётся в engine prepare целиком, с исходной b
 
 Запрещены SQL rewriting, удаление comments из передаваемого текста, разбиение batches, замена `$n` на `?`, подстановка параметров SQL-литералами и эмуляция успешного SET/BEGIN. Совместимость синтаксиса и реальное исполнение определяет только Firebird. Неподдержанный batch передаётся parser целиком и отвергается без частичных эффектов.
 
-Совместимые SELECT/DML/DDL, RETURNING и EXECUTE BLOCK/PROCEDURE выполняются движком. P5 добавляет native `SET TRANSACTION`, COMMIT/ROLLBACK, RETAIN, savepoints, session SET и RESET. PostgreSQL `BEGIN`, `START TRANSACTION`, `$n` и слово `RETAINING` остаются parser errors. Native retaining записывается `COMMIT/ROLLBACK [WORK] RETAIN [SNAPSHOT]`. PostgreSQL grammar/functions/catalog emulation отложены.
+Совместимые SELECT/DML/DDL, RETURNING и EXECUTE BLOCK/PROCEDURE выполняются движком. P5 добавляет native `SET TRANSACTION`, COMMIT/ROLLBACK, RETAIN, savepoints, session SET и RESET. PostgreSQL `BEGIN`, `START TRANSACTION`, `$n` и слово `RETAINING` остаются parser errors. Native retaining записывается `COMMIT/ROLLBACK [WORK] RETAIN [SNAPSHOT]`. Кроме первого среза 1С выше, PostgreSQL grammar/functions/catalog compatibility остаётся отдельной работой.
 
 Пример запроса через `PQexec` или psycopg2 с `autocommit=True`, без `with connection`:
 

@@ -273,7 +273,7 @@ bool QueryExecutor::execute(Protocol& protocol, std::string_view sql)
 		// avoiding a hidden application transaction before SET TRANSACTION/reset.
 		// In T/E, prepare sees the existing transaction and its uncommitted DDL.
 		request.statement = attachment->prepare(&status, transaction, sql.size(), sql.data(),
-			SQL_DIALECT_V6, IStatement::PREPARE_PREFETCH_METADATA);
+			SQL_DIALECT_PG, IStatement::PREPARE_PREFETCH_METADATA);
 		if ((status->getState() & IStatus::STATE_ERRORS) &&
 			diagnose(&status).state == "42601" && inspectSql(sql).empty)
 		{

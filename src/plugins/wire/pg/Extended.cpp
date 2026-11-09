@@ -306,7 +306,7 @@ bool QueryExecutor::process(Protocol& protocol, const Message& message)
 			prepared->sql = std::move(parse->sql);
 			preparing = true;
 			prepared->native.statement = attachment->prepare(&status, transaction,
-				prepared->sql.size(), prepared->sql.data(), SQL_DIALECT_V6,
+				prepared->sql.size(), prepared->sql.data(), SQL_DIALECT_PG,
 				IStatement::PREPARE_PREFETCH_METADATA);
 			prepared->info = inspectSql(prepared->sql);
 			if ((status->getState() & IStatus::STATE_ERRORS) &&
@@ -366,7 +366,7 @@ bool QueryExecutor::process(Protocol& protocol, const Message& message)
 				// only one open cursor on a statement. No per-portal transaction.
 				preparing = true;
 				portal->native.statement = attachment->prepare(&status, transaction,
-					source.sql.size(), source.sql.data(), SQL_DIALECT_V6,
+					source.sql.size(), source.sql.data(), SQL_DIALECT_PG,
 					IStatement::PREPARE_PREFETCH_METADATA);
 				check(&status);
 				preparing = false;

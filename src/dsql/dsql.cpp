@@ -533,7 +533,7 @@ static RefPtr<DsqlStatement> prepareStatement(thread_db* tdbb, dsql_dbb* databas
 	if (text && textLength == 0)
 		textLength = static_cast<ULONG>(strlen(text));
 
-	if (clientDialect > SQL_DIALECT_CURRENT)
+	if (clientDialect > SQL_DIALECT_CURRENT && clientDialect != SQL_DIALECT_PG)
 	{
 		ERRD_post(Arg::Gds(isc_sqlerr) << Arg::Num(-901) <<
 				  Arg::Gds(isc_wish_list));
@@ -608,7 +608,7 @@ static RefPtr<DsqlStatement> prepareStatement(thread_db* tdbb, dsql_dbb* databas
 			Jrd::ContextPoolHolder scratchContext(tdbb, scratchPool);
 
 			scratch = FB_NEW_POOL(*scratchPool) DsqlCompilerScratch(*scratchPool, database, transaction);
-			scratch->clientDialect = clientDialect;
+			scratch->clientDialect = clientDialect == SQL_DIALECT_PG ? SQL_DIALECT_V6 : clientDialect;
 
 			if (isInternalRequest)
 				scratch->flags |= DsqlCompilerScratch::FLAG_INTERNAL_REQUEST;

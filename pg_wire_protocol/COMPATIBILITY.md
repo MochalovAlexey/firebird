@@ -2,6 +2,19 @@
 
 Матрица M0–M3 задаёт границы этапов. База — master Firebird 6, SQL dialect 3, UTF8, wire 3.0. Архитектура — [ARCHITECTURE.md](ARCHITECTURE.md), execution contract — [CODEX_CONTEXT.md](CODEX_CONTEXT.md). Предыдущая P5-ревизия прошла целевую Linux/Super loopback приёмку: I/T/E, native transaction/session controls и recovery. В P6 сборка, unit tests и host/startup/Simple Query/transaction/lifecycle/native регрессии прошли. **Известное ограничение native baseline: READ COMMITTED READ CONSISTENCY + AUTO COMMIT не входит в подтверждённую совместимость; SNAPSHOT AUTO COMMIT проверен.** Целевой P6/M1 Linux/Super принят с известными native ограничениями. Shutdown во время ON CONNECT остаётся отдельным исключением: native Debug assertion воспроизводится также без wire endpoints. P7 Extended Query прошёл целевую Linux/Super приёмку: 16 групп. P8 codecs прошли целевую Linux/Super приёмку: восемь групп. P9 прошёл 17 групп с реальными C libpq, raw-wire и ограниченным профилем Psycopg 3; целевой M2 Linux/Super для совместимого SQL и реализованных codecs принят. Следующий этап — P10. Результаты и границы покрытия — в [VALIDATION.md](VALIDATION.md). TLS, Windows и другие server modes требуют отдельной реализации и приёмки.
 
+## Первый срез записанного профиля 1С
+
+PgWire использует клиентский `SQL_DIALECT_PG` (4), сохраняя dialect 3 базы и
+семантику типов. Только PG-режим принимает SELECT без FROM; native 1/2/3
+сохраняются. Установочный PSQL-скрипт добавляет `pg_catalog.pg_backend_pid()`:
+int4 attachment ID, стабильный и различный у подключений к одной базе, с
+проверяемым переполнением. Это не OS PID, не cluster-wide identity и не
+CancelRequest key. Имя колонки остаётся Firebird `PG_BACKEND_PID`.
+
+Контракт, установка и оставшиеся этапы — в [1c/README.md](1c/README.md).
+Стартовые SET, пакеты, PG-параметры/касты/BEGIN, каталоги и остальная нагрузка
+ещё не реализованы. Полная совместимость и фактический запуск 1С не заявляются.
+
 ## Startup/authentication: Linux/Super P2 PASS
 
 Отдельный PgWire module добавлен в production POSIX/CMake build definitions. На Linux/Super IPv4 loopback он реализует protocol 3.0 Startup, SSL/GSS refusal N, cleartext Password exchange с настоящим Firebird Srp256 и локальный engine attachment. AuthClient/AuthServer policy, RemoteAccess и точный DatabaseAliases allowlist сохраняются; локальная security DB требует Engine14 в Providers; пустой allowlist запрещает attachments. Host attachment borrowed, plugin закрывает его через host detach. Identity и peer проверены native observer: MON$REMOTE_PROTOCOL=TCPv4, MON$REMOTE_VERSION=configured endpoint alias.
@@ -78,7 +91,7 @@ SQL передаётся в engine prepare целиком, с исходной b
 
 EMPTY определяется ограниченным lexer только для нулевой строки, whitespace и полностью закрытых comments без SQL tokens. Даже такой текст передаётся в обычный engine prepare неизменённым. Только сочетание этого признака с engine syntax error 42601 после успешного cleanup преобразуется в EmptyQueryResponse; permission, cancellation, resource и другие ошибки не маскируются. Незаконченные строка/comment/statement и отдельный `;` остаются parser errors. Native parser diagnostics и `isql -autoterm` не меняются.
 
-BEGIN/$n и другие несовместимые формы остаются native parser errors. Новые grammar/functions/catalogs требуют отдельной будущей работы в движке; разрешённая классификация не добавляет SQL-совместимость.
+BEGIN/$n и другие несовместимые формы остаются parser errors. Дополнения сверх первого среза 1С требуют отдельной работы в движке; разрешённая классификация не добавляет SQL-совместимость.
 
 ## Возможности по этапам
 

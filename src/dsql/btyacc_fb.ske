@@ -101,6 +101,7 @@ int yydebug;
 
 #define YYABORT  goto yyabort
 #define YYACCEPT goto yyaccept
+#define YYERROR  goto yyerrhandler
 #define YYVALID         do { if (yyps->save)          goto yyvalid; } while(0)
 #define YYVALID_NESTED  do { if (yyps->save && \
                                  yyps->save->save == 0) goto yyvalid; } while(0)
@@ -386,6 +387,7 @@ int Parser::parseAux()
   //
   // Action: error
   //
+yyerrhandler:
   if (yyps->errflag) goto yyinrecovery;
   while (yyps->save) {
     int ctry;
