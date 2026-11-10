@@ -1,12 +1,91 @@
 # Проверки реализации
 
+## 10 ноября 2026: фиксированный English/UTF8 профиль двух SET
+
+База изменения — `5374cc50e5`. Отдельный срез реализует исходный запрос
+`02-lc-messages` и `SET client_encoding = 'utf8'` из `03-session-batch`.
+Точный [ограниченный контракт](1c/README.md) допускает только уже обеспечиваемые
+английские сообщения PgWire и UTF8, без смены режима. Другие значения отвергаются.
+По уточнению пользователя проверка прав на lc_messages отложена; это явное
+ограничение совместимости с PostgreSQL, к которому нужно вернуться позднее.
+Исходный пакет семи SET целиком и фактический запуск 1С остаются неподдержанными.
+
+| Файлы | Необходимость и переиспользование |
+|---|---|
+| `ParserTokens.h`, `Parser.cpp`, `parse.y` | Две формы SET только в PG dialect 4. Engine lexer выдаёт новые tokens только в PG-режиме, иначе сохраняет обычные identifiers. Новых конфликтов grammar нет: 154 shift/reduce, 11 reduce/reduce |
+| `StmtNodes.h/.cpp` | Узкий SetPgSessionNode на существующем SessionManagementNode: при Execute проверяет значение и настоящий attachment charset. Проверка прав на lc_messages отложена по решению пользователя. Новых public API/metadata/state/cache нет |
+| `SqlInfo.cpp` | Два префикса используют прежний путь session controls и tag SET; проверка значений остаётся в engine |
+| `SqlInfoTest.cpp`, `pgwire_1c_smoke.py` | Существующие проверки классификации и новый режим `--settings` существующего harness, без новых зависимостей |
+
+До сборки оба SET возвращали 42601 через настоящую libpq, с успешным recovery:
+`/tmp/firebird-pgwire-settings-baseline-01/summary.json`. Сборка Linux x86-64,
+GCC 13.4.0, developer/Debug, Firebird `LI-T6.0.0.2199-dev`; исходные параметры
+configure сохранены (`--enable-developer --with-builtin-tommath --with-builtin-tomcrypt`).
+Полный `make -j2` в `/tmp/firebird-pgwire-1c-build` — PASS; окончательный лог
+`settings-without-admin-build.log`. Проверка классификации до удаления admin guard:
+
+```sh
+cd /tmp/firebird-pgwire-1c-build
+make -C gen -j2 TARGET=Debug \
+  /tmp/firebird-pgwire-1c-build/gen/Debug/firebird/tests/pgwire_sql_test
+LD_LIBRARY_PATH=/tmp/firebird-pgwire-1c-build/gen/Debug/firebird/lib \
+  gen/Debug/firebird/tests/pgwire_sql_test
+```
+
+**501 checks PASS**, логи `settings-sql-test-build.log`, `settings-sql-test.log`.
+Целевая проверка из корня репозитория:
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 python3 -B pg_wire_protocol/tools/pgwire_1c_smoke.py \
+  --settings --firebird-dir /tmp/firebird-pgwire-1c-build/gen/Debug/firebird \
+  --work-dir /tmp/firebird-pgwire-1c-settings-04 \
+  --capture-dir /home/aleksey/dev/1c/captures/20261109T105635Z \
+  --libpq /lib/x86_64-linux-gnu/libpq.so.5
+```
+
+Harness создаёт отдельные runtime/security DB/UTF8 database и loopback ports;
+повторный запуск требует нового work directory. Оба SET выполняет обычный
+WIRE_HOST_TEST без выдачи RDB$ADMIN; отдельная административная подготовка удалена.
+Пользовательский сервер не менялся. Клиенты: libpq 14.24, psycopg2 2.9.2/libpq 14.24 в Simple regression.
+
+| Проверка | Результат / свидетельство |
+|---|---|
+| Fixed settings через libpq/raw TCP, после удаления admin guard | **PASS**: обычный WIRE_HOST_TEST успешно выполняет оригинальные bytes запроса 02 и оба SET; неподдержанные значения дают 22023. Настоящий UTF8 charset и кириллица/emoji, английская диагностика, I/T/E, остановка скрипта и native observer rollback сохранены. Extended named statements повторно исполняются обычным пользователем, значение проверяется при Execute. Native dialects 1/2/3 с AUTOTERM отвергают новые SET и исполняют следующий native SQL; имена колонок сохранены. `/tmp/firebird-pgwire-1c-settings-04/summary.json` |
+| Прямой OO API, до удаления admin guard | **25 checks PASS**: UTF8 и WIN1251 attachments, 0A000 при несоответствии charset без его смены, prepare(NULL) без применения настройки/пользовательской транзакции, PG4→native1/2/3→PG4 cache isolation, отсутствие ложного isc_command_end_err2, PSQL rejection и recovery. `/tmp/firebird-pgwire-settings-api-01/result-03/summary.json`; source/runner рядом, команда ниже |
+| Предыдущий срез 1С, до удаления admin guard | **PASS**: 14 SELECT cases, identity, numeric/DDL/rollback, native dialect isolation и Extended parameters. `/tmp/firebird-pgwire-settings-select-01/summary.json` |
+| Simple / Extended / native regressions, до удаления admin guard | **12 / 16 / 9 групп/проверок PASS**. `/tmp/firebird-pgwire-settings-simple-01/summary.json`, `...-extended-01/summary.json`, `...-native-01/summary.json` |
+| Source checks | Python syntax, локальные Markdown links, git diff --check: PASS |
+
+OO probe запускается командой `python3 -B /tmp/firebird-pgwire-settings-api-01/run.py
+--firebird-dir /tmp/firebird-pgwire-1c-build/gen/Debug/firebird --run-name result-03`
+(для повторения — новый result-NN). Он использует только новую локальную БД в `/tmp`,
+без TCP. Регрессии запускаются прежними tools с тем же `--firebird-dir`, новыми
+`--work-dir` и параметрами libpq из раздела «последовательные скрипты» ниже.
+Все тестовые серверы завершились с exit 0, без forced kill; Simple/Extended
+syscall trace подтверждает backend connect attempts = 0.
+
+Промежуточные проверки выявили native AUTOTERM regression: grammar-only dialect
+gate давал isc_command_end_err2 и поглощал следующий текст. Исходный и перенесённый
+grammar gate не прошли OO probe result-01/02; settings-02 также сохранил FAIL.
+Изоляция двух tokens в engine lexer исправила проблему, что подтверждено
+settings-03/API result-03. Общая обработка parser errors не менялась.
+
+Состав прямых/транзитивных зависимостей и plugin modules сохранён:
+`/tmp/firebird-pgwire-1c-settings-03/dependencies.json`. Проверенные SHA256:
+PgWire `a5831a0014f8411f392a0fc43555e26785a09c8328bd28b9ddb543d61764fda1`,
+Engine14 после удаления admin guard `6ffcd834f6c936733696cbb5919d57e288346be1dec652db0f8f7ba7863065b4`.
+Это не поддержка произвольной locale/encoding или PostgreSQL parameter grants.
+PSQL, LOCAL/SESSION/DEFAULT/SHOW и изменяемые настройки не входят в срез.
+Windows/CMake runtime, полный pytest и нагрузка 1С/Гилёва здесь не проверялись;
+ранее отложенные native дефекты не исправлялись и не воспроизводились повторно.
+
 ## 10 ноября 2026: последовательные скрипты Simple Query
 
 База изменения — `83885f5759`. Реализован отдельный подэтап [профиля 1С](1c/README.md):
 несколько SQL-команд в одном Query, остановка при первой окончательной ошибке,
 один implicit transaction segment до полного COMMIT/ROLLBACK или конца сообщения.
 Предварительная проверка синтаксиса всего Query отложена по решению пользователя.
-Пакет семи SET из selected example 02 требует этой возможности, но сами настройки
+Пакет семи SET из selected example 03 требует этой возможности, но сами настройки
 PostgreSQL ещё не реализованы. Открытие базы 1С и тест Гилёва не выполнялись.
 
 | Изменение | Переиспользование и граница |

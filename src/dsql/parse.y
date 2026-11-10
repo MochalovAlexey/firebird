@@ -733,6 +733,8 @@ using namespace Firebird;
 %token <metaNamePtr> CONSTANT
 %token <metaNamePtr> CONCURRENTLY
 %token <metaNamePtr> VALIDATE
+%token <metaNamePtr> LC_MESSAGES
+%token <metaNamePtr> CLIENT_ENCODING
 
 // precedence declarations for expression evaluation
 
@@ -985,6 +987,7 @@ mng_statement
 	| set_bind									{ $$ = $1; }
 	| set_optimize								{ $$ = $1; }
 	| set_search_path							{ $$ = $1; }
+	| set_pg_session							{ $$ = $1; }
 	;
 
 
@@ -6391,6 +6394,25 @@ set_search_path
 		{ $$ = newNode<SetSearchPathNode>($4); }
 	;
 
+%type <mngNode> set_pg_session
+set_pg_session
+	: SET LC_MESSAGES pg_setting_assignment pg_setting_value
+		{ $$ = newNode<SetPgSessionNode>(SetPgSessionNode::TYPE_LC_MESSAGES, *$4); }
+	| SET CLIENT_ENCODING pg_setting_assignment pg_setting_value
+		{ $$ = newNode<SetPgSessionNode>(SetPgSessionNode::TYPE_CLIENT_ENCODING, *$4); }
+	;
+
+pg_setting_assignment
+	: TO
+	| '='
+	;
+
+%type <stringPtr> pg_setting_value
+pg_setting_value
+	: STRING			{ $$ = newString($1->getString()); }
+	| valid_symbol_name	{ $$ = newString($1->c_str()); }
+	;
+
 %type <metaNameArray> schema_name_list
 schema_name_list
 	: symbol_schema_name
@@ -10612,6 +10634,8 @@ non_reserved_word
 	| UNLIST
 	| CONCURRENTLY
 	| VALIDATE
+	| LC_MESSAGES
+	| CLIENT_ENCODING
 	;
 
 %%

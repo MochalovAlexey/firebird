@@ -14,7 +14,11 @@ CancelRequest key. Имя колонки остаётся Firebird `PG_BACKEND_P
 Контракт, установка и оставшиеся этапы — в [1c/README.md](1c/README.md).
 Последовательные Simple Query скрипты реализованы и проверены 10 ноября 2026 года;
 результаты и отличие от полного PostgreSQL preparse — в [VALIDATION.md](VALIDATION.md).
-Семь стартовых PostgreSQL SET, PG-параметры/касты/BEGIN, каталоги и остальная
+Поддержан фиксированный English/UTF8 профиль SET `lc_messages` (для любого пользователя)
+и `client_encoding` с проверками при Execute, без смены режима. Другие значения —
+22023, не-UTF8 attachment — 0A000. Проверка PostgreSQL-прав на `lc_messages`
+отложена по решению пользователя; точные ограничения — в 1c/README.md.
+Остальные шесть SET стартового пакета, PG-параметры/касты/BEGIN, каталоги и
 неподдержанная нагрузка остаются отдельной работой. Полная совместимость и фактический запуск 1С не заявляются.
 
 ## Startup/authentication: Linux/Super P2 PASS

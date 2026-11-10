@@ -1926,6 +1926,42 @@ private:
 };
 
 
+class SetPgSessionNode final : public SessionManagementNode
+{
+public:
+	enum Type : UCHAR
+	{
+		TYPE_LC_MESSAGES,
+		TYPE_CLIENT_ENCODING
+	};
+
+	SetPgSessionNode(MemoryPool& pool, Type aType, const Firebird::string& aValue)
+		: SessionManagementNode(pool),
+		  type(aType),
+		  value(pool, aValue)
+	{
+	}
+
+public:
+	Firebird::string internalPrint(NodePrinter& printer) const override
+	{
+		SessionManagementNode::internalPrint(printer);
+
+		NODE_PRINT(printer, type);
+		NODE_PRINT(printer, value);
+
+		return "SetPgSessionNode";
+	}
+
+	SessionManagementNode* dsqlPass(DsqlCompilerScratch* dsqlScratch) override;
+	void execute(thread_db* tdbb, DsqlRequest* request, jrd_tra** traHandle) const override;
+
+private:
+	Type type;
+	Firebird::string value;
+};
+
+
 class SetDebugOptionNode final : public SessionManagementNode
 {
 public:

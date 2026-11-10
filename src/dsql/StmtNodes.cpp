@@ -11739,6 +11739,55 @@ void SetSessionNode::execute(thread_db* tdbb, DsqlRequest* request, jrd_tra** /*
 //--------------------
 
 
+SessionManagementNode* SetPgSessionNode::dsqlPass(DsqlCompilerScratch* dsqlScratch)
+{
+	// PSQL session-management wrappers reprepare their text using the database dialect.
+	// Do not store PG-only syntax in that path until the dialect is preserved there.
+	if (dsqlScratch->isPsql())
+	{
+		ERRD_post(Arg::Gds(isc_wish_list) << Arg::Gds(isc_random) <<
+			"PostgreSQL session settings are not supported in PSQL");
+	}
+
+	return SessionManagementNode::dsqlPass(dsqlScratch);
+}
+
+void SetPgSessionNode::execute(thread_db* tdbb, DsqlRequest* /*request*/, jrd_tra** /*traHandle*/) const
+{
+	const auto attachment = tdbb->getAttachment();
+
+	// These values confirm the fixed English/UTF8 profile. No mutable setting or
+	// process locale is introduced; validate values and charset on every execution.
+	switch (type)
+	{
+	case TYPE_LC_MESSAGES:
+		if (value != "en_US.UTF-8")
+		{
+			ERR_post(Arg::Gds(isc_random) << "Unsupported value for LC_MESSAGES" <<
+				Arg::SqlState("22023"));
+		}
+		break;
+
+	case TYPE_CLIENT_ENCODING:
+		if (!((value.length() == 4 && value.equalsNoCase("UTF8")) ||
+			(value.length() == 5 && value.equalsNoCase("UTF-8"))))
+		{
+			ERR_post(Arg::Gds(isc_random) << "Unsupported value for CLIENT_ENCODING" <<
+				Arg::SqlState("22023"));
+		}
+		if (attachment->att_charset != CS_UTF8)
+		{
+			ERR_post(Arg::Gds(isc_wish_list) << Arg::Gds(isc_random) <<
+				"CLIENT_ENCODING requires a UTF8 attachment");
+		}
+		break;
+	}
+}
+
+
+//--------------------
+
+
 void SetOptimizeNode::execute(thread_db* tdbb, DsqlRequest* /*request*/, jrd_tra** /*traHandle*/) const
 {
 	const auto attachment = tdbb->getAttachment();

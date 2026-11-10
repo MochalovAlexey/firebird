@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Observe original 1C SQL or test SELECT without FROM in a private runtime.
+"""Observe original 1C SQL or test PG dialect features in a private runtime.
 
 --baseline reads external CAPTURE/profile/selected; errors are observations,
 not acceptance. Extended examples are prepared/described without execution or
 guessed Bind values. No captured SQL, parameter DETAIL or result data is saved.
+--settings checks the fixed English/UTF8 profile with an ordinary user.
 The external subprocess watchdog configures no server timeout.
 """
 import argparse
@@ -18,8 +19,8 @@ import sys
 from types import SimpleNamespace
 
 from pgwire_client import Connection, decode
-from pgwire_extended_query_smoke import ExtendedClient
-from pgwire_startup_smoke import StartupHarness, Client
+from pgwire_extended_query_smoke import ExtendedClient, parse, bind, execute, close
+from pgwire_startup_smoke import StartupHarness, Client, packet
 from wire_host_smoke import require, reserve_ports
 
 
@@ -134,13 +135,82 @@ def backend_identity(first, config):
         second.close()
 
 
+def settings_client(config, client):
+    """Ordinary-user settings; optional original startup SQL bytes."""
+    def check(sql, tags=(), error='', state=0):
+        results = client.query(sql, True)
+        require([r['tag'] for r in results] == list(tags) + ([''] if error else []) and
+                [r['sqlstate'] for r in results] == [''] * len(tags) + ([error] if error else []) and
+                client.pq.PQtransactionStatus(client.connection) == state,
+                'settings query differs: ' + repr(sql) + ' ' + json.dumps(results))
+        return results
+
+    locale_sql = b"SET lc_messages TO 'en_US.UTF-8'"
+    locale_source = {'original_capture': False}
+    if config['capture_dir'] != 'None':
+        original = Path(config['capture_dir']) / 'profile/selected/02-lc-messages.sql'
+        locale_sql = original.read_bytes()
+        provenance = json.loads(original.with_suffix('.json').read_text())
+        locale_source = {key: provenance[key] for key in ('capture_seq', 'session_id', 'kind', 'sql_id')}
+        locale_source.update(original_capture=True, source=str(original))
+    locale_source['sha256'] = hashlib.sha256(locale_sql).hexdigest()
+    check(locale_sql, ['SET'])
+    check("SET lc_messages = 'en_US.UTF-8'; SET client_encoding = 'utf8'", ['SET', 'SET'])
+    check("SET client_encoding TO UTF8; SET client_encoding = 'UTF-8'", ['SET', 'SET'])
+    result = check("SELECT CAST('Я🙂' AS VARCHAR(10)) FROM RDB$DATABASE", ['SELECT 1'])[0]
+    require(result['rows'] == [['Я🙂']] and result['columns'][0]['oid'] == 1043,
+            'UTF8 text changed after SET client_encoding')
+    charset = check('SELECT TRIM(C.RDB$CHARACTER_SET_NAME) FROM MON$ATTACHMENTS A '
+        'JOIN RDB$CHARACTER_SETS C ON C.RDB$CHARACTER_SET_ID=A.MON$CHARACTER_SET_ID '
+        'WHERE A.MON$ATTACHMENT_ID=CURRENT_CONNECTION', ['SELECT 1'])
+    require(charset[0]['rows'] == [['UTF8']], 'SET accepted an attachment without actual UTF8')
+    for sql in ("SET client_encoding TO 'LATIN1'", "SET lc_messages TO 'ru_RU.UTF-8'",
+                "SET lc_messages TO ''", "SET client_encoding TO ''"):
+        check(sql, error='22023')
+        client.recover()
+    # An accepted fixed English setting must leave real error diagnostics usable.
+    handle = client.pq.PQexec(client.connection, b'SELECT (')
+    require(handle, 'libpq returned no diagnostic')
+    try:
+        message = decode(client.pq.PQresultErrorField(handle, ord('M')))
+        require(decode(client.pq.PQresultErrorField(handle, ord('C'))) == '42601' and
+                message == 'SQL syntax error', 'fixed English diagnostic differs: ' + message)
+    finally:
+        client.pq.PQclear(handle)
+    client.recover()
+    check('INSERT INTO WIRE_HOST_ROWS VALUES(511); '
+          "SET client_encoding TO 'LATIN1'; INSERT INTO WIRE_HOST_ROWS VALUES(512)",
+          ['INSERT 0 1'], error='22023')
+    check('SET TRANSACTION; ' + "SET client_encoding = 'utf8'", ['BEGIN', 'SET'], state=2)
+    check("SET lc_messages TO 'ru_RU.UTF-8'; ROLLBACK", error='22023', state=3)
+    check("SET client_encoding = 'utf8'", error='25P02', state=3)
+    check("ROLLBACK; SET client_encoding = 'UTF8'", ['ROLLBACK', 'SET'])
+    remaining = check('SELECT COUNT(*) FROM WIRE_HOST_ROWS WHERE ID IN (511,512)', ['SELECT 1'])
+    require(remaining[0]['rows'] == [['0']], 'settings error committed or continued script writes')
+    if config['capture_dir'] != 'None':
+        original = Path(config['capture_dir']) / 'profile/selected/03-session-batch.sql'
+        batch = original.read_bytes()
+    else:
+        batch = b"SET enable_mergejoin = off; SET client_encoding = 'utf8'"
+    check(batch, error='42601')
+    client.recover()
+    return {'user': 'WIRE_HOST_TEST', 'lc_messages_query': locale_source,
+            'postgresql_privilege_model': 'deferred',
+            'unsupported_value': '22023', 'english_error': message, 'utf8_text': 'Я🙂',
+            'transaction_states': ['I', 'T', 'E', 'I'], 'script_writes_rolled_back': True,
+            'remaining_startup_batch': {'sqlstate': '42601', 'sha256': hashlib.sha256(batch).hexdigest(),
+                'original_capture': config['capture_dir'] != 'None'}}
+
+
 def client_child():
     config = json.load(sys.stdin)
     connection = None
     try:
         connection = Libpq(config)
         output = {'libpq_version': connection.pq.PQlibVersion(), 'cases': []}
-        if config['baseline']:
+        if config.get('settings'):
+            output['settings'] = settings_client(config, connection)
+        elif config['baseline']:
             selected = Path(config['capture_dir']) / 'profile/selected'
             index = json.loads((selected / 'index.json').read_text())
             require(len(index) == 24, 'expected the 24 selected capture cases')
@@ -243,6 +313,48 @@ class OneCHarness(StartupHarness):
             'same_sql_pg_native_pg':True, 'pg_connection_held_open':True, 'native_recovery_select_42':True,
             'max_statement_cache_bytes':2097152, 'scope':'separate native/PG attachments to one database'}
 
+    def settings_protocols(self):
+        statements = ("SET lc_messages TO 'en_US.UTF-8'", "SET client_encoding = 'utf8'")
+        raw = ExtendedClient(self).login()
+        try:
+            for name, sql in zip(('locale', 'encoding'), statements):
+                raw.exchange(parse(name, sql) + packet(b'S'), b'1Z')
+                for attempt in range(2):
+                    portal = name + str(attempt)
+                    raw.exchange(bind(portal, name) + packet(b'H'), b'2', end=b'2')
+                    raw.exchange(execute(portal) + packet(b'S'), b'CZ', tag='SET')
+                raw.exchange(close(b'S', name) + packet(b'S'), b'3Z')
+            raw.exchange(parse('invalid_value', "SET client_encoding TO 'LATIN1'") + packet(b'S'), b'1Z')
+            raw.exchange(bind('invalid_value', 'invalid_value') + packet(b'H'), b'2', end=b'2')
+            raw.exchange(execute('invalid_value') + packet(b'S'), b'EZ', error='22023')
+        finally:
+            raw.close()
+        env = self.env.copy()
+        env.update(ISC_USER='WIRE_HOST_TEST', ISC_PASSWORD=self.password)
+        for dialect in (1, 2, 3):
+            result = subprocess.run([str(self.runtime/'bin/isql'), '-quiet', '-autoterm', '-charset', 'UTF8',
+                '-sql_dialect', str(dialect), f'inet://127.0.0.1:{self.native_port}/wire_host'],
+                input='SET LIST ON;\n' + ';\n'.join(statements) + ';\nSET BIND OF DOUBLE PRECISION TO VARCHAR(40);\n' +
+                      'SELECT 1 AS LC_MESSAGES, 2 AS CLIENT_ENCODING FROM RDB$DATABASE;\n' +
+                      RECOVERY + ';\nROLLBACK;\nQUIT;\n', capture_output=True, text=True,
+                env=env, cwd=self.temp, timeout=self.timeout)
+            output = result.stdout + result.stderr
+            (self.work/f'native_settings_dialect_{dialect}.log').write_text(self.redact(output))
+            require(result.returncode != 0 and re.findall(r'SQLSTATE\s*=\s*(\w+)', output) == ['42000', '42000'] and
+                    re.findall(r'^ANSWER\s+(\S+)\s*$', output, re.MULTILINE) == ['42'] and
+                    re.findall(r'^LC_MESSAGES\s+(\S+)\s*$', output, re.MULTILINE) == ['1'] and
+                    re.findall(r'^CLIENT_ENCODING\s+(\S+)\s*$', output, re.MULTILINE) == ['2'],
+                    f'native dialect {dialect} SET rejection/recovery differs')
+        output = self.isql('settings_rollback_observer', 'SET LIST ON;\nSELECT COUNT(*) AS SETTINGS_ROWS '
+                           'FROM WIRE_HOST_ROWS WHERE ID IN (511,512);\nROLLBACK;\nQUIT;\n')
+        require(re.findall(r'^SETTINGS_ROWS\s+(\S+)\s*$', output, re.MULTILINE) == ['0'],
+                'native observer saw script writes after settings failure')
+        self.summary['settings_protocols'] = {'extended_prepare_allowed': True,
+            'invalid_value_checked_at_execute': True, 'named_statement_reuse': 2,
+            'native_rejected_dialects': [1,2,3], 'native_autoterm_recovery': True,
+            'native_set_bind_preserved': True, 'native_identifiers_preserved': True,
+            'non_utf8_attachment': 'not exercised by this UTF8 TCP harness'}
+
     def run(self, args):
         native, pg = reserve_ports(2)
         self.start('1c', native, native, [{'alias':'PgWire','port':pg}])
@@ -253,7 +365,7 @@ class OneCHarness(StartupHarness):
         finally:
             ready.close()
         self.native_probe('native_before')
-        config = {'port':pg,'password':self.password,'baseline':args.baseline,
+        config = {'port':pg,'password':self.password,'baseline':args.baseline,'settings':args.settings,
                   'capture_dir':str(args.capture_dir),'libpq':args.libpq, 'native_port':native,
                   'runtime':str(self.runtime),'work':str(self.work),'timeout':self.timeout}
         client_env = {key:value for key,value in self.env.items() if not key.startswith('PG')}
@@ -263,7 +375,9 @@ class OneCHarness(StartupHarness):
         child = json.loads(result.stdout)
         self.summary['client'] = child
         require(result.returncode == 0, 'libpq child failed; see libpq.log')
-        if not args.baseline:
+        if args.settings:
+            self.settings_protocols()
+        elif not args.baseline:
             for name, sql, expected, _ in SELECTS:
                 if not name.startswith('old_'):
                     continue
@@ -293,7 +407,9 @@ def main():
     parser.add_argument('--firebird-dir',type=Path,required=True)
     parser.add_argument('--work-dir',type=Path,required=True)
     parser.add_argument('--capture-dir',type=Path)
-    parser.add_argument('--baseline',action='store_true')
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument('--baseline',action='store_true')
+    mode.add_argument('--settings',action='store_true',help='test fixed English/UTF8 settings with an ordinary user')
     parser.add_argument('--libpq')
     parser.add_argument('--timeout',type=float,default=60)
     args = parser.parse_args()
@@ -312,8 +428,9 @@ def main():
     work.mkdir(mode=0o700)
     harness = OneCHarness(source,work.resolve(),args.timeout)
     harness.summary.pop('passed')
-    harness.summary.update(completed=False, mode='baseline' if args.baseline else 'select_without_from',
-        stage='1C observations / first engine slice', capture_dir=str(args.capture_dir), workers=6,
+    harness.summary.update(completed=False, mode='settings' if args.settings else 'baseline' if args.baseline else 'select_without_from',
+        stage='Fixed English/UTF8 settings with an ordinary user' if args.settings else '1C observations / first engine slice',
+        capture_dir=str(args.capture_dir), workers=6,
         module_sha256=hashlib.sha256((source/'plugins/libPgWire.so').read_bytes()).hexdigest(),
         engine_sha256=hashlib.sha256((source/'plugins/libEngine14.so').read_bytes()).hexdigest(),
         tool_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest())
@@ -323,7 +440,7 @@ def main():
         ['git','diff','HEAD','--','src'],cwd=repo)).hexdigest()
     try:
         harness.prepare()
-        if not args.baseline:
+        if not args.settings and not args.baseline:
             compat = Path(__file__).resolve().parents[1] / '1c/compat.sql'
             harness.isql('install_compat', f"CONNECT '{harness.database}';\n" +
                          compat.read_text() + '\nGRANT CREATE TABLE TO USER WIRE_HOST_TEST;\nCOMMIT;\nQUIT;\n',
@@ -331,7 +448,9 @@ def main():
             harness.summary['compat_script_sha256'] = hashlib.sha256(compat.read_bytes()).hexdigest()
         harness.run(args)
         harness.summary['completed'] = True
-        if not args.baseline:
+        if args.settings:
+            harness.summary['settings_passed'] = True
+        elif not args.baseline:
             harness.summary['select_without_from_passed'] = True
     except (Exception,KeyboardInterrupt) as error:
         harness.summary['error'] = harness.redact(f'{type(error).__name__}: {error}')

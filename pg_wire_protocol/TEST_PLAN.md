@@ -4,6 +4,18 @@
 
 Python scaffold мигрирован под текущий контракт: 58 live cases прошли в P6. Начальные host tests расположены в src/common/tests/WireProtocolConfigTest.cpp, src/remote/server/wire/tests и isolated tools harness. P2/P3/P4 приёмка сохранена в VALIDATION. Предыдущая P5-ревизия прошла целевую Linux/Super приёмку с native ограничением READ CONSISTENCY + AUTO COMMIT; P6 повторил сборку, unit tests и целевые регрессии по [VALIDATION.md](VALIDATION.md). Целевой P6/M1 Linux/Super принят с известными native ограничениями, включая отдельно исключённый ON CONNECT shutdown. P7 Extended Query прошёл целевую Linux/Super приёмку: 16 групп. P8 codecs прошли целевую Linux/Super приёмку: восемь групп. P9 прошёл 17 групп с реальными C libpq, raw-wire и ограниченным профилем Psycopg 3; целевой M2 Linux/Super для совместимого SQL и реализованных codecs принят. Следующий этап — P10. PASS относится к зафиксированным cases/fixtures, а наличие строки в полной матрице не означает её прохождения.
 
+## Подэтап 1С: фиксированные lc_messages/client_encoding
+
+`pgwire_1c_smoke.py --settings` проверяет английский/UTF8 профиль, исходный запрос
+02 от обычного пользователя без административной роли, неподдержанные
+значения, кодировку данных, Simple Query stop/rollback и Extended named reuse.
+Native dialects 1/2/3 с AUTOTERM должны отвергать новые SET и выполнять следующий
+SQL; оба имени остаются допустимыми идентификаторами. Отдельный OO probe проверяет
+не-UTF8 attachment, same-attachment dialect cache и запрет вложенного PSQL.
+Целевой PASS и точные ограничения зафиксированы в [VALIDATION.md](VALIDATION.md).
+Исходный пакет 03 остаётся отрицательной проверкой: остальные шесть SET не реализованы.
+Проверка прав на `lc_messages` отложена; 42501 для этой настройки сейчас не ожидается.
+
 ## Подэтап 1С: последовательные скрипты — проверен 10 ноября 2026 года
 
 Решение пользователя от 9 ноября 2026 года: отказаться пока от предварительной

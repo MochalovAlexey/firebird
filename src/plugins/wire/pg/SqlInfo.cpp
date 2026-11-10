@@ -173,9 +173,10 @@ SqlInfo endTransaction(Prefix& prefix, bool commit)
 
 bool sessionCommand(Prefix& prefix, const Token& second)
 {
-	// Explicit native mng_statement prefixes from dsql/parse.y. Options and
-	// values remain the engine's responsibility; this is not PostgreSQL SET.
-	if (second.is("ROLE") || second.is("OPTIMIZE"))
+	// Supported mng_statement prefixes from dsql/parse.y. Options and values
+	// remain the engine's responsibility, including the fixed PG session profile.
+	if (second.is("ROLE") || second.is("OPTIMIZE") ||
+		second.is("LC_MESSAGES") || second.is("CLIENT_ENCODING"))
 		return true;
 	if (second.is("TRUSTED"))
 		return prefix.next().is("ROLE");

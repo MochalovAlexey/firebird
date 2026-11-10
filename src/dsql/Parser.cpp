@@ -1196,7 +1196,9 @@ int Parser::yylexAux()
 		const MetaName str(string, p - string);
 
 		if (const auto keyVer = dbb->dbb_keywords().get(str);
-			keyVer && (keyVer->keyword != TOK_COMMENT || lex.prev_keyword == -1))
+			keyVer && (keyVer->keyword != TOK_COMMENT || lex.prev_keyword == -1) &&
+			(pgDialect || (keyVer->keyword != TOK_LC_MESSAGES &&
+				keyVer->keyword != TOK_CLIENT_ENCODING)))
 		{
 			yylval.metaNamePtr = keyVer->str;
 			lex.last_token_bk = lex.last_token;
