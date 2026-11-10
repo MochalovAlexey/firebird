@@ -11756,8 +11756,8 @@ void SetPgSessionNode::execute(thread_db* tdbb, DsqlRequest* /*request*/, jrd_tr
 {
 	const auto attachment = tdbb->getAttachment();
 
-	// Validate values and charset on every execution. The two fixed settings
-	// confirm the English/UTF8 profile; the string mode is ordinary session state.
+	// Validate values and charset on every execution. Fixed settings confirm the
+	// English/UTF8 and client diagnostics profile; string mode is session state.
 	switch (type)
 	{
 	case TYPE_LC_MESSAGES:
@@ -11795,6 +11795,22 @@ void SetPgSessionNode::execute(thread_db* tdbb, DsqlRequest* /*request*/, jrd_tr
 				"STANDARD_CONFORMING_STRINGS OFF requires a UTF8 attachment");
 		}
 		attachment->att_standard_conforming_strings = value.equalsNoCase("ON");
+		break;
+
+	case TYPE_ESCAPE_STRING_WARNING:
+		if (!(value.length() == 3 && value.equalsNoCase("OFF")))
+		{
+			ERR_post(Arg::Gds(isc_random) << "Unsupported value for ESCAPE_STRING_WARNING" <<
+				Arg::SqlState("22023"));
+		}
+		break;
+
+	case TYPE_CLIENT_MIN_MESSAGES:
+		if (!(value.length() == 5 && value.equalsNoCase("ERROR")))
+		{
+			ERR_post(Arg::Gds(isc_random) << "Unsupported value for CLIENT_MIN_MESSAGES" <<
+				Arg::SqlState("22023"));
+		}
 		break;
 	}
 }

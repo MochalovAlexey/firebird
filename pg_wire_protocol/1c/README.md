@@ -80,9 +80,13 @@ USAGE schema и EXECUTE function выдаются PUBLIC. Он не создаё
 
 ## Следующие небольшие этапы
 
+Срез [фиксированной диагностики](FIXED_DIAGNOSTICS_TASK.md) реализован через
+существующий SetPgSessionNode: только `escape_string_warning=off` и
+`client_min_messages=error`. Результат оставлен пользователю на review.
+
 | Группа исходного задания | Текущее состояние / что требуется |
 |---|---|
-| 1. Начало сессии | SELECT без FROM, ограниченная identity-функция, последовательные скрипты и фиксированный English/UTF8 профиль двух SET и настоящий standard_conforming_strings; остальные пять SET стартового пакета ещё не реализованы |
+| 1. Начало сессии | SELECT без FROM, ограниченная identity-функция, последовательные скрипты и фиксированный English/UTF8 профиль, настоящий standard_conforming_strings и фиксированная клиентская диагностика; остаются enable_mergejoin, cpu_operator_cost и lock_timeout |
 | 2. SQL и параметры | Simple Query выполняет скрипты совместимого SQL; `$n`, `::`, BEGIN TRANSACTION и LIMIT ещё не реализованы; использовать ParameterNode, CastNode, SetTransactionNode и RowsClause |
 | 3. Открытие базы | pg_class/pg_database/visibility и служебные таблицы 1С ещё не реализованы; нужны настоящие metadata и данные |
 | 4. Типы и функции | bytea, mchar/mvarchar и BINROWVER ещё не реализованы; сначала измерить форматы/семантику, затем использовать BLOB API, intl/collations и SQL/PSQL |
@@ -129,6 +133,51 @@ Execute подтверждает единственный уже действу�
 остаётся parser error. Реализованный отдельный срез `standard_conforming_strings` описан ниже; это не успех полного пакета.
 Результаты и воспроизводимые команды — в [VALIDATION.md](../VALIDATION.md).
 
+## Фиксированный профиль клиентской диагностики
+
+```sql
+SET escape_string_warning = off;
+SET client_min_messages=error;
+```
+
+В PG dialect 4 поддержаны только **off** и **error** соответственно, без учёта
+регистра, как bare identifiers или строки. Допустимы `=` и `TO`, например
+`SET client_min_messages TO 'ErRoR'`. Обычного пользователя достаточно.
+Существующий SetPgSessionNode проверяет полное значение при Execute; Parse/Bind
+допускают синтаксически корректное неподдержанное значение. При исполнении
+`on`, `notice`, `warning`, `'bad'`, `''` и другие значения дают 22023.
+Неподдержанный синтаксис остаётся parser error. Успешный CommandComplete — SET.
+
+Это подтверждение уже действующего ограниченного профиля: PG backslash decoder
+не создаёт escape warnings; PgWire передаёт ошибки через ErrorResponse и пока
+не имеет канала NoticeResponse. Ошибки не подавляются: malformed Unicode
+`'\u12'` при standard_conforming_strings=off даёт 22025, SELECT 1/0 — 22012.
+Допустимый `'\q'` возвращает q, `'\n'` — перевод строки без NoticeResponse.
+Источники и доставка INFO/NOTICE/WARNING этим этапом не реализованы. Серверный
+журнал и native IStatus warnings не перенастраиваются.
+
+Значения PostgreSQL по умолчанию отличаются: escape_string_warning=on,
+client_min_messages=NOTICE. PostgreSQL передаёт INFO клиенту независимо от
+client_min_messages, даже при error; полного совпадения диагностики не заявляем.
+См. [escape_string_warning](https://www.postgresql.org/docs/18/runtime-config-compatible.html#GUC-ESCAPE-STRING-WARNING)
+и [client_min_messages](https://www.postgresql.org/docs/18/runtime-config-client.html#GUC-CLIENT-MIN-MESSAGES).
+
+Новых attachment fields, истории, undo, cache invalidation, API/ABI,
+ParameterStatus или конфигурации нет. COMMIT/ROLLBACK/ALTER SESSION RESET
+сохраняют фиксированный профиль. Неверный SET использует прежний error path:
+останавливает Simple Query, откатывает implicit writes, переводит explicit
+transaction в E и восстанавливает прежний standard_conforming_strings.
+Успешные фиксированные SET строковый режим не меняют. Native dialects 1/2/3
+сохраняют имена как unquoted identifiers, отвергают эти SET и продолжают
+AUTOTERM после ошибки; PG SET внутри PSQL по-прежнему запрещён.
+
+Эти две команды проверены как отдельные фрагменты `03-session-batch.sql`,
+не как успешный startup batch. `enable_mergejoin`, `cpu_operator_cost` и
+`lock_timeout` остаются неподдержанными: весь исходный пакет останавливается
+на первом enable_mergejoin. Другие значения, SET LOCAL/SESSION/DEFAULT, SHOW,
+startup GUC, BEGIN/$n и следующие этапы не добавлены. Whole-query preparse
+по-прежнему отложен; ранний явный COMMIT сохраняется при поздней ошибке.
+
 ## standard_conforming_strings: редакция 2, 10 ноября 2026
 
 Настоящий SET меняет bool на attachment при Execute, начальное значение — on.
@@ -156,8 +205,8 @@ Unicode `u` (4)/`U` (8) и surrogate pairs. Неизвестный escape ост
 Native Q-strings, hex strings, double-quoted identifiers и codecs не меняются.
 Остаются native ограничения длины: 65535 bytes и 16383 UTF8 characters для
 строковой константы. Сцепление соседних строк сохраняет Firebird whitespace
-правило, а не PostgreSQL newline-only. Escape warnings и настройки
-`escape_string_warning`/`backslash_quote` не реализованы.
+правило, а не PostgreSQL newline-only. Escape warnings не создаются; `escape_string_warning` принимает только off
+в фиксированном профиле ниже. `backslash_quote` не реализован.
 
 Публичное расширение ограничено `fb_info_standard_conforming_strings = 163`
 (4-byte integer 0/1 в существующем attachment getInfo) и
@@ -280,13 +329,13 @@ runtime-зависимости не добавлены. `SET BAIL`/`SET TERM`/`I
 ошибка откатывает текущую implicit transaction; внутри explicit transaction
 остаётся E. Остаток сообщения, включая находящийся там ROLLBACK, не выполняется.
 
-Native session setters меняют attachment напрямую: поздний rollback не отменяет
+Прочие native session setters меняют attachment напрямую: поздний rollback не отменяет
 их изменения. Сохраняется native семантика также для sequences, autonomous
 transactions и внешних эффектов; общей отмены таких эффектов не обещаем.
 Это ещё не поддержка семи PostgreSQL SET из трассы. Их реальные эффекты и
-transaction/savepoint undo добавляются отдельными этапами. При будущей поддержке
-`standard_conforming_strings` нужно согласовать режимы lexer и engine, а также
-statement cache; текущий reader не объявляется готовым для backslash escapes.
+transaction/savepoint undo добавляются отдельными этапами. Для уже реализованного
+`standard_conforming_strings` lexer, engine и statement cache используют
+согласованный режим; snapshot Query и история отката описаны выше.
 
 Приёмка — в [TEST_PLAN.md](../TEST_PLAN.md), результаты и команды — в
 [VALIDATION.md](../VALIDATION.md). Для существующего build directory после

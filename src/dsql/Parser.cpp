@@ -1367,6 +1367,8 @@ int Parser::yylexAux()
 			keyVer && (keyVer->keyword != TOK_COMMENT || lex.prev_keyword == -1) &&
 			(pgDialect || (keyVer->keyword != TOK_LC_MESSAGES &&
 				keyVer->keyword != TOK_CLIENT_ENCODING &&
+				keyVer->keyword != TOK_CLIENT_MIN_MESSAGES &&
+				keyVer->keyword != TOK_ESCAPE_STRING_WARNING &&
 				keyVer->keyword != TOK_STANDARD_CONFORMING_STRINGS)))
 		{
 			yylval.metaNamePtr = keyVer->str;

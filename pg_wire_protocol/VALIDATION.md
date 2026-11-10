@@ -1,5 +1,132 @@
 # Проверки реализации
 
+## 10 ноября 2026: фиксированный профиль клиентской диагностики
+
+Выполнено [FIXED_DIAGNOSTICS_TASK.md](1c/FIXED_DIAGNOSTICS_TASK.md) на базе
+`a31c890e1b378926f2a15a4cb5608c412980c3a2`. Поддержаны только
+`escape_string_warning=off` и `client_min_messages=error`, case-insensitive,
+quoted/bare, `=`/`TO`. Другие значения проверяются при Execute и дают 22023.
+Обычного пользователя достаточно. Предыдущий review документации сохранён ниже;
+новые изменения оставлены пользователю без staging/commit.
+
+Перед реализацией проверены основания контракта: Parser::lexPgString не вызывает
+warning path, diagnose читает getErrors(), Protocol не формирует NoticeResponse.
+Единственная отправка одиночного N — отказ SSL/GSS negotiation, не typed notice.
+Существующие native numeric warnings не изменены и не превращаются в PG notices.
+Фиксированные SET подтверждают этот профиль; новые фильтры/transport не добавлены.
+
+| Файлы | Изменение |
+|---|---|
+| `ParserTokens.h`, `Parser.cpp`, `parse.y` | Два non-reserved имени и PG-only token gate; две альтернативы прежнего set_pg_session с неизменёнными assignment/value rules |
+| `StmtNodes.h/.cpp` | Два внутренних Type; полная длина и equalsNoCase проверяются в существующем Execute, без нового состояния |
+| `SqlInfo.cpp`, `SqlInfoTest.cpp` | Session/SET classification двух имён; comments/case, invalid values и keyword boundaries |
+| `pgwire_1c_smoke.py` | Расширены существующие --settings libpq/raw/native checks; каждый diagnostic frame читается без фильтра N/S |
+
+Нет новых API/ABI, getInfo, flags, attachment fields, истории, cache reset,
+ParameterStatus или конфигурации. StrMark::introducerAllowed и прежняя
+архитектура standard_conforming_strings сохранены.
+
+### Сборка и проверки
+
+Linux x86-64, developer/Debug Firebird `LI-T6.0.0.2199-dev`, GCC 13.4.0,
+GNU Make 4.3, Python 3.10.12, libpq 14.24. Использована прежняя out-of-tree
+конфигурация `--enable-developer --with-builtin-tommath --with-builtin-tomcrypt`.
+
+```sh
+cd /tmp/firebird-pgwire-1c-build
+make -j2
+make -C gen -j2 TARGET=Debug pgwire_tests
+LD_LIBRARY_PATH=gen/Debug/firebird/lib gen/Debug/firebird/tests/pgwire_sql_test
+LD_LIBRARY_PATH=gen/Debug/firebird/lib gen/Debug/firebird/tests/pgwire_session_test
+LD_LIBRARY_PATH=gen/Debug/firebird/lib gen/Debug/firebird/tests/isql_test --log_level=message
+
+cd /home/aleksey/dev/my_firebird/firebird
+python3 -B pg_wire_protocol/tools/pgwire_1c_smoke.py --settings \
+  --firebird-dir /tmp/firebird-pgwire-1c-build/gen/Debug/firebird \
+  --work-dir /tmp/firebird-pgwire-fixed-diagnostics-02 \
+  --capture-dir /home/aleksey/dev/1c/captures/20261109T105635Z \
+  --libpq /lib/x86_64-linux-gnu/libpq.so.5
+python3 -B pg_wire_protocol/tools/pgwire_1c_smoke.py --strings \
+  --firebird-dir /tmp/firebird-pgwire-1c-build/gen/Debug/firebird \
+  --work-dir /tmp/firebird-pgwire-fixed-diagnostics-strings-01 \
+  --libpq /lib/x86_64-linux-gnu/libpq.so.5
+```
+
+| Проверка | Результат |
+|---|---|
+| Полный make / unit build | PASS, `fixed-diagnostics-build-01.log`, `fixed-diagnostics-unit-build-01.log` в build-dir; parser **154 shift/reduce, 11 reduce/reduce**, без новых конфликтов |
+| Classifier / SessionTest / isql | **527 checks / 5 scenarios / 13 cases PASS**; `fixed-diagnostics-units.json` |
+| --settings, обычный WIRE_HOST_TEST | **PASS**, 72 запроса проверены libpq helper; исходные фрагменты по отдельности/вместе, регистр/формы, SET tags, полные неверные значения и прежний English/UTF8 профиль |
+| Extended | Хорошие named statements повторно Bind/Execute; плохие значения проходят Parse/Bind и дают 22023 при Execute, затем Sync/recovery |
+| Ошибки/транзакции | Stop script, native observer видит 0 строк 511–516; I/T/E, неверный новый SET восстанавливает standard_conforming_strings, хорошие SET его не меняют; COMMIT/ROLLBACK/reset сохраняют фиксированный профиль |
+| Native1/2/3 | Новые SET отвергнуты с 42000, AUTOTERM исполняет следующий SQL; все четыре fixed-setting имени работают как identifiers, SET BIND сохранён; PG SET в PSQL даёт 0A000 |
+| --strings | **PASS**, 156 libpq queries, raw-wire, **350 OO API checks**, CTAS/PSQL source, повторный native ALTER/reconnect, charset/cache/offset regressions |
+
+Raw-wire при standard_conforming_strings=off прочитан полностью до Z/I:
+
+| Запрос | Frames | Проверенный результат |
+|---|---|---|
+| Оба fixed SET | CCZ | SET/SET, без новых ParameterStatus |
+| SELECT '\n' | TDCZ | Один перевод строки, N отсутствует |
+| SELECT '\q' | TDCZ | q, N отсутствует |
+| SELECT '\u12' | EZ | ErrorResponse 22025, N отсутствует |
+| SELECT 1/0 | TEZ | ErrorResponse 22012 после RowDescription, N отсутствует |
+
+Предварительный `fixed-diagnostics-01` остановился на неверном ожидании теста EZ
+для runtime division by zero: фактически до ошибки fetch уже отправлен T.
+Ожидание исправлено на TEZ; production код после сборки не менялся. Только
+окончательный `fixed-diagnostics-02` считается приёмкой --settings.
+Оба итоговых сервера завершились **exit 0**, без forced kill. Использованы частные
+runtime/security DB/test databases; работающий сервер и базы пользователя не менялись.
+
+Evidence: `summary.json` в обоих work-dir. Общий source_revision указан выше;
+SHA256 `git diff HEAD -- src`:
+`53b93221dd98fd192fcd25fd69db3a6c826970305a30629d855d3fafd8855b66`.
+Engine14 SHA256: `3e444daa93d525917564c38a053bf032c1b77b4b369ced1a6d894a665b469068`;
+PgWire SHA256: `cda722c8de13cd16698c4b6aa408342c1ef9023728d8dadcb8ac622bf474b3a0`.
+`readelf -d` сравнил оба модуля с `strings-source-fix-02/runtime`: DT_NEEDED
+совпадает. Новых build/test/runtime dependencies нет; отчёт
+`/tmp/firebird-pgwire-1c-build/fixed-diagnostics-dependencies.json`.
+
+### Ограничения
+
+Это off/error-only профиль, не переключаемые GUC и не полная PG диагностика.
+Defaults PostgreSQL — on/NOTICE; INFO в PostgreSQL отправляется даже при error,
+а здесь источники/доставка INFO/NOTICE/WARNING не реализованы. Native IStatus
+warnings и server log не перенастраиваются. Официальные источники и контракт —
+в [1c/README.md](1c/README.md).
+
+Приняты именно два фрагмента записи. Полный исходный `03-session-batch.sql`
+остаётся **42601** на первом enable_mergejoin (его SHA сохранён в отчёте).
+Остались enable_mergejoin, cpu_operator_cost и lock_timeout; приблизительных
+подстановок нет. Другие значения, SET LOCAL/SESSION/DEFAULT, SHOW, startup GUC,
+BEGIN/$n и следующие этапы не реализованы. Whole-query preparse отложен.
+Широкие suites, Windows/CMake, 1С/Гилёв и известные native crash repro повторно
+не запускались; отложенные engine defects этим изменением не исправляются.
+
+## 10 ноября 2026: повторный архитектурный review исправления строк
+
+Проверена чистая ревизия `a31c890e1b378926f2a15a4cb5608c412980c3a2`.
+Замечаний к исправлению не осталось: выбор introducer перенесён в существующий
+контекст `sql_string`, bare STRING сохраняет допустимую native форму X'hex'.
+Production diff ограничен Parser.h/Parser.cpp/parse.y; API, native grammar,
+история настроек и зависимости не расширены.
+
+Независимо повторены classifier (**509 checks**), SessionTest (**5 scenarios**),
+isql (**13 cases**) и целевой `pgwire_1c_smoke.py --strings` — **PASS**.
+Последний прогон: **156 libpq queries, 350 OO API checks**, raw-wire проверки,
+native dialects 1/2/3, CTAS при on/off, смешанные charsets, сохранённые temporal
+и SQLSTATE процедуры с двумя native ALTER и reconnect. Server exit 0,
+forced kill не применялся. Отчёт:
+`/tmp/firebird-pgwire-strings-source-review-01/summary.json`.
+Использованы отдельные runtime/security DB/test databases; рабочий сервер не менялся.
+
+Повторная сборка не выполнялась: SHA256 Engine14/PgWire совпали с приведёнными
+ниже бинарниками исправления. Широкие suites и прежние native crash repro
+повторно не запускались. Исходники реализации в ходе review не изменены.
+Подготовлено задание следующего этапа —
+[фиксированный профиль диагностики](1c/FIXED_DIAGNOSTICS_TASK.md); он ещё не реализован.
+
 ## 10 ноября 2026: исправление сериализации bare STRING после review
 
 Выполнено [STRINGS_SOURCE_FIX_TASK.md](1c/STRINGS_SOURCE_FIX_TASK.md) на базе

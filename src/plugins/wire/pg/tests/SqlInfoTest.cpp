@@ -278,7 +278,10 @@ void testSessionControl()
 		"SET OPTIMIZE TO DEFAULT", "SET SEARCH_PATH TO PUBLIC", "SET SEARCH_PATH TO \"COMMIT\", PUBLIC",
 		"SET DEBUG OPTION x = 1", "set/*x*/session--x\nidle/*x*/timeout 1", "SET TIME/*x*/ZONE 'RETAIN'",
 		"SET lc_messages TO 'en_US.UTF-8'", "SET client_encoding = 'utf8'",
-		"set/*x*/CLIENT_ENCODING--x\nTO UTF8"
+		"set/*x*/CLIENT_ENCODING--x\nTO UTF8",
+		"SET escape_string_warning = off", "SET client_min_messages=error",
+		"set/*x*/ESCAPE_STRING_WARNING--x\nTO 'OfF'", "SET client_min_messages TO 'ERROR'",
+		"SET escape_string_warning = on", "SET client_min_messages = notice"
 	};
 	for (const auto sql : sessions)
 		expect(sql, "SET", CountKind::None, ControlKind::Session);
@@ -293,7 +296,8 @@ void testSessionControl()
 		"SET SESSION /* open", "SET TRUSTED /* open", "SET BIND", "SET DECFLOAT", "SET DEBUG",
 		"ALTER SESSION", "ALTER SESSION RESETS", "ALTER SESSION \"RESET\"", "ALTER SESSION /* open",
 		"SET NAMES UTF8", "SET search_path = PUBLIC", "SET application_name TO 'app'",
-		"SET \"LC_MESSAGES\" TO 'en_US.UTF-8'", "SET \"CLIENT_ENCODING\" TO UTF8"
+		"SET \"LC_MESSAGES\" TO 'en_US.UTF-8'", "SET \"CLIENT_ENCODING\" TO UTF8",
+		"SET \"ESCAPE_STRING_WARNING\" = off", "SET \"CLIENT_MIN_MESSAGES\" TO error"
 	};
 	for (const auto sql : invalid)
 		unknown(sql);
@@ -314,6 +318,7 @@ void testBoundaries()
 		"SET STATEMENT TIMEOUT", "SET SESSION IDLE TIMEOUT", "SET TIME ZONE", "SET DECFLOAT ROUND",
 		"SET DECFLOAT TRAPS TO", "SET BIND OF", "SET SEARCH_PATH TO", "SET DEBUG OPTION", "SET OPTIMIZE",
 		"SET LC_MESSAGES", "SET CLIENT_ENCODING",
+		"SET ESCAPE_STRING_WARNING", "SET CLIENT_MIN_MESSAGES",
 		"ALTER SESSION RESET", "COMMIT RETAIN", "ROLLBACK WORK", "ROLLBACK TO"};
 	for (const auto prefix : prefixes)
 	{

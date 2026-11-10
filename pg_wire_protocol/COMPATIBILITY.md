@@ -18,8 +18,23 @@ CancelRequest key. Имя колонки остаётся Firebird `PG_BACKEND_P
 и `client_encoding` с проверками при Execute, без смены режима. Другие значения —
 22023, не-UTF8 attachment — 0A000. Проверка PostgreSQL-прав на `lc_messages`
 отложена по решению пользователя; точные ограничения — в 1c/README.md.
-Остальные пять SET стартового пакета, PG-параметры/касты/BEGIN, каталоги и
+Оставшиеся enable_mergejoin/cpu_operator_cost/lock_timeout, PG-параметры/касты/BEGIN, каталоги и
 неподдержанная нагрузка остаются отдельной работой. Полная совместимость и фактический запуск 1С не заявляются.
+
+## Фиксированная клиентская диагностика PG4
+
+`escape_string_warning` принимает только off, `client_min_messages` — только
+error, без учёта регистра, quoted/bare и `=`/`TO`. Проверка при Execute даёт
+22023 для других значений; Parse/Bind не применяют настройку. Успех подтверждает
+нынешнее отсутствие escape warnings и NoticeResponse, ошибки остаются видимыми.
+Новых состояния, истории, API, ParameterStatus и warning transport нет.
+Native warnings и серверный журнал не меняются. Ошибка SET использует прежний
+I/T/E и rollback standard_conforming_strings; RESET не меняет фиксированный профиль.
+
+Это ограниченный профиль, не полный PostgreSQL GUC: defaults PostgreSQL — on/NOTICE,
+а INFO в PostgreSQL отправляется даже при client_min_messages=error. Источники
+и доставка INFO/NOTICE/WARNING здесь отсутствуют. Контракт и официальные источники —
+в [1c/README.md](1c/README.md). Два фрагмента записи не означают PASS всего startup.
 
 ## Изменяемый режим строк PG4
 

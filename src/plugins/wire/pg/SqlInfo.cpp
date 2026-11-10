@@ -219,6 +219,7 @@ bool sessionCommand(Prefix& prefix, const Token& second)
 	// remain the engine's responsibility, including the fixed PG session profile.
 	if (second.is("ROLE") || second.is("OPTIMIZE") ||
 		second.is("LC_MESSAGES") || second.is("CLIENT_ENCODING") ||
+		second.is("ESCAPE_STRING_WARNING") || second.is("CLIENT_MIN_MESSAGES") ||
 		second.is("STANDARD_CONFORMING_STRINGS"))
 		return true;
 	if (second.is("TRUSTED"))

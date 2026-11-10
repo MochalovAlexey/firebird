@@ -737,6 +737,8 @@ using namespace Firebird;
 %token <metaNamePtr> LC_MESSAGES
 %token <metaNamePtr> CLIENT_ENCODING
 %token <metaNamePtr> STANDARD_CONFORMING_STRINGS
+%token <metaNamePtr> ESCAPE_STRING_WARNING
+%token <metaNamePtr> CLIENT_MIN_MESSAGES
 
 // precedence declarations for expression evaluation
 
@@ -6404,6 +6406,10 @@ set_pg_session
 		{ $$ = newNode<SetPgSessionNode>(SetPgSessionNode::TYPE_CLIENT_ENCODING, *$4); }
 	| SET STANDARD_CONFORMING_STRINGS pg_setting_assignment pg_setting_value
 		{ $$ = newNode<SetPgSessionNode>(SetPgSessionNode::TYPE_STANDARD_CONFORMING_STRINGS, *$4); }
+	| SET ESCAPE_STRING_WARNING pg_setting_assignment pg_setting_value
+		{ $$ = newNode<SetPgSessionNode>(SetPgSessionNode::TYPE_ESCAPE_STRING_WARNING, *$4); }
+	| SET CLIENT_MIN_MESSAGES pg_setting_assignment pg_setting_value
+		{ $$ = newNode<SetPgSessionNode>(SetPgSessionNode::TYPE_CLIENT_MIN_MESSAGES, *$4); }
 	;
 
 pg_setting_assignment
@@ -10664,6 +10670,8 @@ non_reserved_word
 	| LC_MESSAGES
 	| CLIENT_ENCODING
 	| STANDARD_CONFORMING_STRINGS
+	| ESCAPE_STRING_WARNING
+	| CLIENT_MIN_MESSAGES
 	;
 
 %%

@@ -43,7 +43,7 @@ assertion в exe.cpp:1351, подтверждённый review также на �
 не подтверждает этот сценарий.
 
 
-## Подэтап 1С: фиксированные lc_messages/client_encoding
+## Подэтап 1С: фиксированные English/UTF8 и клиентская диагностика
 
 `pgwire_1c_smoke.py --settings` проверяет английский/UTF8 профиль, исходный запрос
 02 от обычного пользователя без административной роли, неподдержанные
@@ -52,8 +52,20 @@ Native dialects 1/2/3 с AUTOTERM должны отвергать новые SET
 SQL; оба имени остаются допустимыми идентификаторами. Отдельный OO probe проверяет
 не-UTF8 attachment, same-attachment dialect cache и запрет вложенного PSQL.
 Целевой PASS и точные ограничения зафиксированы в [VALIDATION.md](VALIDATION.md).
-Исходный пакет 03 остаётся отрицательной проверкой: после среза standard_conforming_strings остальные пять SET не реализованы.
+Исходный пакет 03 остаётся отрицательной проверкой: после фиксированной диагностики остаются enable_mergejoin, cpu_operator_cost и lock_timeout.
 Проверка прав на `lc_messages` отложена; 42501 для этой настройки сейчас не ожидается.
+
+Тот же --settings проверяет escape_string_warning=off/client_min_messages=error:
+отдельные исходные фрагменты и вместе, TO/`=`, quoted/bare/case и SET tags,
+22023 на полные неподдержанные значения, stop/rollback writes, I/T/E и восстановление
+standard_conforming_strings, COMMIT/ROLLBACK/reset. Named Parse/Bind плохих
+значений проходят до 22023 на Execute; хорошие statements исполняются повторно.
+Raw-проверка читает каждый frame через message(), без helper-фильтра N/S:
+newline и неизвестный escape успешны без N, malformed Unicode даёт E/22025,
+division by zero — E/22012, затем Z/I. Проверяются native1/2/3 AUTOTERM,
+unquoted identifiers, прежний SET BIND и запрет PG SET внутри PSQL.
+Регрессии этого среза: --strings, classifier, SessionTest и полный isql suite.
+
 
 ## Подэтап 1С: последовательные скрипты — проверен 10 ноября 2026 года
 

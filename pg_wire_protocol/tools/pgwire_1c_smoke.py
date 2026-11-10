@@ -4,7 +4,7 @@
 --baseline reads external CAPTURE/profile/selected; errors are observations,
 not acceptance. Extended examples are prepared/described without execution or
 guessed Bind values. No captured SQL, parameter DETAIL or result data is saved.
---settings checks the fixed English/UTF8 profile with an ordinary user.
+--settings checks the fixed English/UTF8 and client diagnostics profile.
 The external subprocess watchdog configures no server timeout.
 """
 import argparse
@@ -19,8 +19,8 @@ import sys
 from types import SimpleNamespace
 
 from pgwire_client import Connection, decode
-from pgwire_extended_query_smoke import ExtendedClient, parse, bind, execute, close
-from pgwire_startup_smoke import StartupHarness, Client, packet
+from pgwire_extended_query_smoke import ExtendedClient, parse, bind, execute, close, row
+from pgwire_startup_smoke import StartupHarness, Client, packet, error_fields
 from wire_host_smoke import require, reserve_ports
 
 
@@ -138,13 +138,20 @@ def backend_identity(first, config):
 
 def settings_client(config, client):
     """Ordinary-user settings; optional original startup SQL bytes."""
+    queries_checked = 0
     def check(sql, tags=(), error='', state=0):
+        nonlocal queries_checked
         results = client.query(sql, True)
         require([r['tag'] for r in results] == list(tags) + ([''] if error else []) and
                 [r['sqlstate'] for r in results] == [''] * len(tags) + ([error] if error else []) and
                 client.pq.PQtransactionStatus(client.connection) == state,
                 'settings query differs: ' + repr(sql) + ' ' + json.dumps(results))
+        queries_checked += 1
         return results
+
+    def string_mode(expected):
+        actual = client.pq.PQparameterStatus(client.connection, b'standard_conforming_strings')
+        require(actual == expected.encode(), 'fixed setting changed string mode: '+repr(actual))
 
     locale_sql = b"SET lc_messages TO 'en_US.UTF-8'"
     locale_source = {'original_capture': False}
@@ -158,6 +165,57 @@ def settings_client(config, client):
     check(locale_sql, ['SET'])
     check("SET lc_messages = 'en_US.UTF-8'; SET client_encoding = 'utf8'", ['SET', 'SET'])
     check("SET client_encoding TO UTF8; SET client_encoding = 'UTF-8'", ['SET', 'SET'])
+    fragments = [b'SET escape_string_warning = off;', b'SET client_min_messages=error;']
+    if config['capture_dir'] != 'None':
+        batch_source = (Path(config['capture_dir'])/'profile/selected/03-session-batch.sql').read_bytes()
+        fragments = [next(line for line in batch_source.splitlines(keepends=True) if line.startswith(prefix))
+                     for prefix in (b'SET escape_string_warning ', b'SET client_min_messages=')]
+    for sql in fragments:
+        check(sql, ['SET'])
+    fixed = 'SET escape_string_warning = off; SET client_min_messages=error'
+    check(b'\n'.join(fragments), ['SET','SET'])
+    for sql in ("SET escape_string_warning TO 'OfF'", "set ESCAPE_STRING_WARNING = OFF",
+                "SET client_min_messages TO 'ErRoR'", "set CLIENT_MIN_MESSAGES = ERROR"):
+        check(sql, ['SET'])
+    identifiers = check('SELECT 3 AS ESCAPE_STRING_WARNING, 4 AS CLIENT_MIN_MESSAGES', ['SELECT 1'])[0]
+    require(identifiers['rows']==[['3','4']], 'PG non-reserved setting identifiers changed')
+    for name, prefix in (('escape_string_warning','off'), ('client_min_messages','error')):
+        for bad in ('on', 'notice', 'warning', "'bad'", "''", "'"+prefix+"x'", "'"+prefix+" '"):
+            check('SET '+name+' = '+bad, error='22023')
+            string_mode('on')
+        check('SET '+name+' = 1', error='42601')
+        check('EXECUTE BLOCK AS BEGIN SET '+name+' = '+prefix+'; END', error='0A000')
+    for sql in ('SET LOCAL escape_string_warning=off', 'SET SESSION client_min_messages=error',
+                'SET client_min_messages=DEFAULT', 'SHOW client_min_messages'):
+        check(sql, error='42601')
+    string_mode('on')
+
+    # Fixed SET failures use the existing abort path and undo earlier mutable SETs.
+    for number, invalid in enumerate(('SET escape_string_warning=on', 'SET client_min_messages=notice')):
+        first = 513 + 2*number
+        check(f'INSERT INTO WIRE_HOST_ROWS VALUES({first}); SET standard_conforming_strings=off; '+
+              invalid+f'; INSERT INTO WIRE_HOST_ROWS VALUES({first+1})', ['INSERT 0 1','SET'], error='22023')
+        string_mode('on')
+        check('SET TRANSACTION; SET standard_conforming_strings=off', ['BEGIN','SET'], state=2)
+        string_mode('off')
+        check(invalid, error='22023', state=3)
+        string_mode('on')
+        check(fixed, error='25P02', state=3)
+        check('ROLLBACK', ['ROLLBACK'])
+        check(fixed, ['SET','SET'])
+    for control in ('COMMIT', 'ROLLBACK', 'ALTER SESSION RESET'):
+        check('SET standard_conforming_strings=off', ['SET'])
+        check('SET TRANSACTION; '+fixed, ['BEGIN','SET','SET'], state=2)
+        string_mode('off')
+        resetting = control == 'ALTER SESSION RESET'
+        check(control, ['RESET' if resetting else control], state=2 if resetting else 0)
+        string_mode('on' if resetting else 'off')
+        check(fixed, ['SET','SET'], state=2 if resetting else 0)
+        string_mode('on' if resetting else 'off')
+        if resetting:
+            check('ROLLBACK', ['ROLLBACK'])
+    check('ALTER SESSION RESET', ['RESET'])
+    string_mode('on')
     result = check("SELECT CAST('Я🙂' AS VARCHAR(10)) FROM RDB$DATABASE", ['SELECT 1'])[0]
     require(result['rows'] == [['Я🙂']] and result['columns'][0]['oid'] == 1043,
             'UTF8 text changed after SET client_encoding')
@@ -186,7 +244,7 @@ def settings_client(config, client):
     check("SET lc_messages TO 'ru_RU.UTF-8'; ROLLBACK", error='22023', state=3)
     check("SET client_encoding = 'utf8'", error='25P02', state=3)
     check("ROLLBACK; SET client_encoding = 'UTF8'", ['ROLLBACK', 'SET'])
-    remaining = check('SELECT COUNT(*) FROM WIRE_HOST_ROWS WHERE ID IN (511,512)', ['SELECT 1'])
+    remaining = check('SELECT COUNT(*) FROM WIRE_HOST_ROWS WHERE ID BETWEEN 511 AND 516', ['SELECT 1'])
     require(remaining[0]['rows'] == [['0']], 'settings error committed or continued script writes')
     if config['capture_dir'] != 'None':
         original = Path(config['capture_dir']) / 'profile/selected/03-session-batch.sql'
@@ -196,6 +254,11 @@ def settings_client(config, client):
     check(batch, error='42601')
     client.recover()
     return {'user': 'WIRE_HOST_TEST', 'lc_messages_query': locale_source,
+            'queries_checked':queries_checked,
+            'diagnostics_fragments': {'original_capture':config['capture_dir'] != 'None',
+                'sha256':[hashlib.sha256(sql).hexdigest() for sql in fragments], 'whole_batch_passed':False},
+            'fixed_diagnostics':['escape_string_warning=off','client_min_messages=error'],
+            'mutable_setting_restored_on_error':True,
             'postgresql_privilege_model': 'deferred',
             'unsupported_value': '22023', 'english_error': message, 'utf8_text': 'Я🙂',
             'transaction_states': ['I', 'T', 'E', 'I'], 'script_writes_rolled_back': True,
@@ -318,19 +381,49 @@ class OneCHarness(StartupHarness):
             'max_statement_cache_bytes':2097152, 'scope':'separate native/PG attachments to one database'}
 
     def settings_protocols(self):
-        statements = ("SET lc_messages TO 'en_US.UTF-8'", "SET client_encoding = 'utf8'")
+        statements = ("SET lc_messages TO 'en_US.UTF-8'", "SET client_encoding = 'utf8'",
+                      'SET escape_string_warning = off', 'SET client_min_messages=error')
         raw = ExtendedClient(self).login()
+        wire_diagnostics = []
         try:
-            for name, sql in zip(('locale', 'encoding'), statements):
+            for name, sql in zip(('locale', 'encoding', 'escape', 'messages'), statements):
                 raw.exchange(parse(name, sql) + packet(b'S'), b'1Z')
                 for attempt in range(2):
                     portal = name + str(attempt)
                     raw.exchange(bind(portal, name) + packet(b'H'), b'2', end=b'2')
                     raw.exchange(execute(portal) + packet(b'S'), b'CZ', tag='SET')
                 raw.exchange(close(b'S', name) + packet(b'S'), b'3Z')
-            raw.exchange(parse('invalid_value', "SET client_encoding TO 'LATIN1'") + packet(b'S'), b'1Z')
-            raw.exchange(bind('invalid_value', 'invalid_value') + packet(b'H'), b'2', end=b'2')
-            raw.exchange(execute('invalid_value') + packet(b'S'), b'EZ', error='22023')
+            for index, sql in enumerate(("SET client_encoding TO 'LATIN1'", 'SET escape_string_warning=on',
+                                        'SET client_min_messages=notice')):
+                name = 'invalid_value'+str(index)
+                raw.exchange(parse(name, sql) + packet(b'S'), b'1Z')
+                raw.exchange(bind(name, name) + packet(b'H'), b'2', end=b'2')
+                raw.exchange(execute(name) + packet(b'S'), b'EZ', error='22023')
+                raw.exchange(close(b'S', name) + packet(b'S'), b'3Z')
+
+            # Read every frame directly: ExtendedClient.events deliberately drops N/S.
+            for sql, kinds, rows, error in [
+                ('SET standard_conforming_strings=off', b'CSZ', [], None),
+                ('; '.join(statements[2:]), b'CCZ', [], None),
+                (r"SELECT '\n'", b'TDCZ', [[b'\n']], None),
+                (r"SELECT '\q'", b'TDCZ', [[b'q']], None),
+                (r"SELECT '\u12'", b'EZ', [], '22025'),
+                ('SELECT 1/0', b'TEZ', [], '22012'),
+            ]:
+                raw.send(packet(b'Q', sql.encode()+b'\0'))
+                events = []
+                for _ in range(1000):
+                    kind, body = raw.message()
+                    events.append((kind, body))
+                    if kind == b'Z': break
+                require(all(kind != b'N' for kind, _ in events), 'Unexpected NoticeResponse: '+repr(events))
+                require(b''.join(kind for kind, _ in events)==kinds and events[-1]==(b'Z', b'I'),
+                        'Diagnostic wire order differs: '+repr(events))
+                require([row(body) for kind, body in events if kind==b'D']==rows, 'Escape bytes changed')
+                errors = [error_fields(body) for kind, body in events if kind==b'E']
+                require([e['C'] for e in errors]==([error] if error else []) and
+                        all(e['S']=='ERROR' for e in errors), 'ErrorResponse was suppressed or changed')
+                wire_diagnostics.append({'sql':sql, 'frames':kinds.decode(), 'sqlstate':error, 'notices':0})
         finally:
             raw.close()
         env = self.env.copy()
@@ -339,24 +432,28 @@ class OneCHarness(StartupHarness):
             result = subprocess.run([str(self.runtime/'bin/isql'), '-quiet', '-autoterm', '-charset', 'UTF8',
                 '-sql_dialect', str(dialect), f'inet://127.0.0.1:{self.native_port}/wire_host'],
                 input='SET LIST ON;\n' + ';\n'.join(statements) + ';\nSET BIND OF DOUBLE PRECISION TO VARCHAR(40);\n' +
-                      'SELECT 1 AS LC_MESSAGES, 2 AS CLIENT_ENCODING FROM RDB$DATABASE;\n' +
+                      'SELECT 1 AS LC_MESSAGES, 2 AS CLIENT_ENCODING, 3 AS ESCAPE_STRING_WARNING, '
+                      '4 AS CLIENT_MIN_MESSAGES FROM RDB$DATABASE;\n' +
                       RECOVERY + ';\nROLLBACK;\nQUIT;\n', capture_output=True, text=True,
                 env=env, cwd=self.temp, timeout=self.timeout)
             output = result.stdout + result.stderr
             (self.work/f'native_settings_dialect_{dialect}.log').write_text(self.redact(output))
-            require(result.returncode != 0 and re.findall(r'SQLSTATE\s*=\s*(\w+)', output) == ['42000', '42000'] and
+            require(result.returncode != 0 and re.findall(r'SQLSTATE\s*=\s*(\w+)', output) == ['42000']*4 and
                     re.findall(r'^ANSWER\s+(\S+)\s*$', output, re.MULTILINE) == ['42'] and
                     re.findall(r'^LC_MESSAGES\s+(\S+)\s*$', output, re.MULTILINE) == ['1'] and
-                    re.findall(r'^CLIENT_ENCODING\s+(\S+)\s*$', output, re.MULTILINE) == ['2'],
+                    re.findall(r'^CLIENT_ENCODING\s+(\S+)\s*$', output, re.MULTILINE) == ['2'] and
+                    re.findall(r'^ESCAPE_STRING_WARNING\s+(\S+)\s*$', output, re.MULTILINE) == ['3'] and
+                    re.findall(r'^CLIENT_MIN_MESSAGES\s+(\S+)\s*$', output, re.MULTILINE) == ['4'],
                     f'native dialect {dialect} SET rejection/recovery differs')
         output = self.isql('settings_rollback_observer', 'SET LIST ON;\nSELECT COUNT(*) AS SETTINGS_ROWS '
-                           'FROM WIRE_HOST_ROWS WHERE ID IN (511,512);\nROLLBACK;\nQUIT;\n')
+                           'FROM WIRE_HOST_ROWS WHERE ID BETWEEN 511 AND 516;\nROLLBACK;\nQUIT;\n')
         require(re.findall(r'^SETTINGS_ROWS\s+(\S+)\s*$', output, re.MULTILINE) == ['0'],
                 'native observer saw script writes after settings failure')
         self.summary['settings_protocols'] = {'extended_prepare_allowed': True,
             'invalid_value_checked_at_execute': True, 'named_statement_reuse': 2,
             'native_rejected_dialects': [1,2,3], 'native_autoterm_recovery': True,
             'native_set_bind_preserved': True, 'native_identifiers_preserved': True,
+            'wire_diagnostics':wire_diagnostics,
             'non_utf8_attachment': 'not exercised by this UTF8 TCP harness'}
 
     def run(self, args):
@@ -419,7 +516,7 @@ def main():
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument('--strings',action='store_true',help='test standard_conforming_strings')
     mode.add_argument('--baseline',action='store_true')
-    mode.add_argument('--settings',action='store_true',help='test fixed English/UTF8 settings with an ordinary user')
+    mode.add_argument('--settings',action='store_true',help='test fixed English/UTF8 and client diagnostics settings')
     parser.add_argument('--libpq')
     parser.add_argument('--timeout',type=float,default=60)
     args = parser.parse_args()
@@ -440,7 +537,7 @@ def main():
     harness.summary.pop('passed')
     harness.summary.update(completed=False, mode='strings' if args.strings else 'settings' if args.settings else 'baseline' if args.baseline else 'select_without_from',
         stage='standard_conforming_strings / revision 2' if args.strings else
-            'Fixed English/UTF8 settings with an ordinary user' if args.settings else '1C observations / first engine slice',
+            'Fixed English/UTF8 and client diagnostics settings' if args.settings else '1C observations / first engine slice',
         capture_dir=str(args.capture_dir), workers=6,
         module_sha256=hashlib.sha256((source/'plugins/libPgWire.so').read_bytes()).hexdigest(),
         engine_sha256=hashlib.sha256((source/'plugins/libEngine14.so').read_bytes()).hexdigest(),
