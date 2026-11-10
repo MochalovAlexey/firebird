@@ -52,7 +52,7 @@ def psycopg2_child():
             require(cursor.fetchall() == [(1, 31), (2, 47), (3, -9)], "psycopg2 table rows differ")
             cursor.execute("SELECT ID FROM PGWIRE_ROWS WHERE ID < 0")
             require(cursor.fetchall() == [] and cursor.rowcount == 0, "psycopg2 empty result differs")
-            for sql, expected in (("not SQL", "42601"), ("BEGIN", "42601"),
+            for sql, expected in (("not SQL", "42601"), ("BEGIN READ ONLY", "42601"),
                                   ("SELECT $1 FROM RDB$DATABASE", "42601"),
                                   ("SELECT CAST('x' AS VARCHAR(1)) FROM RDB$DATABASE", "0A000")):
                 try:
@@ -274,7 +274,7 @@ QUIT;
 
     def errors_and_guards(self):
         client = Client(self).login()
-        for sql, state in (("not SQL", "42601"), ("BEGIN", "42601"),
+        for sql, state in (("not SQL", "42601"), ("BEGIN READ ONLY", "42601"),
                            ("SELECT $1 FROM RDB$DATABASE", "42601"),
                            ("SELECT ID FROM PGWIRE_MISSING", "42P01"),
                            ("SELECT CAST(? AS INTEGER) FROM RDB$DATABASE", "0A000"),

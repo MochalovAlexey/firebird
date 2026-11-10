@@ -213,6 +213,7 @@ void QueryExecutor::checkStatement(IStatement* statement, const SqlInfo& info)
 	switch (info.control)
 	{
 	case ControlKind::Start:
+	case ControlKind::PgStart:
 		expected = isc_info_sql_stmt_start_trans; break;
 	case ControlKind::Commit:
 	case ControlKind::CommitRetaining:
@@ -293,9 +294,16 @@ void QueryExecutor::finishImplicit(bool& ending)
 std::string QueryExecutor::control(IStatement* statement, const SqlInfo& info, bool& ending)
 {
 	const auto kind = info.control;
+	if (kind == ControlKind::PgStart && transaction)
+	{
+		// Promote an implicit segment or retain an explicit block, including its
+		// cursors, savepoints and setting history. Prepare has validated the SQL.
+		state = 'T';
+		return info.tag;
+	}
 	if (kind == ControlKind::Start && (state != 'I' || transaction))
 		throw ProtocolError("25001", "A transaction is already active");
-	if (state == 'I' && kind != ControlKind::Start && kind != ControlKind::Session &&
+	if (state == 'I' && kind != ControlKind::Start && kind != ControlKind::PgStart && kind != ControlKind::Session &&
 		kind != ControlKind::ResetSession && kind != ControlKind::Commit && kind != ControlKind::Rollback)
 	{
 		throw ProtocolError("25000", "No active transaction");
@@ -355,7 +363,7 @@ std::string QueryExecutor::control(IStatement* statement, const SqlInfo& info, b
 			throw ProtocolError("XX000", "Transaction was not completed");
 		state = 'I';
 	}
-	else if (kind == ControlKind::Start)
+	else if (kind == ControlKind::Start || kind == ControlKind::PgStart)
 	{
 		if (!transaction)
 			throw ProtocolError("XX000", "Transaction was not started");

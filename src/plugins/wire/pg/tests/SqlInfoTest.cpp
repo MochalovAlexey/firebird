@@ -213,6 +213,12 @@ void testTransactionControl()
 	struct Case { const char* sql; const char* tag; ControlKind control; };
 	const Case cases[] = {
 		{"SET TRANSACTION", "BEGIN", ControlKind::Start},
+		{"BEGIN", "BEGIN", ControlKind::PgStart},
+		{"BEGIN WORK", "BEGIN", ControlKind::PgStart},
+		{"BEGIN TRANSACTION", "BEGIN", ControlKind::PgStart},
+		{"START TRANSACTION", "BEGIN", ControlKind::PgStart},
+		{"begin/*x*/work", "BEGIN", ControlKind::PgStart},
+		{"start--x\ntransaction", "BEGIN", ControlKind::PgStart},
 		{"SET/* options belong to the engine */TRANSACTION READ ONLY READ COMMITTED NO WAIT", "BEGIN", ControlKind::Start},
 		{"SET TRANSACTION AUTO COMMIT NO AUTO UNDO", "BEGIN", ControlKind::Start},
 		{"SET TRANSACTION RESERVING \"COMMIT\" FOR SHARED WRITE", "BEGIN", ControlKind::Start},
@@ -311,14 +317,14 @@ void testBoundaries()
 {
 	const std::string_view commands[] = {"SELECT", "WITH", "INSERT", "UPDATE", "DELETE", "MERGE",
 		"CALL", "EXECUTE", "CREATE", "ALTER", "DROP", "RECREATE", "DECLARE", "GRANT", "REVOKE", "COMMENT", "SET",
-		"COMMIT", "ROLLBACK", "SAVEPOINT", "RELEASE"};
+		"COMMIT", "ROLLBACK", "SAVEPOINT", "RELEASE", "BEGIN", "START"};
 	const std::string_view suffixes[] = {"1", "_x", "$x", "x", "\xD0\xAF"};
 	for (const auto word : commands)
 	{
 		for (const auto suffix : suffixes)
 			unknown(std::string(word) + std::string(suffix));
 	}
-	const std::string_view prefixes[] = {"SET TRANSACTION", "SET ROLE", "SET TRUSTED ROLE",
+	const std::string_view prefixes[] = {"START TRANSACTION", "SET TRANSACTION", "SET ROLE", "SET TRUSTED ROLE",
 		"SET STATEMENT TIMEOUT", "SET SESSION IDLE TIMEOUT", "SET TIME ZONE", "SET DECFLOAT ROUND",
 		"SET DECFLOAT TRAPS TO", "SET BIND OF", "SET SEARCH_PATH TO", "SET DEBUG OPTION", "SET OPTIMIZE",
 		"SET LC_MESSAGES", "SET CLIENT_ENCODING",
@@ -331,7 +337,7 @@ void testBoundaries()
 			unknown(std::string(prefix) + std::string(suffix));
 	}
 	const std::string_view controls[] = {
-		"BEGIN", "BEGIN WORK", "START TRANSACTION", "RESET ALL", "RESET ROLE", "DISCARD ALL",
+		"START", "START WORK", "START \"TRANSACTION\"", "RESET ALL", "RESET ROLE", "DISCARD ALL",
 		"END", "ABORT", "USING (n INTEGER = 1) DO SELECT n FROM RDB$DATABASE"
 	};
 	for (const auto sql : controls)

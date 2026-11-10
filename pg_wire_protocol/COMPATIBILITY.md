@@ -27,8 +27,24 @@ ParameterStatus, SHOW, состояния или истории; native1/2/3 и 
 Исходный пакет 03 даёт семь SET tags, I и standard_conforming_strings=off.
 Это [узкое исключение](1c/IGNORED_STARTUP_SETTINGS_TASK.md) только для трёх имён.
 Реальная семантика этих настроек,
-PG-параметры/касты/BEGIN, каталоги и неподдержанная нагрузка остаются отдельной работой.
+PG-параметры/касты, каталоги и неподдержанная нагрузка остаются отдельной работой.
 Полная совместимость и фактический запуск 1С не заявляются.
+
+## PG BEGIN без transaction options
+
+Поддержаны BEGIN / BEGIN WORK / BEGIN TRANSACTION / START TRANSACTION только в PG4.
+Штатный SetTransactionNode задаёт READ COMMITTED READ CONSISTENCY, READ WRITE, WAIT;
+native SET TRANSACTION без опций сохраняет SNAPSHOT. Tag BEGIN, состояние T.
+При implicit handle BEGIN сохраняет его и предшествующую работу; повтор в T
+сохраняет handle/savepoints/portals/строковую историю. В E — 25P02; native повтор
+SET TRANSACTION — прежний 25001. Parse/Bind блок не открывают; Execute открывает,
+Sync оставляет T. Неподдержанные options — syntax error, не частичное исполнение.
+Native1/2/3/AUTOTERM, PSQL и DDL START WITH сохранены. Нет нового API или SQL rewriting.
+Проверены libpq, raw-wire, native visibility/monitoring, psql AUTOCOMMIT off,
+psycopg2 transactional mode и connection context. Контракт и границы — в
+[1c/README.md](1c/README.md); результаты — в [VALIDATION.md](VALIDATION.md).
+Это не полная PG transaction compatibility или запуск 1С; остальные options,
+default_transaction_*, `$n`, `::`, LIMIT и каталоги остаются за границей.
 
 ## Фиксированная клиентская диагностика PG4
 
@@ -120,14 +136,14 @@ Temporal text принимает строгий ISO `YYYY-MM-DD`, `HH:MM:SS[.fff
 | Psycopg 3, autocommit=True, SQL без параметров | PASS: Simple SELECT с P8 values и пустым результатом; отдельно forced `prepare=True`/`binary=True`, named reuse через COMMIT и protocol Close при eviction. AsyncCursor также проверен в Simple/Extended/binary и с native COMMIT |
 | Psycopg 3, native transaction controls | PASS: свежая connection с `autocommit=True, prepare_threshold=None`; SET TRANSACTION/COMMIT/ROLLBACK, savepoint, I/T/E, failed COMMIT и подтверждённые effects |
 | Psycopg 3, обычные `%s` параметры | Подтверждён 42601: драйвер формирует `$n`, который требует будущего engine grammar |
-| Psycopg 3, обычный transactional mode | Подтверждён 42601 на автоматическом BEGIN; такой профиль не объявляется совместимым |
+| Psycopg 3, обычный transactional mode | Исторический P9 фиксировал 42601 на BEGIN; engine теперь поддерживает BEGIN без опций, сценарий обновлён, live-повтор Psycopg 3 в текущем окружении недоступен |
 | Psycopg 3, `sql.Literal(date)` | Подтверждён 42601: клиент генерирует PostgreSQL cast `::date` |
 
 **Подтверждённая граница prepared cache:** после native ROLLBACK при непустом cache Psycopg 3 послал SQL `DEALLOCATE ALL` и получил 42601. Сам rollback завершился, состояние осталось I, следующий совместимый запрос выполнился. Отдельное удаление prepared statement через protocol Close прошло; это не доказывает поддержку whole-cache clear. В prepared trace зафиксированы Parse 6, Bind/Execute по 9, Sync 19 и Close 4.
 
 Source-аудит Psycopg 3.3.6 также показывает cache invalidation после DROP/ALTER: `clear()` планирует `_deallocate(None)`, который использует SQL `DEALLOCATE ALL` даже с libpq 18.6. Эти два триггера очистки отдельно в live profile не проверены. RESET инвалидирует server objects, но не входит в список cache invalidation драйвера; возможный stale cache после RESET тоже остаётся source boundary без live утверждения. См. [_preparing.py](https://github.com/psycopg/psycopg/blob/3.3.6/psycopg/psycopg/_preparing.py) и [_connection_base.py](https://github.com/psycopg/psycopg/blob/3.3.6/psycopg/psycopg/_connection_base.py). Для forced preparation используется отдельная connection с включённым preparation: `prepare_threshold=None` отключает и явный `prepare=True`.
 
-Целевой M2 Linux/Super принят по прямому libpq и обязательным raw-wire sequences на неизменённом совместимом SQL, с подтверждёнными P8 codecs и регрессиями M1. Это не обещает обычную `$n`-параметризацию Psycopg 3, driver-generated BEGIN/DEALLOCATE ALL или произвольное приложение. SQL-границы сохраняются, pipeline/COPY/TLS/другие драйверы требуют отдельных профилей. Evidence и точные границы приёмки зафиксированы в VALIDATION; следующий этап — P10.
+Целевой M2 Linux/Super принят по прямому libpq и обязательным raw-wire sequences на неизменённом совместимом SQL, с подтверждёнными P8 codecs и регрессиями M1. Это не обещает обычную `$n`-параметризацию Psycopg 3, DEALLOCATE ALL или произвольное приложение. SQL-границы сохраняются, pipeline/COPY/TLS/другие драйверы требуют отдельных профилей. Evidence и точные границы приёмки зафиксированы в VALIDATION; следующий этап — P10.
 
 ## Главная граница
 
@@ -141,7 +157,7 @@ Simple Query поддерживает [последовательные скри
 
 EMPTY определяется ограниченным lexer только для нулевой строки, whitespace и полностью закрытых comments без SQL tokens. Даже такой текст передаётся в обычный engine prepare неизменённым. Только сочетание этого признака с engine syntax error 42601 после успешного cleanup преобразуется в EmptyQueryResponse; permission, cancellation, resource и другие ошибки не маскируются. Незаконченные строка/comment/statement и отдельный `;` остаются parser errors. Native parser diagnostics и `isql -autoterm` не меняются.
 
-BEGIN/$n и другие несовместимые формы остаются parser errors. Дополнения SQL-грамматики сверх SELECT без FROM требуют отдельной работы в движке; последовательный reader и разрешённая классификация не добавляют новые SQL-конструкции.
+$n и другие несовместимые формы остаются parser errors. SELECT без FROM, ограниченные SET и BEGIN реализованы движком; последовательный reader и разрешённая классификация не добавляют новые SQL-конструкции.
 
 ## Возможности по этапам
 
@@ -160,7 +176,7 @@ BEGIN/$n и другие несовместимые формы остаются 
 | Parse/Bind/Describe/Execute/Close/Flush/Sync | Явный отказ | Явный отказ | Да | Да |
 | Named/unnamed statements и portals | Нет | Нет | Да, с лимитами и проверенным lifetime | Да |
 | Bind с native `?` либо zero parameters | Нет | Нет | Да, по engine metadata | Да |
-| SQL `$n`, standalone BEGIN, PostgreSQL casts `::` | Parser error | Parser error | Parser error | Parser error без отдельного engine расширения |
+| SQL `$n`, PostgreSQL casts `::` | Parser error | Parser error | Parser error | Parser error без отдельного engine расширения |
 | I/T/E, native SET TRANSACTION/COMMIT/ROLLBACK | Implicit Query transaction | Да, plugin-local controls после engine prepare | Да, включая implicit cycle до Sync | Да |
 | Native SAVEPOINT/ROLLBACK TO/RELEASE и RETAIN | Не критерий smoke | Реальный effect и state policy | Тот же контракт | Тот же контракт |
 | SMALLINT/INTEGER/BIGINT, BOOLEAN, CHAR/VARCHAR, NUMERIC до INT64, NULL | Три integer-типа, scale/subtype 0, NULL; text results | Text results | Text/binary input/output | Да |
@@ -181,7 +197,7 @@ BEGIN/$n и другие несовместимые формы остаются 
 |---|---|
 | `PQexec` с совместимым SQL | Simple Query M0/M1 |
 | psycopg2 `autocommit=True`, обычный cursor без `with connection` | Совместимый SQL M0/M1 |
-| psycopg2 transactional mode либо connection context, генерирующий BEGIN | BEGIN отклоняется parser; сценарий не заявляется поддержанным |
+| psycopg2 transactional mode либо connection context, генерирующий BEGIN | BEGIN без опций поддержан; live SELECT/DML/commit/rollback проверены в этапе BEGIN |
 | Прямой libpq, native SET TRANSACTION затем совместимый SQL/COMMIT/ROLLBACK | Explicit transaction tests M1 |
 | `PQexecParams` с `CAST(? AS INTEGER)` в совместимом Firebird statement | Native binding M2 |
 | `PQprepare`/`PQexecPrepared` с native `?` либо без parameters | Statement/portal lifecycle M2 |
@@ -200,7 +216,7 @@ BEGIN/$n и другие несовместимые формы остаются 
 
 Совместимые CREATE/ALTER/DROP, index и privilege операции покрываются descriptor и тестами. Неописанная команда получает явный 0A000 после prepare до исполнения. Command tag дополняет coarse getType сведениями ограниченного lexer: MERGE, UPDATE OR INSERT, RETURNING, DDL modifiers и control/session forms не смешиваются.
 
-Прежний M0 SELECT-only фильтр не является текущим execution gate. P4 поддерживает обычные DML/DDL; P5 добавляет plugin-local `ControlKind` и state policy без новых getInfo items или parser observers. Native `SET TRANSACTION` выдаёт BEGIN после реального начала transaction. Полные COMMIT/ROLLBACK в I завершают существующий implicit сегмент либо являются no-op при отсутствии handle; retaining и savepoints — 25000/I. Повторный SET TRANSACTION в T даёт 25001/E. BEGIN, START TRANSACTION и RETAINING остаются parser errors; native формы — `COMMIT/ROLLBACK [WORK] RETAIN [SNAPSHOT]`.
+Прежний M0 SELECT-only фильтр не является текущим execution gate. P4 поддерживает обычные DML/DDL; P5 добавляет plugin-local `ControlKind` и state policy без новых getInfo items или parser observers. Native `SET TRANSACTION` выдаёт BEGIN после реального начала transaction. Полные COMMIT/ROLLBACK в I завершают существующий implicit сегмент либо являются no-op при отсутствии handle; retaining и savepoints — 25000/I. Повторный SET TRANSACTION в T даёт 25001/E. PG BEGIN/START TRANSACTION без опций поддержаны, как описано выше; RETAINING остаётся parser error; native формы — `COMMIT/ROLLBACK [WORK] RETAIN [SNAPSHOT]`.
 
 P5 сохраняет native transaction при ошибке explicit block и ставит E. Обычный prepare выполняется на этом handle; descriptor после prepare разрешает recovery, остальные успешно подготовленные команды блокируются с 25P02 без execution. Failed-prepare whitelist содержит только настоящий `isc_dsql_relation_err` с итоговой nonfatal диагностикой 42P01; explicit SQLSTATE без причины недостаточен. Syntax остаётся 42601, permission — 42501; fatal/shutdown, cancel/timeout, invalid handle, resource/I/O и unknown errors не маскируются. Полный COMMIT из E откатывает текущую работу и выдаёт ROLLBACK/I; ROLLBACK завершает её; успешный ROLLBACK TO восстанавливает T и сохраняет изменения до savepoint. ROLLBACK RETAIN также восстанавливает T, COMMIT RETAIN в E получает 25P02. Полная таблица и edge cases заданы в CODEX_CONTEXT. Факт I/T/E не обещает совпадения isolation, locks или DDL semantics с PostgreSQL.
 
@@ -229,7 +245,7 @@ EMPTY определяется ограниченным lexer только дл�
 
 Приложение и трасса — обязательная зависимость M3; серверный профиль M1 от выбора приложения не зависит. В `IMPLEMENTATION_NOTES.md` фиксируются версии приложения/драйвера/libpq, ОС, connection settings без секретов, wire operations, автоматически генерируемый SQL, типы, isolation/autocommit, reset/reuse и cancellation. Трасса определяет зависимости от будущих grammar/catalog изменений заранее.
 
-Критерий M3 — воспроизводимый сценарий конкретного приложения через PostgreSQL-драйвер по TCP с другого узла, с TLS и заявленным cancellation/session поведением. Допустимы endpoint/database/credentials и совместимый набор SQL. Изменения кода приложения или специальный режим драйвера записываются как ограничения. Если неизменённый клиент требует BEGIN/`$n`, M3 такого профиля не принимается до engine расширения; нельзя подменить его тестом autocommit/native `?` и объявить прозрачную совместимость.
+Критерий M3 — воспроизводимый сценарий конкретного приложения через PostgreSQL-драйвер по TCP с другого узла, с TLS и заявленным cancellation/session поведением. Допустимы endpoint/database/credentials и совместимый набор SQL. Изменения кода приложения или специальный режим драйвера записываются как ограничения. Если неизменённый клиент требует `$n` или другие неподдержанные формы, M3 такого профиля не принимается до engine расширения; нельзя подменить его тестом autocommit/native `?` и объявить прозрачную совместимость.
 
 `server_version` в ParameterStatus — проверяемое обещание для ветвления клиента, не версия движка и не общее обещание SQL совместимости. Значение из исторического probe проверяется на каждом заявленном клиентском профиле.
 

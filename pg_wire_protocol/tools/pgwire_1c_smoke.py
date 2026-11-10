@@ -5,6 +5,7 @@
 not acceptance. Extended examples are prepared/described without execution or
 guessed Bind values. No captured SQL, parameter DETAIL or result data is saved.
 --settings checks the fixed profiles and syntax-only startup SET compatibility.
+--begin checks PG transaction start and promotion through the existing executor.
 The external subprocess watchdog configures no server timeout.
 """
 import argparse
@@ -325,7 +326,10 @@ def client_child():
     try:
         connection = Libpq(config)
         output = {'libpq_version': connection.pq.PQlibVersion(), 'cases': []}
-        if config.get('strings'):
+        if config.get('begin'):
+            from pgwire_begin_checks import begin_client
+            output['begin'] = begin_client(config, connection)
+        elif config.get('strings'):
             from pgwire_strings_checks import strings_client
             output['strings'] = strings_client(config, connection)
         elif config.get('settings'):
@@ -552,6 +556,7 @@ class OneCHarness(StartupHarness):
             ready.close()
         self.native_probe('native_before')
         config = {'port':pg,'password':self.password,'baseline':args.baseline,'settings':args.settings,'strings':args.strings,
+                  'begin':args.begin,
                   'capture_dir':str(args.capture_dir),'libpq':args.libpq, 'native_port':native,
                   'runtime':str(self.runtime),'work':str(self.work),'timeout':self.timeout}
         client_env = {key:value for key,value in self.env.items() if not key.startswith('PG')}
@@ -562,7 +567,10 @@ class OneCHarness(StartupHarness):
         child = json.loads(result.stdout)
         self.summary['client'] = child
         require(result.returncode == 0, 'libpq child failed; see libpq.log')
-        if args.strings:
+        if args.begin:
+            from pgwire_begin_checks import begin_protocols
+            self.summary['begin_protocols'] = begin_protocols(self)
+        elif args.strings:
             from pgwire_strings_checks import strings_protocols, strings_api
             self.summary['strings_protocols'] = strings_protocols(self)
             self.summary['strings_api'] = strings_api(self)
@@ -602,6 +610,7 @@ def main():
     mode.add_argument('--strings',action='store_true',help='test standard_conforming_strings')
     mode.add_argument('--baseline',action='store_true')
     mode.add_argument('--settings',action='store_true',help='test fixed profiles and syntax-only startup settings')
+    mode.add_argument('--begin',action='store_true',help='test PG BEGIN and implicit transaction promotion')
     parser.add_argument('--libpq')
     parser.add_argument('--timeout',type=float,default=60)
     args = parser.parse_args()
@@ -620,8 +629,8 @@ def main():
     work.mkdir(mode=0o700)
     harness = OneCHarness(source,work.resolve(),args.timeout)
     harness.summary.pop('passed')
-    harness.summary.update(completed=False, mode='strings' if args.strings else 'settings' if args.settings else 'baseline' if args.baseline else 'select_without_from',
-        stage='standard_conforming_strings / revision 2' if args.strings else
+    harness.summary.update(completed=False, mode='begin' if args.begin else 'strings' if args.strings else 'settings' if args.settings else 'baseline' if args.baseline else 'select_without_from',
+        stage='PG BEGIN / native transactions' if args.begin else 'standard_conforming_strings / revision 2' if args.strings else
             'Fixed profiles and syntax-only startup settings' if args.settings else '1C observations / first engine slice',
         capture_dir=str(args.capture_dir), workers=6,
         module_sha256=hashlib.sha256((source/'plugins/libPgWire.so').read_bytes()).hexdigest(),
@@ -633,7 +642,12 @@ def main():
         ['git','diff','HEAD','--','src'],cwd=repo)).hexdigest()
     try:
         harness.prepare()
-        if args.strings:
+        if args.begin:
+            harness.isql('begin_fixture', f"CONNECT '{harness.database}';\n"
+                'CREATE TABLE BEGIN_ROWS(ID INTEGER NOT NULL PRIMARY KEY, V INTEGER);\n'
+                'GRANT SELECT, INSERT, UPDATE, DELETE ON BEGIN_ROWS TO USER WIRE_HOST_TEST;\n'
+                'GRANT CREATE SEQUENCE TO USER WIRE_HOST_TEST;\nCOMMIT;\nQUIT;\n', embedded=True)
+        elif args.strings:
             harness.isql('strings_grants', f"CONNECT '{harness.database}';\nGRANT CREATE PROCEDURE TO USER WIRE_HOST_TEST;\n"
                          "GRANT CREATE TABLE TO USER WIRE_HOST_TEST;\nCOMMIT;\nQUIT;\n", embedded=True)
         elif not args.settings and not args.baseline:
@@ -644,7 +658,9 @@ def main():
             harness.summary['compat_script_sha256'] = hashlib.sha256(compat.read_bytes()).hexdigest()
         harness.run(args)
         harness.summary['completed'] = True
-        if args.strings:
+        if args.begin:
+            harness.summary['begin_passed'] = True
+        elif args.strings:
             harness.summary['strings_passed'] = True
         elif args.settings:
             harness.summary['settings_passed'] = True

@@ -22,7 +22,7 @@ Plugin вызывает серверный host API и внутренние atta
 - M2: Extended Query lifecycle, prepared statements/portals, Bind с native `?` либо без параметров, text/binary codecs. Синтаксис `$n` сюда не входит.
 - M3: TLS, другой сетевой узел, cancellation и конкретный профиль приложения, совместимый с текущим parser. Это не заявление о работе любого PostgreSQL-приложения.
 
-M0/M1 проверяются прямым C libpq `PQexec` и psycopg2 с `autocommit=True`, без `with connection`: context manager может отправить BEGIN даже при autocommit. Обычный transactional mode psycopg2 автоматически посылает BEGIN; пока он отклоняется parser. В P5 для проверки явных транзакций прямой libpq отправляет совместимый `SET TRANSACTION`, COMMIT и ROLLBACK. Включение будущей поддержки BEGIN требует отдельного изменения parser и тестов.
+M0/M1 проверяются прямым C libpq `PQexec` и psycopg2 с `autocommit=True`, без `with connection`: context manager может отправить BEGIN даже при autocommit. Обычный transactional mode psycopg2 автоматически посылает BEGIN; отдельный PG4 этап теперь принимает его через настоящий SetTransactionNode. В P5 для проверки явных транзакций прямой libpq отправляет совместимый `SET TRANSACTION`, COMMIT и ROLLBACK. Автоматический BEGIN и connection contexts проверены положительно в новой приёмке BEGIN; исторический M0/P5 ниже не пересчитывается.
 
 ## 3. Host, plugin и конфигурация
 
@@ -125,7 +125,7 @@ EMPTY определяется ограниченным lexer только дл�
 
 ## 8. Транзакции
 
-P5 реализует PostgreSQL `I/T/E` через plugin-local control descriptor после engine prepare и реальный transaction handle; целевая Linux/Super приёмка прошла с native ограничением READ CONSISTENCY + AUTO COMMIT; целевой M1 принят в P6 с указанными исключениями. Explicit transaction начинается native `SET TRANSACTION` и получает tag BEGIN. SQL `BEGIN`, `START TRANSACTION` и `RETAINING` native parser не принимает. Допустимы `COMMIT/ROLLBACK [WORK] RETAIN [SNAPSHOT]`, `ROLLBACK [WORK] TO [SAVEPOINT] name` и `RELEASE SAVEPOINT name [ONLY]`. Результат `IStatement::execute` может создать, заменить или освободить transaction handle: возвращённый interface сохраняется до проверки status, в том числе при ошибке.
+P5 реализует PostgreSQL `I/T/E` через plugin-local control descriptor после engine prepare и реальный transaction handle; целевая Linux/Super приёмка прошла с native ограничением READ CONSISTENCY + AUTO COMMIT; целевой M1 принят в P6 с указанными исключениями. Explicit transaction начинается native `SET TRANSACTION` и получает tag BEGIN. PG4 дополнительно принимает BEGIN / BEGIN WORK / BEGIN TRANSACTION / START TRANSACTION без опций; native1/2/3 их отвергают. RETAINING остаётся неподдержанным. Допустимы `COMMIT/ROLLBACK [WORK] RETAIN [SNAPSHOT]`, `ROLLBACK [WORK] TO [SAVEPOINT] name` и `RELEASE SAVEPOINT name [ONLY]`. Результат `IStatement::execute` может создать, заменить или освободить transaction handle: возвращённый interface сохраняется до проверки status, в том числе при ошибке.
 
 **Одна PgWire session управляет не более чем одной текущей application transaction на своём attachment.** В неё входит либо implicit cycle, либо explicit transaction. Parse, Describe, prepared statements и portals не создают собственных application transactions. Prepare использует текущий handle либо NULL, при котором движок может использовать внутреннюю system transaction. Внутренние system/security/autonomous transactions не входят в этот счёт. Инвариант относится к PgWire, а не к native protocol или любому будущему plugin общего host.
 
@@ -134,7 +134,10 @@ P5 реализует PostgreSQL `I/T/E` через plugin-local control descrip
 | Состояние и операция по plugin-local descriptor после prepare | Результат |
 |---|---|
 | I + обычный исполнимый SQL | Текущий либо новый implicit сегмент до полного COMMIT/ROLLBACK или конца Query; затем I |
-| I + начало explicit transaction | Без current handle — выполнить engine control и перейти в T; при существующем implicit handle — 25001 |
+| I + native SET TRANSACTION | Без current handle — выполнить engine control и перейти в T; при существующем implicit handle — 25001 |
+| I + PG BEGIN | Без handle — исполнить SetTransactionNode (READ CONSISTENCY/READ WRITE/WAIT); с implicit handle — сохранить его вместе с предшествующей работой; перейти в T |
+| T + PG BEGIN | Сохранить handle, savepoints, portals и историю standard_conforming_strings; BEGIN без повторного start |
+| E + PG BEGIN | 25P02; это не recovery |
 | T + успешный SQL без reset/transaction effect | Та же transaction; T |
 | T + ошибка SQL | Сохранить native transaction, заблокировать обычное исполнение; E |
 | E + подготовленный обычный SQL | 25P02; не выполнять; E; ошибки prepare имеют приоритет, описанный выше |
@@ -213,7 +216,7 @@ P6 проверяет отмену через MON$STATEMENTS, завершени
 
 ## 11. Extended Query: P7 принят для Linux/Super
 
-Parse, Bind, Describe statement/portal, Execute, Close, Flush и Sync прошли целевую Linux/Super приёмку: 16 групп, см. VALIDATION. SQL Parse передаётся engine без изменений. Прямой libpq использует zero parameters либо Firebird `?`; порядок slots задаёт native metadata. PostgreSQL BEGIN и `$n` остаются parser errors до отдельного расширения движка. Grammar, public statement metadata и CLOOP для P7 не меняются. Узкий native fix в release_attachment (jrd.cpp) снимает used со всех requests attachment перед CMP_release общего Statement; исходное падение воспроизведено также через native TCP без PgWire. Отдельный ON CONNECT shutdown assertion !child не исправлялся и повторно не проверялся.
+Parse, Bind, Describe statement/portal, Execute, Close, Flush и Sync прошли целевую Linux/Super приёмку: 16 групп, см. VALIDATION. SQL Parse передаётся engine без изменений. Прямой libpq использует zero parameters либо Firebird `?`; порядок slots задаёт native metadata. BEGIN без опций теперь поддержан отдельным PG4 расширением; `$n` остаётся parser error. Grammar, public statement metadata и CLOOP для P7 не меняются. Узкий native fix в release_attachment (jrd.cpp) снимает used со всех requests attachment перед CMP_release общего Statement; исходное падение воспроизведено также через native TCP без PgWire. Отдельный ON CONNECT shutdown assertion !child не исправлялся и повторно не проверялся.
 
 - Statement хранит SQL, prepared handle и engine metadata. Bind готовит собственный native handle с тем же SQL для portal, чтобы разные cursors и bound buffers не разделяли execution state. Parse/Bind prepare используют current application transaction либо NULL/system prepare; отдельные application transactions для объектов не создаются.
 - Named statements переживают commit. Close statement и замена unnamed statement не уничтожают уже связанные portals; portal удерживает нужный statement owner. Simple Query удаляет unnamed statement и portal. Завершение transaction удаляет все portals; Sync в explicit T сохраняет portals, включая suspended cursors.
@@ -234,7 +237,7 @@ P7 принят по прямому C libpq и raw-wire, включая отри
 
 C harness прошёл sync и настоящий async/nonblocking send/get без pipeline: 20 commands/20 results, 40 poll calls; PQflush обслуживается через poll READ/WRITE, PQconsumeInput предшествует проверке PQisBusy, PQgetResult вызывается только при готовности и дренируется до NULL даже после ошибки. Named/unnamed reuse, Parse/Bind/Execute errors, E/Sync и native ROLLBACK проверяются вместе с реальным откатом записи. Внешний subprocess watchdog ограничивает тест, новых wire timers или сценариев пауз нет.
 
-Для Psycopg 3 отдельно подтверждены zero-argument SQL с autocommit=True в Simple Query и forced prepared/binary Extended Query. Native controls прошли на свежей connection с `prepare_threshold=None`: SET TRANSACTION/COMMIT/ROLLBACK, savepoint, I/T/E и failed COMMIT. Forced preparation использует отдельную connection с включённым cache. Подтверждён 42601 на стандартных `%s` → `$n`, автоматическом BEGIN и `sql.Literal(date)` → `::date`. После cached ROLLBACK драйвер послал DEALLOCATE ALL и получил 42601; настоящий rollback завершился, состояние I и следующий запрос работоспособны. Возможный DEALLOCATE ALL после DROP/ALTER установлен по исходникам, отдельно не проверен. RESET инвалидирует server objects, но не запускает cache invalidation драйвера; stale driver cache после RESET — source boundary без live проверки этого режима.
+Для Psycopg 3 отдельно подтверждены zero-argument SQL с autocommit=True в Simple Query и forced prepared/binary Extended Query. Native controls прошли на свежей connection с `prepare_threshold=None`: SET TRANSACTION/COMMIT/ROLLBACK, savepoint, I/T/E и failed COMMIT. Forced preparation использует отдельную connection с включённым cache. В историческом P9 подтверждён 42601 на стандартных `%s` → `$n`, автоматическом BEGIN и `sql.Literal(date)` → `::date`. Новый engine поддерживает BEGIN без опций; соответствующий Psycopg 3 сценарий обновлён, но live-повтор недоступен в текущем окружении. Остальные ограничения сохраняются. После cached ROLLBACK драйвер послал DEALLOCATE ALL и получил 42601; настоящий rollback завершился, состояние I и следующий запрос работоспособны. Возможный DEALLOCATE ALL после DROP/ALTER установлен по исходникам, отдельно не проверен. RESET инвалидирует server objects, но не запускает cache invalidation драйвера; stale driver cache после RESET — source boundary без live проверки этого режима.
 
 Целевой M2 Linux/Super принят по live PASS прямого libpq и обязательных raw-wire случаев с совместимым native SQL, без rewriting. Регрессии Simple Query, transactions, startup/server, P8 codecs и native baseline также прошли; результаты — в VALIDATION. Успех ограниченного Psycopg режима не расширяет parser и не является общей гарантией driver/application compatibility. Следующий этап — P10.
 
@@ -252,7 +255,7 @@ Python suite мигрирован под текущий контракт: 58 liv
 
 ## 13. M3 и будущая SQL совместимость
 
-Приложение и версии драйвера выбираются для M3; серверная приёмка M1 не зависит от этого выбора. Трасса фиксирует startup options, query paths, типы/форматы, автоматически генерируемый SQL, transaction controls, catalogs и cancellation. Если профиль требует BEGIN, `$n` или другую PostgreSQL-конструкцию, это зависимость отдельного будущего engine этапа; её нельзя скрыть специальным режимом клиента.
+Приложение и версии драйвера выбираются для M3; серверная приёмка M1 не зависит от этого выбора. Трасса фиксирует startup options, query paths, типы/форматы, автоматически генерируемый SQL, transaction controls, catalogs и cancellation. Если профиль требует `$n` или другую неподдержанную PostgreSQL-конструкцию, это зависимость отдельного будущего engine этапа; её нельзя скрыть специальным режимом клиента.
 
 M3 проверяет явно настроенный удалённый endpoint и TLS upgrade через SSLRequest в том же plugin. Выбор TLS-библиотеки и build/packaging dependency принимается в P0. Native WireCrypt не шифрует PG stream; Srp256 не означает PostgreSQL SCRAM support.
 

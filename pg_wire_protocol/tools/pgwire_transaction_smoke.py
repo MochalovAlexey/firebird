@@ -232,7 +232,7 @@ QUIT;
             ('SELECT * FROM P5_MISSING_TABLE', '25P02'),
             ('SELECT P5_MISSING_COLUMN FROM P5_ROWS', '42703'),
             ('SELECT * FROM P5_SECRET', '42501'),
-            ('SELECT', '42601'), ('BEGIN', '42601'), ('COMMIT RETAINING', '42601'),
+            ('SELECT', '42601'), ('BEGIN', '25P02'), ('COMMIT RETAINING', '42601'),
             ('SAVEPOINT P5_LATER', '25P02'), ('RELEASE SAVEPOINT P5_POINT', '25P02'),
             ('COMMIT RETAIN', '25P02'), ('ALTER SESSION RESET', '25P02')]:
             self.sql(client, sql, 'E', error=error)

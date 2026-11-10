@@ -43,6 +43,37 @@ assertion в exe.cpp:1351, подтверждённый review также на �
 не подтверждает этот сценарий.
 
 
+## Подэтап 1С: PG BEGIN без options
+
+`pgwire_1c_smoke.py --begin` использует прежние libpq/raw clients и native isql
+observer. Набор изолирован от полного baseline 1С, исходный 09-begin.sql неизменён.
+
+- BEGIN / BEGIN WORK / BEGIN TRANSACTION / START TRANSACTION, case/comments:
+  tag BEGIN, T; observer подтверждает одну transaction, READ CONSISTENCY (4),
+  READ WRITE, WAIT (-1), AUTO COMMIT=0, AUTO UNDO=1.
+- INSERT/UPDATE/DELETE, commit/rollback/disconnect/EOF: проверяется native visibility;
+  второй PG connection фиксирует UPDATE, новый SELECT в BEGIN видит новое значение,
+  native SET TRANSACTION без опций сохраняет SNAPSHOT и старое значение.
+- INSERT перед BEGIN в Simple и Extended до Sync: тот же ID/handle, без скрытого
+  commit; общий rollback отменяет предшествующую работу, commit делает её видимой.
+- Повтор BEGIN сохраняет savepoint/ID/данные; SET TRANSACTION повторно — 25001/E,
+  BEGIN в E — 25P02. Ошибка останавливает Simple script; ранний COMMIT сохраняется.
+- SET string mode перед BEGIN с handle и без него: история сохраняется при promotion,
+  повторе и savepoint recovery; rollback/ошибка восстанавливают прежнее значение.
+- Named Parse/Bind не открывают block, Execute открывает; Sync оставляет T,
+  повторное prepared исполнение после rollback успешно. Suspended portal продолжает
+  чтение после BEGIN/Sync; ошибки сохраняют discard-until-Sync.
+- Native1/2/3: после каждой отвергнутой формы AUTOTERM исполняет следующий SELECT;
+  PSQL BEGIN/END, DDL START WITH и SNAPSHOT SET TRANSACTION работают. Неподдержанные
+  options дают окончательную syntax error без частичного start.
+- psql AUTOCOMMIT off и psycopg2 default/context генерируют рабочий BEGIN.
+  Psycopg 3 ожидание обновлено; отсутствие клиента фиксируется отдельно, не как PASS.
+
+Регрессии: classifier, SessionTest, isql, --settings/--strings, transaction,
+Extended и Simple/libpq; изменённые psycopg2 acceptance tests запускаются существующим
+ServerHarness. Parser baseline 154/11, команды/бинарники/фактические результаты —
+в VALIDATION. Известные native crash repro не включаются.
+
 ## Подэтап 1С: фиксированные профили и временные startup SET
 
 `pgwire_1c_smoke.py --settings` проверяет английский/UTF8 профиль, исходный запрос
@@ -120,7 +151,7 @@ PostgreSQL SET или фактического запуска 1С.
 | M2 | Extended Query, prepared statements/portals, native placeholders и расширенные codecs |
 | M3 | TLS/удалённый TCP/cancellation и проверенный профиль приложения с явными SQL dependencies |
 
-BEGIN/START TRANSACTION/RETAINING/$n и SQL, который parser пока не поддерживает, не входят в успешный profile. Native retaining проверяется через `COMMIT/ROLLBACK [WORK] RETAIN [SNAPSHOT]`. Прежние M0/P3 результаты и SELECT-only guards являются историей в VALIDATION; текущие RETURNING/blocks проверяются положительно при поддержанных metadata. Удалённый native metadata executable не является зависимостью harness.
+RETAINING/$n и SQL, который parser пока не поддерживает, не входят в успешный profile. Native retaining проверяется через `COMMIT/ROLLBACK [WORK] RETAIN [SNAPSHOT]`. Прежние M0/P3 результаты и SELECT-only guards являются историей в VALIDATION; текущие RETURNING/blocks проверяются положительно при поддержанных metadata. Удалённый native metadata executable не является зависимостью harness.
 
 Минимальные серверные gates сохраняются независимо от внутреннего способа classification:
 
@@ -258,7 +289,7 @@ Startup SQLSTATE проверять raw ErrorResponse field `C`: `psycopg2.conne
 | W06 | Native keepalive/crypt/compression и parallel sessions | PG stream не получает native bytes; framing/auth/SQL state разных sessions независимы |
 | W07 | Байты SQL на входе и в parser | Code review неизменной передачи bytes/length исходных диапазонов команд и TCP fixtures для comments, quotes, semicolons, whitespace и UTF8; wire frontend не нормализует и не переписывает SQL |
 | W08 | EMPTY и malformed SQL | Исходный SQL проходит engine prepare; только tokenless closed-comments/whitespace + syntax 42601 даёт EMPTY. Незаконченные tokens, vertical tab и отдельный `;` остаются errors; non-syntax errors сохраняются |
-| W09 | `BEGIN`, `START TRANSACTION`, `COMMIT RETAINING`, `$1`, `::date` и похожие tokens внутри literals/comments | Engine syntax errors в неподдержанных позициях; внутри literals/comments смысл определяет parser. Ошибка в T переводит в E; в E syntax сохраняет 42601. Native RETAIN [SNAPSHOT] проверяется положительно, frontend replacement отсутствует |
+| W09 | `BEGIN READ ONLY`, `START TRANSACTION ISOLATION LEVEL SERIALIZABLE`, `COMMIT RETAINING`, `$1`, `::date` и похожие tokens внутри literals/comments | Engine syntax errors в неподдержанных позициях; внутри literals/comments смысл определяет parser. Ошибка в T переводит в E; в E syntax сохраняет 42601. Native RETAIN [SNAPSHOT] проверяется положительно, frontend replacement отсутствует |
 | W10 | Несколько statements в одном Query/Parse | Simple Query последовательно исполняет команды и прекращает остаток при первой окончательной ошибке по таблице выше. Нет предварительной проверки всего Query: ранний COMMIT сохраняется и при поздней syntax error. Extended Parse отвергает несколько statements |
 | W11 | Native callers и isql -autoterm | Штатные parser diagnostics, continuation и trace не меняются; PgWire не добавляет public EMPTY marker или metadata API |
 
@@ -335,7 +366,7 @@ P8 прошёл целевую Linux/Super приёмку: восемь груп
 | E07 | Sync внутри native explicit transaction, Simple/Extended switching | T и suspended portals сохраняются через Sync; transaction end удаляет portals, named statement остаётся; ошибка сохраняет transaction/E с инвалидированными portals |
 | E08 | C libpq 14.24 sync/async без pipeline | PQsendPrepare/DescribePrepared/QueryParams/QueryPrepared; PQflush + poll READ/WRITE + PQconsumeInput + PQisBusy перед каждым PQgetResult; полный drain до NULL и PQclear всех результатов. Named/unnamed reuse, Parse42601/Bind22003/Execute22012, recovery, explicit T→E→25P02→ROLLBACK/I и настоящий rollback эффекта |
 | E09 | Limits, EOF/shutdown с prepared objects и suspended portal | 128 statements, 128 portals, 8 MiB учитываемых SQL/metadata/buffers; при отказе нет частично опубликованного object; закрываются handles/cursors, module lifetime сохраняется |
-| E10 | Psycopg 3.3.6: `%s` → `$n` и automatic BEGIN | Ожидаемый 42601 и дальнейшее recovery; positive zero-argument profile не доказывает обычную parameterized/transactional совместимость |
+| E10 | Psycopg 3: `%s` → `$n` и automatic BEGIN | `$n` остаётся 42601; BEGIN без опций ожидается успешным с T и rollback→I. Сценарий обновлён, новый live-повтор Psycopg 3 недоступен; parameterized compatibility не заявляется |
 | E11 | Несколько Parse/Describe/statements/portals перед ALTER SESSION RESET | Prepare использует текущую application transaction либо NULL/system prepare; собственных transactions у prepared objects нет. RESET не получает ошибку из-за скрытой prepare-transaction, корректно заменяет текущую transaction, инвалидирует все statements/portals, включая same-pointer native reset; следующий запрос работает |
 
 ### Дополнение P9: целевой M2 Linux/Super PASS
@@ -350,7 +381,7 @@ P8 прошёл целевую Linux/Super приёмку: восемь груп
 | P9-04 | Prepared cache, затем ROLLBACK; source boundaries DROP/ALTER/RESET | Подтверждённый negative case: после завершённого ROLLBACK драйвер посылает DEALLOCATE ALL и получает 42601; состояние I и следующий запрос работают. DROP/ALTER cache clear и RESET stale cache отдельно live не проверялись |
 | P9-05 | C/raw-wire compatible SQL и регрессии P8/M1 | PASS выбранной целевой матрицы: M2 принят; SQL неизменённый, `$n`/BEGIN negative cases сохранены, driver versions и cleanup подтверждены |
 
-Дополнительно live подтверждены три syntax boundaries с 42601: автоматический BEGIN, `%s` → `$n` и `sql.Literal(date)` → `::date`. Prepared trace содержит Parse 6, Bind/Execute по 9, Sync 19 и Close 4; одного Simple Query для этого результата недостаточно. В `prepare_threshold=None` даже forced prepare=True отключён, поэтому P9-02 и P9-03 используют разные connections. Реальный event loop E08 не добавляет внутренних deadline/pause tests; тестовый subprocess ограничен существующим внешним watchdog.
+В исторической приёмке P9 live подтверждены три syntax boundaries с 42601: автоматический BEGIN, `%s` → `$n` и `sql.Literal(date)` → `::date`. Prepared trace содержит Parse 6, Bind/Execute по 9, Sync 19 и Close 4; одного Simple Query для этого результата недостаточно. В `prepare_threshold=None` даже forced prepare=True отключён, поэтому P9-02 и P9-03 используют разные connections. Реальный event loop E08 не добавляет внутренних deadline/pause tests; тестовый subprocess ограничен существующим внешним watchdog.
 
 После отдельной поддержки `$n` в parser добавить repeated/reordered indices, gaps/overflow, references в literals/comments и обычный Psycopg 3 Cursor с переходом к named preparation. Эти проверки обязательны для будущего заявления о таком клиенте. ClientCursor и клиентская подстановка не заменяют Extended Query. Pipeline и COPY требуют самостоятельных матриц, если входят в профиль приложения.
 
@@ -389,7 +420,7 @@ P8 прошёл целевую Linux/Super приёмку: восемь груп
 
 ## Миграция Python scaffold
 
-Миграция выполнена, 58 cases прошли live; результат записан в VALIDATION. По сравнению с исходными 56 cases default connection стал autocommit, explicit transactions используют native SET TRANSACTION/COMMIT/ROLLBACK. Driver-generated BEGIN и connection context проверяются отрицательно. RETURNING проверяется положительно, а unsupported output — отдельным отказом до side effects. Scalar/CRUD/errors/permissions/native roundtrip сохранены; `::date` остаётся parser dependency.
+Миграция выполнена, 58 cases прошли live; результат записан в VALIDATION. По сравнению с исходными 56 cases default connection стал autocommit, explicit transactions используют native SET TRANSACTION/COMMIT/ROLLBACK. В исходной миграции driver-generated BEGIN и connection context проверялись отрицательно. Этап PG BEGIN переводит оба случая в положительные проверки SELECT/DML/commit/rollback; новая приёмка записана отдельно в VALIDATION. RETURNING проверяется положительно, а unsupported output — отдельным отказом до side effects. Scalar/CRUD/errors/permissions/native roundtrip сохранены; `::date` остаётся parser dependency.
 
 Skip/xfail не заменяют приёмку; отсутствие обязательного сервера или fixture — ошибка. Будущие Extended Query/parser-dependent client profiles относятся к следующим этапам.
 

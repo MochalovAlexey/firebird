@@ -67,7 +67,8 @@ int main(void)
     command(connection, "COMMIT", "COMMIT", PQTRANS_IDLE);
     command(connection, "ROLLBACK", "ROLLBACK", PQTRANS_IDLE);
     error(connection, "COMMIT RETAIN", "25000", PQTRANS_IDLE);
-    error(connection, "BEGIN", "42601", PQTRANS_IDLE);
+    command(connection, "BEGIN", "BEGIN", PQTRANS_INTRANS);
+    command(connection, "ROLLBACK", "ROLLBACK", PQTRANS_IDLE);
     command(connection, "SET TRANSACTION READ WRITE READ COMMITTED NO WAIT", "BEGIN", PQTRANS_INTRANS);
     command(connection, "INSERT INTO P5_ROWS VALUES(901,1)", "INSERT 0 1", PQTRANS_INTRANS);
     command(connection, "SAVEPOINT C_POINT", "SAVEPOINT", PQTRANS_INTRANS);

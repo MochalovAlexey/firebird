@@ -4,8 +4,8 @@ Reference client: psycopg2-binary 2.9.11, libpq 17.6, ordinary synchronous
 cursor, Simple Query protocol 3.0, UTF8, Firebird SQL dialect 3.  Expectations
 use autocommit mode so the driver sends compatible SQL unchanged. Explicit
 transactions use native SET TRANSACTION and SQL COMMIT/ROLLBACK. Driver-generated
-BEGIN is tested as an unsupported parser dependency, including connection
-contexts. This module complements raw wire, host and resource lifecycle tests.
+PG BEGIN is supported, including connection contexts. This module complements
+raw wire, host and resource lifecycle tests.
 
 Only disposable PGW_T_<uuid> tables are created.  Use a dedicated test database
 and accounts.  Missing configuration is an error, not a skipped test.  Runtime
@@ -171,12 +171,13 @@ def test_connect_and_select_metadata(pg_connect):
         assert conn.get_transaction_status() == extensions.TRANSACTION_STATUS_IDLE
 
 
-def test_driver_generated_begin_is_rejected(pg_connect):
+def test_driver_generated_begin(pg_connect):
     with pg_connect(autocommit=False) as conn:
         with conn.cursor() as cur:
-            with pytest.raises(psycopg2.Error) as error:
-                cur.execute('SELECT CAST(42 AS INTEGER) FROM RDB$DATABASE')
-            assert error.value.pgcode == "42601"
+            cur.execute('SELECT CAST(42 AS INTEGER) FROM RDB$DATABASE')
+            assert cur.fetchone() == (42,)
+        assert conn.get_transaction_status() == extensions.TRANSACTION_STATUS_INTRANS
+        conn.rollback()
         assert conn.get_transaction_status() == extensions.TRANSACTION_STATUS_IDLE
         conn.autocommit = True
         _assert_usable(conn)
@@ -481,17 +482,23 @@ def test_repeated_connections(pg_connect):
             assert conn.get_transaction_status() == extensions.TRANSACTION_STATUS_IDLE
 
 
-def test_connection_context_generated_begin_is_rejected(pg_connect, table):
+def test_connection_context_generated_begin(pg_connect, table):
     with pg_connect(autocommit=True) as conn, pg_connect(autocommit=True) as observer:
         # Since psycopg2 2.9, this context starts a transaction even in autocommit.
-        with pytest.raises(psycopg2.Error) as error:
-            with conn:
-                with conn.cursor() as cur:
-                    cur.execute(f"INSERT INTO {table} (ID) VALUES (1)")
-        assert error.value.pgcode == "42601"
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(f"INSERT INTO {table} (ID) VALUES (1)")
+            assert conn.get_transaction_status() == extensions.TRANSACTION_STATUS_INTRANS
+            assert _rows(observer, f"SELECT ID FROM {table}") == []
         assert not conn.closed
         assert conn.get_transaction_status() == extensions.TRANSACTION_STATUS_IDLE
-        assert _rows(observer, f"SELECT ID FROM {table}") == []
+        assert _rows(observer, f"SELECT ID FROM {table}") == [(1,)]
+        with pytest.raises(RuntimeError, match="rollback context"):
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute(f"INSERT INTO {table} (ID) VALUES (2)")
+                raise RuntimeError("rollback context")
+        assert _rows(observer, f"SELECT ID FROM {table}") == [(1,)]
         _assert_usable(conn)
 
 

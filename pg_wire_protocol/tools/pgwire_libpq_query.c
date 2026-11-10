@@ -116,7 +116,16 @@ int main(void)
         "table data was not fetched");
     PQclear(result);
     error(connection, "not SQL", "42601");
-    error(connection, "BEGIN", "42601");
+    result = PQexec(connection, "BEGIN");
+    require(result && PQresultStatus(result) == PGRES_COMMAND_OK &&
+        strcmp(PQcmdStatus(result), "BEGIN") == 0 && PQtransactionStatus(connection) == PQTRANS_INTRANS,
+        "BEGIN did not open an explicit block");
+    PQclear(result);
+    result = PQexec(connection, "ROLLBACK");
+    require(result && PQresultStatus(result) == PGRES_COMMAND_OK &&
+        strcmp(PQcmdStatus(result), "ROLLBACK") == 0 && PQtransactionStatus(connection) == PQTRANS_IDLE,
+        "ROLLBACK did not finish the explicit block");
+    PQclear(result);
     error(connection, "SELECT $1 FROM RDB$DATABASE", "42601");
     error(connection, "SELECT CAST('x' AS VARCHAR(1)) FROM RDB$DATABASE", "0A000");
     PQfinish(connection);

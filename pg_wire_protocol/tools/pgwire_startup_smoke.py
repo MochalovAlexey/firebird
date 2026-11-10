@@ -251,7 +251,7 @@ def libpq_child():
     try:
         require(library.PQstatus(connection) == 0, "libpq startup failed")
         require(library.PQprotocolVersion(connection) == 3, "libpq protocol version mismatch")
-        for sql in (b'SELECT CAST(6 * 7 AS INTEGER) AS "answer" FROM RDB$DATABASE', b"BEGIN", b"not SQL"):
+        for sql in (b'SELECT CAST(6 * 7 AS INTEGER) AS "answer" FROM RDB$DATABASE', b"BEGIN READ ONLY", b"not SQL"):
             result = library.PQexec(connection, sql)
             require(result, "libpq did not allocate a result")
             try:
@@ -459,7 +459,7 @@ QUIT;
                 "plaintext PG connection reported encryption")
         self.native_probe("native_with_pg_identities")
         first.query_integer()
-        for text in (b"BEGIN", b"not SQL", b"SELECT $1 FROM RDB$DATABASE"):
+        for text in (b"BEGIN READ ONLY", b"not SQL", b"SELECT $1 FROM RDB$DATABASE"):
             first.query_error(text, "42601")
             first.query_integer()
         second.send(packet(b"Q", b"SELECT CAST(1 AS INTEGER) FROM RDB$DATABASE\0") +

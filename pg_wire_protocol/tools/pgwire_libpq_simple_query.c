@@ -123,7 +123,16 @@ int main(void)
     }
     sql_error(connection, "/* unfinished", "42601");
     sql_error(connection, "'unfinished", "42601");
-    sql_error(connection, "BEGIN", "42601");
+    result = PQexec(connection, "BEGIN");
+    require(result && PQresultStatus(result) == PGRES_COMMAND_OK &&
+        strcmp(PQcmdStatus(result), "BEGIN") == 0 && PQtransactionStatus(connection) == PQTRANS_INTRANS,
+        "BEGIN did not open an explicit block");
+    PQclear(result);
+    result = PQexec(connection, "ROLLBACK");
+    require(result && PQresultStatus(result) == PGRES_COMMAND_OK &&
+        strcmp(PQcmdStatus(result), "ROLLBACK") == 0 && PQtransactionStatus(connection) == PQTRANS_IDLE,
+        "ROLLBACK did not finish the explicit block");
+    PQclear(result);
     PQfinish(connection);
     printf("{\"libpq_version\":%d,\"compile_header_version\":%d,\"protocol\":3,"
            "\"types\":[16,1042,1043,1700],\"dml_ddl_returning_empty\":true}\n", PQlibVersion(), PG_VERSION_NUM);

@@ -378,6 +378,8 @@ SqlInfo inspectSql(std::string_view sql, bool standardStrings)
 		return command("COMMENT");
 	if (first.is("COMMIT"))
 		return endTransaction(prefix, true);
+	if (first.is("BEGIN") || (first.is("START") && prefix.next().is("TRANSACTION")))
+		return controlCommand("BEGIN", ControlKind::PgStart);
 	if (first.is("ROLLBACK"))
 		return endTransaction(prefix, false);
 	if (first.is("SAVEPOINT"))
@@ -431,7 +433,7 @@ SqlInfo inspectSql(std::string_view sql, bool standardStrings)
 		tag += name;
 		return command(std::move(tag));
 	}
-	// Includes PostgreSQL-only BEGIN/START/RESET and native USING wrappers.
+	// Includes unsupported RESET and native USING wrappers.
 	return {};
 }
 

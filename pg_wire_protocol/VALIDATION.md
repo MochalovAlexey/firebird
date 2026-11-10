@@ -1,5 +1,141 @@
 # Проверки реализации
 
+## 10 ноября 2026: PG BEGIN через штатные транзакции
+
+Выполнено [BEGIN_TASK.md](1c/BEGIN_TASK.md) на базе
+`1f9af20db4bbf9022d0eb791bfa5db4f085f4836`. Изменения оставлены на review;
+git add/commit/amend/reset/checkout не выполнялись. Три ignored startup SET
+сохраняют прежний контракт без эффекта; следующие этапы не начинались.
+
+Production diff ограничен четырьмя файлами: parse.y, SqlInfo.h/.cpp, Execute.cpp.
+Новая корневая PG4 production создаёт прежний SetTransactionNode с isoLevel
+READ_COMMITTED_READ_CONSISTENCY, readOnly=false и wait=true; прочие TPB options
+не заданы. Native SET TRANSACTION/default SNAPSHOT не меняется. Guard вызывает
+штатный yyerror_detailed с token error; позднего YYERROR и нового lexer gate нет.
+Сгенерированный parse.cpp подтверждает: guard исполняется и в trial, а создание
+node — только под `if (!yytrial)`. Parser baseline остаётся **154/11**.
+
+Один приватный PgStart классифицирует BEGIN/START TRANSACTION; оба вида start
+проверяются через прежний isc_info_sql_stmt_start_trans. Общий control() при
+существующем handle сохраняет его и переводит I→T либо оставляет T. Без handle
+выполняется подготовленный engine start. E блокируется прежним 25P02 до control().
+Новых API/ABI, AST nodes, attachment fields, истории, конфигурации, rewriting или
+зависимостей нет. Portals/savepoints/string history не сбрасываются при promotion.
+
+### Baseline и проверенные эффекты
+
+На сохранённых бинарниках коммита `1f9af20db4` исходный `09-begin.sql` дал
+**42601/I**, затем recovery SELECT успешен. Отчёт:
+`/tmp/firebird-pgwire-begin-baseline-02/summary.json`, сервер exit 0.
+Engine14/PgWire SHA совпадают с приёмкой ignored SET ниже. SHA исходного запроса:
+`bb93df2c6b017c587ca5880bb37f85fbe6a5c95e2fcdd6d2f40257fd926162bb`.
+
+Первый baseline-probe (`begin-baseline-01`) не дождался готовности listener:
+connection refused, SQL ещё не проверялся, остановка сервера до инициализации
+не прошла clean-shutdown assertion harness. Во втором probe использовано
+прежнее Client.login с ожиданием готовности; старые модули взяты из первого
+частного runtime. Это исправление запуска probe, не production-кода.
+
+Итоговый `--begin` расширяет существующий 1c harness; функции проверок вынесены
+в pgwire_begin_checks.py по образцу strings checks. Использованы прежние Libpq,
+ExtendedClient и native Harness.isql, без нового клиента/framework.
+
+| Проверка | Результат |
+|---|---|
+| Все четыре формы, case/comments, неизменённый capture | BEGIN/T; native observer видит одну transaction, isolation=4, read-only=0, lock timeout=-1 (WAIT), auto-commit=0, auto-undo=1 |
+| INSERT/UPDATE/DELETE, COMMIT/ROLLBACK | Незавершённые изменения невидимы native observer; commit публикует их, rollback отменяет |
+| Два соединения | После commit UPDATE второго соединения следующий SELECT в PG BEGIN видит новое значение; native SET TRANSACTION без опций сохраняет старое значение и isolation=1 (SNAPSHOT) |
+| Simple promotion | INSERT/SELECT ID до BEGIN и SELECT ID после — один ID; observer видит ровно этот handle; rollback отменяет и раннюю вставку, commit публикует её |
+| Повтор / E | Повтор четырёх форм в T сохраняет ID/savepoint; rollback-to и rollback отменяют ожидаемые строки. Native повтор SET TRANSACTION — 25001/E; BEGIN в E — 25P02 |
+| Simple script | Ранний COMMIT сохраняется, последующий implicit INSERT откатывается при 22012, остаток не выполняется; BEGIN; error; ROLLBACK оставляет E |
+| Строковая история | SET off до BEGIN с DML и без native handle, повтор BEGIN, ошибка/rollback/savepoint recovery сохраняют исходную историю |
+| Extended | Named Parse/Bind оставляют I и ноль transactions; Execute/Sync — T; reuse после rollback. DML→BEGIN до Sync сохраняет ID и видимость. Suspended SELECT portal продолжает чтение после promotion/Sync; discard-until-Sync сохранён |
+| Disconnect | Libpq close и отдельный raw TCP EOF без Terminate откатывают открытый PG BEGIN; после cleanup ноль transactions, строки отсутствуют |
+| Native1/2/3 | Четыре формы дают 42000; SELECT непосредственно после каждой ошибки AUTOTERM выполняется. PSQL BEGIN/END, DDL START WITH и native SNAPSHOT сохранены |
+| Options | ISOLATION LEVEL, READ ONLY/WRITE, DEFERRABLE и лишние слова дают 42601; native observer подтверждает отсутствие частичного start |
+| psql / psycopg2 | psql 18.6 с AUTOCOMMIT off выполняет SELECT/DML/ROLLBACK; обновлённые driver-generated BEGIN и context commit/rollback проходят в pytest |
+
+### Сборка и регрессии
+
+Linux x86-64, GCC 13.4.0, Python 3.10.12, прежний developer/Debug configure с
+builtin tommath/tomcrypt; C libpq 14.24, системный psycopg2 2.9.2.
+
+| Прогон | Фактический результат / work-dir в /tmp |
+|---|---|
+| Full make / unit build | PASS; build-dir: begin-build-01.log, begin-unit-build-01.log |
+| Classifier / SessionTest / isql | **575 checks / 5 scenarios / 13 cases PASS**; begin-units.json |
+| 1c --begin | **PASS, 88 libpq queries, 43 native observations**, плюс raw/native/psql; firebird-pgwire-begin-02 |
+| 1c --settings | **PASS, 190 queries** и прежний полный startup batch; firebird-pgwire-begin-settings-01 |
+| 1c --strings | **PASS, 156 queries, 350 OO API checks** и raw/source regressions; firebird-pgwire-begin-strings-01 |
+| Transaction | **PASS, 14 групп**, включая C libpq/E/25P02/native controls; firebird-pgwire-begin-transactions-01 |
+| Extended | **PASS, 16 групп**, включая C PQexecParams BEGIN/T/ROLLBACK; firebird-pgwire-begin-extended-01 |
+| Simple | **PASS, 12 групп**, включая C libpq BEGIN/T/ROLLBACK; firebird-pgwire-begin-simple-01 |
+| Driver acceptance | **58 pytest cases PASS, 24.31 s** через существующий ServerHarness.driver_acceptance; firebird-pgwire-begin-driver-01 |
+| Статические проверки | Python AST, git diff --check и strict C syntax check старого pgwire_libpq_query.c PASS |
+
+Все серверы итоговых прогонов завершились **exit 0, forced_kill=false**.
+Первый `begin-01` также PASS; финальный `begin-02` добавляет отдельный EOF case.
+Перед transaction-прогоном уточнён устаревший путь libpq headers, перед Simple —
+обязательный --driver-python; оба CLI отказа произошли до запуска runtime.
+Настоящие PASS/FAIL прежних этапов ниже не заменены.
+
+Команды сборки и целевых запусков:
+
+```sh
+cd /tmp/firebird-pgwire-1c-build
+make -j2 > begin-build-01.log 2>&1
+make -C gen -j2 TARGET=Debug pgwire_tests > begin-unit-build-01.log 2>&1
+LD_LIBRARY_PATH=gen/Debug/firebird/lib gen/Debug/firebird/tests/pgwire_sql_test
+LD_LIBRARY_PATH=gen/Debug/firebird/lib gen/Debug/firebird/tests/pgwire_session_test
+LD_LIBRARY_PATH=gen/Debug/firebird/lib gen/Debug/firebird/tests/isql_test --log_level=message
+
+cd /home/aleksey/dev/my_firebird/firebird
+python3 -B pg_wire_protocol/tools/pgwire_1c_smoke.py --begin \
+  --firebird-dir /tmp/firebird-pgwire-1c-build/gen/Debug/firebird \
+  --work-dir /tmp/firebird-pgwire-begin-02 \
+  --capture-dir /home/aleksey/dev/1c/captures/20261109T105635Z \
+  --libpq /lib/x86_64-linux-gnu/libpq.so.5
+# --settings и --strings: та же команда с соответствующим флагом и новым work-dir из таблицы.
+python3 -B pg_wire_protocol/tools/pgwire_transaction_smoke.py \
+  --firebird-dir /tmp/firebird-pgwire-1c-build/gen/Debug/firebird \
+  --work-dir /tmp/firebird-pgwire-begin-transactions-01 \
+  --libpq-include-dir /tmp/firebird-pgwire-1c-deps/libpq-dev/usr/include/postgresql \
+  --libpq-library /lib/x86_64-linux-gnu/libpq.so.5
+python3 -B pg_wire_protocol/tools/pgwire_extended_query_smoke.py \
+  --firebird-dir /tmp/firebird-pgwire-1c-build/gen/Debug/firebird \
+  --work-dir /tmp/firebird-pgwire-begin-extended-01 \
+  --libpq-include-dir /tmp/firebird-pgwire-1c-deps/libpq-dev/usr/include/postgresql \
+  --libpq-library /lib/x86_64-linux-gnu/libpq.so.5
+python3 -B pg_wire_protocol/tools/pgwire_simple_query_smoke.py \
+  --firebird-dir /tmp/firebird-pgwire-1c-build/gen/Debug/firebird \
+  --work-dir /tmp/firebird-pgwire-begin-simple-01 \
+  --libpq-include-dir /tmp/firebird-pgwire-1c-deps/libpq-dev/usr/include/postgresql \
+  --libpq-library /lib/x86_64-linux-gnu/libpq.so.5 --driver-python /usr/bin/python3
+python3 -B /tmp/firebird-pgwire-begin-driver-check.py
+```
+
+Driver probe вызывает только prepare/start_phase/driver_acceptance/close прежнего
+ServerHarness; весь P6 server suite заново пройденным не объявляется.
+Для повторного запуска всегда выбирать новые work-dir.
+
+SHA256 `git diff HEAD -- src`:
+`a1077950ff040246be9685b1c6ab0326a012a45a1d2c738da899cf5acb168bd8`.
+Engine14: `c0832e0b14dd5513a25ccff22c772c3dc9240d950d4a31ed0f3ca20f791f2304`;
+PgWire: `56302018b7cec2c643d90e99570f56bbdee1c795b8bfcd730ae07a2830244ced`.
+Новый checks module: `719b0cc908c8b16ea4e7e42cd25253a13870e269c07e337bf1d551d8f6bc5516`.
+Отчёт модулей/DT_NEEDED: `/tmp/firebird-pgwire-1c-build/begin-modules.json`;
+зависимости совпадают с baseline. Summary каждого runtime хранит результаты и exit.
+
+Psycopg 3 в текущем окружении отсутствует, прежний /tmp venv недоступен:
+default autocommit=false сценарий обновлён на BEGIN/T/rollback/I, проверен AST,
+но новый live PASS не заявляется. Отрицательные `$n`/`::`/DEALLOCATE ALL сохранены.
+Прежние BEGIN-negative ожидания актуальных C/Python suites заменены положительными
+или действительно ошибочной формой BEGIN READ ONLY; исторические P3/P9 результаты
+не пересчитываются. Полный startup suite/P3/P9, Windows/CMake, известные native
+crash repro и база 1С/Гилёв не запускались. Работающий сервер и базы пользователя
+не затрагивались. Реальные эффекты ignored SET, остальные PG transaction options
+и полная эквивалентность concurrent DML PostgreSQL остаются за границей этапа.
+
 ## 10 ноября 2026: временный синтаксический приём трёх startup SET
 
 Выполнено [IGNORED_STARTUP_SETTINGS_TASK.md](1c/IGNORED_STARTUP_SETTINGS_TASK.md)

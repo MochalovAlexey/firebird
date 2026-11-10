@@ -31,6 +31,7 @@ enum class ControlKind
 {
 	None,
 	Start,
+	PgStart,
 	Commit,
 	Rollback,
 	CommitRetaining,

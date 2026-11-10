@@ -263,7 +263,10 @@ int main(void)
     PQclear(r);
     asynchronous(c, sql, explicit_types, values);
     error(c,PQexecParams(c,"SELECT $1 FROM RDB$DATABASE",1,NULL,&values[1],NULL,NULL,0),"42601",PQTRANS_IDLE);
-    error(c,PQexecParams(c,"BEGIN",0,NULL,NULL,NULL,NULL,0),"42601",PQTRANS_IDLE);
+    r = checked(c,PQexecParams(c,"BEGIN",0,NULL,NULL,NULL,NULL,0),PGRES_COMMAND_OK,"BEGIN"); PQclear(r);
+    require(PQtransactionStatus(c) == PQTRANS_INTRANS, "Extended BEGIN did not open a block");
+    r = checked(c,PQexec(c,"ROLLBACK"),PGRES_COMMAND_OK,"ROLLBACK"); PQclear(r);
+    require(PQtransactionStatus(c) == PQTRANS_IDLE, "ROLLBACK did not finish the block");
     r = checked(c,PQexec(c,"SET TRANSACTION READ WRITE READ COMMITTED NO WAIT"),PGRES_COMMAND_OK,"BEGIN"); PQclear(r);
     r = checked(c,PQexecPrepared(c,"c_values",6,values,NULL,NULL,0),PGRES_TUPLES_OK,"SELECT 1"); PQclear(r);
     require(PQtransactionStatus(c) == PQTRANS_INTRANS, "Extended Sync ended explicit transaction");

@@ -8,7 +8,7 @@
 
 По решению пользователя реализован [синтаксический приём enable_mergejoin, cpu_operator_cost и lock_timeout](1c/IGNORED_STARTUP_SETTINGS_TASK.md): успешный SET без изменения или сохранения значения. Один внутренний Type существующего SetPgSessionNode, штатные scalar/numeric rules и классификатор SET; API, состояние, история и зависимости не расширены. Это исключение только для трёх имён: реальные эффекты optimizer/lock settings отложены, lock_timeout=20000 не задаёт 20 секунд. Полный исходный startup batch принимается с семью SET tags, I и standard_conforming_strings=off; это не реализация всех настроек и не запуск 1С. Проверки и оставленный на review diff — в VALIDATION.
 
-Следующий отдельный результат — [PG BEGIN](1c/BEGIN_TASK.md) через штатный SetTransactionNode и общий executor. Инструкция подготовлена; реализация BEGIN не начата.
+[PG BEGIN](1c/BEGIN_TASK.md) без опций реализован через штатный SetTransactionNode и общий executor: READ CONSISTENCY / READ WRITE / WAIT, promotion implicit handle, сохранение текущего блока при повторе, 25P02 в E. Native SET TRANSACTION остаётся прежним. Данные, режимы, одна transaction, Simple/Extended и psql/psycopg2 проверены; результат оставлен на review. Реальные эффекты трёх ignored SET, другие transaction options, `$n`, casts и каталоги не включены. Фактическая приёмка — в VALIDATION; следующие этапы не начинаются автоматически.
 
 Предыдущая P5-ревизия прошла целевую Linux/Super loopback приёмку: I/T/E, native transaction/session controls и recovery. В P6 сборка, unit tests и host/startup/Simple Query/transaction/lifecycle/native регрессии прошли. **Известное ограничение native baseline: READ COMMITTED READ CONSISTENCY + AUTO COMMIT не входит в подтверждённую совместимость; SNAPSHOT AUTO COMMIT проверен.** Целевой P6/M1 Linux/Super принят с известными native ограничениями. Shutdown во время ON CONNECT остаётся отдельным исключением: native Debug assertion воспроизводится также без wire endpoints. P7 Extended Query прошёл целевую Linux/Super приёмку: 16 групп. P8 codecs прошли целевую Linux/Super приёмку: восемь групп. Целевая клиентская приёмка P9/M2 пройдена; следующий этап — P10, TLS и cancellation. Результаты и границы покрытия — в [VALIDATION.md](VALIDATION.md). TLS, Windows и другие server modes требуют отдельной реализации и приёмки.
 
@@ -94,7 +94,7 @@ AUTO COMMIT DML проверяется положительно в native SNAPSH
 
 Native session SET исполняются по whitelist из CODEX_CONTEXT; ALTER SESSION RESET имеет настоящий effect. RESET может заменить native transaction за тем же interface pointer: при успехе I остаётся I, T — T, в E команда получает 25P02. Исторический P5 ещё не хранил statements/portals или savepoint names. Теперь RESET очищает P7 objects и узкую историю standard_conforming_strings. Session settings не эмулируются успешными ответами.
 
-**Критерий завершения:** live checks подтверждают native transaction SQL, visibility, I/T/E и `PQtransactionStatus`, error precedence, unique violation/recovery, savepoints/retaining, disconnect rollback, session SET и ALTER SESSION RESET; результаты записаны в VALIDATION. Unit tests не заменяют эту приёмку. Автоматический BEGIN psycopg2 остаётся отрицательной проверкой синтаксиса до отдельного расширения grammar.
+**Критерий завершения:** live checks подтверждают native transaction SQL, visibility, I/T/E и `PQtransactionStatus`, error precedence, unique violation/recovery, savepoints/retaining, disconnect rollback, session SET и ALTER SESSION RESET; результаты записаны в VALIDATION. Unit tests не заменяют эту приёмку. Отдельный этап PG BEGIN перевёл автоматический BEGIN psycopg2 в положительные проверки.
 
 ## P6. Серверная приёмка — M1
 
@@ -108,7 +108,7 @@ Native session SET исполняются по whitelist из CODEX_CONTEXT; ALT
 
 ## P7. Extended Query и prepared objects
 
-**Целевая Linux/Super приёмка — PASS: 16 групп; evidence в [VALIDATION.md](VALIDATION.md).** Parse/Bind/Describe/Execute/Close/Flush/Sync, named/unnamed statements и portals используют существующие engine interfaces. SQL Parse передаётся неизменённым; Bind получает порядок slots из native metadata. `$n` и PostgreSQL BEGIN остаются будущим расширением parser.
+**Целевая Linux/Super приёмка — PASS: 16 групп; evidence в [VALIDATION.md](VALIDATION.md).** Parse/Bind/Describe/Execute/Close/Flush/Sync, named/unnamed statements и portals используют существующие engine interfaces. SQL Parse передаётся неизменённым; Bind получает порядок slots из native metadata. В исходной P7-приёмке `$n` и BEGIN были parser limits; BEGIN без опций добавлен отдельным этапом выше, `$n` остаётся отложен.
 
 ParameterDescription, RowDescription/NoData, PortalSuspended/maxRows и повторное исполнение prepared statements реализованы. Named statement переживает commit. Bind готовит отдельный native statement с тем же SQL для каждого portal, используя текущую transaction либо NULL; скрытые application transactions не создаются. Close statement и замена unnamed statement сохраняют уже связанные portals. Simple Query инвалидирует unnamed statement и portal. Завершение transaction удаляет portals; Sync внутри T сохраняет их. Ошибка инвалидирует все portals и включает discard-until-Sync; explicit transaction сохраняется в E. RESET инвалидирует все statements/portals, даже если native transaction interface pointer не изменился.
 
@@ -126,7 +126,7 @@ ParameterDescription, RowDescription/NoData, PortalSuspended/maxRows и повт
 
 Numeric кодируется точно без float; binary — base 10000 с weight/sign/dscale. Overflow и непредставимая native scale дают 22003. FLOAT/DOUBLE используют network IEEE32/64 и locale-independent text, включая NaN/Infinity. Temporal text — ISO, binary — дни/микросекунды относительно PostgreSQL epoch 2000-01-01. Поддержаны конечные годы 0001..9999, время менее 24:00 и точность 100 мкс; меньшая точность не округляется, а отклоняется с 22008. BC, temporal infinity, TZ и DECFLOAT/BLOB остаются за пределами codecs.
 
-Startup публикует `integer_datetimes=on`, согласованный с binary temporal representation. TimeZone не объявляется. SQL bytes и grammar не меняются; `::date`, BEGIN и `$n` остаются синтаксической границей.
+Startup публикует `integer_datetimes=on`, согласованный с binary temporal representation. TimeZone не объявляется. SQL bytes и grammar не меняются; `::date` и `$n` остаются синтаксической границей; BEGIN добавлен позднее отдельным этапом.
 
 **Проверено:** реальный C libpq text/binary input/output и prepared reuse; независимые binary fixtures, float special/subnormal/negative-zero, INT128 limits и scale38, temporal epochs/leap years/negative timestamps/range, NULL, Simple Query и DML RETURNING, native cross-visibility и отказы до исполнения. Negative tests реализованных типов заменены positive; unsupported guards используют DECFLOAT/BLOB. Повторены P7 Extended, Simple Query, transaction/session, startup и P6 server/58 pytest cases. P9/M2 принят для совместимого SQL; следующий этап — P10.
 
@@ -138,7 +138,7 @@ C libpq 14.24 проверяет sync/async send/get без pipeline, named/unna
 
 Psycopg 3.3.6 binary/libpq 18.6 проверен через настоящие Cursor/AsyncCursor: autocommit=True, SQL без параметров, Simple/forced prepared/binary results, P8 type decoding, reuse после COMMIT и Close при вытеснении named statement. Native SET TRANSACTION/savepoints/COMMIT/ROLLBACK проверены в отдельном профиле с prepare_threshold=None, включая видимость результатов через native TCP. Libpq traces подтверждают реальные Query/Parse/Bind/Execute/Sync/Close.
 
-Обычные `%s` → `$1`, автоматический BEGIN и sql.Literal(date) → `::date` получают 42601. При непустом prepared cache после успешного ROLLBACK Psycopg отправляет неподдержанный DEALLOCATE ALL и тоже получает 42601; сам rollback уже выполнен. Это ограничение драйверного SQL, а не повод менять parser или переписывать SQL в wire. Full cache cleanup после DROP/ALTER и native RESET требует отдельного учёта в прикладном профиле, см. COMPATIBILITY.
+В историческом P9 обычные `%s` → `$1`, автоматический BEGIN и sql.Literal(date) → `::date` дали 42601. Engine теперь поддерживает BEGIN без опций; Psycopg 3 сценарий обновлён, live-повтор недоступен в текущем окружении. Остальные parser limits сохраняются. При непустом prepared cache после успешного ROLLBACK Psycopg отправляет неподдержанный DEALLOCATE ALL и тоже получает 42601; сам rollback уже выполнен. Это ограничение драйверного SQL, а не повод менять parser или переписывать SQL в wire. Full cache cleanup после DROP/ALTER и native RESET требует отдельного учёта в прикладном профиле, см. COMPATIBILITY.
 
 **M2:** Extended wire работает с поддержанным SQL и codecs; это не обещает работу произвольного PostgreSQL-приложения. Grammar/bootstrap ограничения записаны отдельно. В P9 менялись только harnesses и документация. Следующий этап — P10: удалённый TCP, TLS и CancelRequest.
 

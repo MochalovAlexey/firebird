@@ -178,9 +178,11 @@ class Profiles:
 
     def grammar_limits(self):
         with self.connect('default_begin',autocommit=False) as connection:
-            expected_error(lambda:connection.execute(ANSWER),'42601')
+            require(connection.execute(ANSWER).fetchone() == (42,), 'automatic BEGIN failed')
+            state(connection,pq.TransactionStatus.INTRANS)
+            connection.rollback()
             state(connection,pq.TransactionStatus.IDLE)
-        self.summary['expected_limits'].append({'profile':'default_autocommit_false_implicit_BEGIN','sqlstate':'42601'})
+        self.summary['checks'].append('default_autocommit_false_implicit_BEGIN')
         with self.connect('parameter_and_literal',autocommit=True) as connection:
             expected_error(lambda:connection.execute('SELECT CAST(%s AS INTEGER) FROM RDB$DATABASE',(42,)),'42601')
             state(connection,pq.TransactionStatus.IDLE)

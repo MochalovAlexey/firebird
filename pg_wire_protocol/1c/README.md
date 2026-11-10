@@ -38,7 +38,7 @@ context keys, счётчиков и реестров нет. Добавлена 
 PgWire выбирает dialect 4 при Simple Query, Extended Parse и повторной подготовке
 portal. Этот режим включает PG-дополнения грамматики; типы и арифметика сохраняют семантику dialect 3. Обычные одинарные строки учитывают новую настройку; native Q-строки и двойные кавычки сохраняются. Поддержаны `SELECT` без `FROM` и описанный ниже
 фиксированный профиль `lc_messages`/`client_encoding`, а также изменяемый `standard_conforming_strings`. Это ещё не полный PostgreSQL SQL dialect: `$n`, `::`,
-BEGIN и LIMIT пока отвергаются.
+LIMIT пока отвергаются; формы PG BEGIN без опций поддержаны отдельно ниже.
 
 Ключ штатного statement cache содержит исходный клиентский dialect и эффективный режим строк: PG и
 native планы не смешиваются. Обычные native dialects 1/2/3 по-прежнему требуют
@@ -82,8 +82,8 @@ USAGE schema и EXECUTE function выдаются PUBLIC. Он не создаё
 
 [Синтаксический приём трёх startup SET](IGNORED_STARTUP_SETTINGS_TASK.md)
 без эффекта реализован по явному решению пользователя; контракт описан ниже.
-Следующий отдельный этап — [PG BEGIN](BEGIN_TASK.md) через существующий
-SetTransactionNode и общий executor. BEGIN ещё не реализован.
+[PG BEGIN](BEGIN_TASK.md) реализован отдельным этапом через существующий
+SetTransactionNode и общий executor; результат оставлен на review.
 
 Срез [фиксированной диагностики](FIXED_DIAGNOSTICS_TASK.md) реализован через
 существующий SetPgSessionNode: только `escape_string_warning=off` и
@@ -93,11 +93,69 @@ SetTransactionNode и общий executor. BEGIN ещё не реализова�
 | Группа исходного задания | Текущее состояние / что требуется |
 |---|---|
 | 1. Начало сессии | SELECT без FROM, ограниченная identity-функция, последовательные скрипты и все семь startup SET принимаются; реальные эффекты enable_mergejoin, cpu_operator_cost и lock_timeout отложены |
-| 2. SQL и параметры | Simple Query выполняет скрипты совместимого SQL; `$n`, `::`, BEGIN TRANSACTION и LIMIT ещё не реализованы; использовать ParameterNode, CastNode, SetTransactionNode и RowsClause |
+| 2. SQL и параметры | Simple Query выполняет скрипты совместимого SQL; PG BEGIN без опций поддержан; `$n`, `::` и LIMIT ещё не реализованы |
 | 3. Открытие базы | pg_class/pg_database/visibility и служебные таблицы 1С ещё не реализованы; нужны настоящие metadata и данные |
 | 4. Типы и функции | bytea, mchar/mvarchar и BINROWVER ещё не реализованы; сначала измерить форматы/семантику, затем использовать BLOB API, intl/collations и SQL/PSQL |
-| 5. Транзакции/конкуренция | Существующие native controls сохраняются; PG BEGIN, advisory locks и PG timeout semantics ещё не реализованы |
+| 5. Транзакции/конкуренция | PG BEGIN без опций использует реальные READ CONSISTENCY транзакции; native controls сохраняются; advisory locks и PG timeout semantics ещё не реализованы |
 | 6. Временные объекты/нагрузка | PG temporary DDL, serial4, ANALYZE и fasttrun_ext ещё не реализованы; нужен эталон их эффектов |
+
+## PG BEGIN через штатную транзакцию Firebird
+
+Клиентский PG dialect 4 принимает только четыре формы без опций:
+
+```sql
+BEGIN;
+BEGIN WORK;
+BEGIN TRANSACTION;
+START TRANSACTION;
+```
+
+Все возвращают tag BEGIN. Исходный `09-begin.sql` передаётся без изменений.
+Существующий SetTransactionNode создаёт READ COMMITTED READ CONSISTENCY,
+READ WRITE, WAIT transaction; AUTO COMMIT и дополнительные TPB options не заданы.
+Native SET TRANSACTION сохраняет прежние параметры и default SNAPSHOT, в том
+числе при вызове через PgWire. ISOLATION LEVEL, READ ONLY/WRITE, DEFERRABLE и
+прочие PG options не поддержаны и дают syntax error до начала нового блока.
+
+| Состояние перед PG BEGIN | Результат после успешного prepare |
+|---|---|
+| I без native handle | Engine execute создаёт transaction; переход в T |
+| I с implicit handle | Тот же handle становится explicit, переход в T; прежние записи остаются незавершёнными |
+| T | Тот же handle, savepoints, portals и история настроек; tag BEGIN |
+| E | 25P02, нужен прежний recovery через rollback |
+
+Один приватный ControlKind::PgStart отличает эту политику от native Start.
+Оба сверяются с прежним isc_info_sql_stmt_start_trans после engine prepare.
+Общий QueryExecutor::control обслуживает Simple и Extended; SQL rewriting,
+новых API/getInfo/AST nodes, состояния attachment или зависимостей нет.
+Повтор native SET TRANSACTION остаётся 25001/E. NoticeResponse не добавлен:
+повтор BEGIN сохраняет блок без клиентского предупреждения в текущем профиле.
+
+В `INSERT ...; BEGIN` вставка не становится видимой observer до COMMIT;
+общий ROLLBACK отменяет и работу перед BEGIN. Аналогично Execute DML → Execute
+BEGIN до Sync сохраняет transaction; suspended SELECT portal продолжает чтение
+после BEGIN/Sync. Parse/Bind сами explicit блок не открывают, Execute открывает,
+Sync оставляет T. Prepared BEGIN переиспользуется после rollback.
+
+История standard_conforming_strings начинается до BEGIN, даже в
+`SET standard_conforming_strings=off; BEGIN` без native handle. Promotion и
+повтор BEGIN её не сбрасывают; rollback/ошибка/savepoints используют прежний путь.
+Разрыв TCP откатывает блок. Native dialects 1/2/3 отвергают новые корневые формы
+окончательной token error; AUTOTERM выполняет следующую команду. PSQL BEGIN/END,
+DDL START WITH и native SET TRANSACTION сохранены; lexer gate этих токенов не менялся.
+
+Проверены данные через native observer, одна application transaction, её режимы
+и ID, чтение свежего commit второго соединения, Simple/Extended, psql AUTOCOMMIT
+off и автоматический BEGIN psycopg2. Результаты и ограничения — в
+[VALIDATION.md](../VALIDATION.md). Psycopg 3 сценарий обновлён, но этот клиент
+в текущем окружении отсутствует и live-повтор не заявляется.
+
+Это ограниченный контракт [BEGIN](https://www.postgresql.org/docs/18/sql-begin.html)
+и [transaction flow](https://www.postgresql.org/docs/18/protocol-flow.html#PROTOCOL-FLOW-MULTI-STATEMENT).
+Полная эквивалентность конкурентного DML PostgreSQL не заявляется. `$n`, `::`,
+LIMIT, PG transaction options/default_transaction_*, каталоги и запуск 1С
+остаются отдельными задачами. Whole-query preparse отложен: ранний COMMIT
+сохраняется при поздней syntax error. Прежние native defects не исправлялись.
 
 ## Фиксированный профиль SET: английские сообщения и UTF8
 
@@ -179,7 +237,7 @@ AUTOTERM после ошибки; PG SET внутри PSQL по-прежнему
 
 Эти две команды проверены отдельно и в полном `03-session-batch.sql` с описанным
 ниже исключением для трёх настроек. Другие значения fixed SET, SET LOCAL/SESSION/DEFAULT, SHOW,
-startup GUC, BEGIN/$n и следующие этапы не добавлены. Whole-query preparse
+startup GUC, $n и следующие этапы не добавлены. Whole-query preparse
 по-прежнему отложен; ранний явный COMMIT сохраняется при поздней ошибке.
 
 ## Временный приём трёх startup SET без эффекта
@@ -318,7 +376,7 @@ assertion на текущей и предыдущей сборках; прове
 сериализации и описан в архитектурном review в VALIDATION.
 
 Не реализованы E-literals, dollar quoting, SET LOCAL/SESSION, DEFAULT, SHOW,
-RESET parameter, новые startup options, BEGIN/$n/::/LIMIT. Whole-query preparse
+RESET parameter, новые startup options, $n/::/LIMIT. Whole-query preparse
 по-прежнему отложен. Полный startup batch и запуск 1С/Гилёва этим срезом не доказаны.
 
 ## Решение от 9 ноября 2026: последовательные скрипты, остановка на ошибке
@@ -354,7 +412,7 @@ Simple Query, последовательно, с остановкой
    Query. Следующая команда после границы открывает новую transaction по необходимости.
    В T/E сохраняются нынешние правила и единственный текущий handle. Каждая команда
    автоматически не коммитится. Native SET TRANSACTION сохраняет свой контракт;
-   PostgreSQL BEGIN этим этапом не добавляется.
+   PostgreSQL BEGIN добавлен отдельным срезом, описанным выше.
 5. Отправляется результат каждой команды и один конечный ReadyForQuery. Финальный
    успешный CommandComplete выдаётся после успешного implicit commit, сохраняя
    нынешнее поведение при ошибке commit. Строки результатов не накапливаются.

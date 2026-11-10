@@ -977,6 +977,7 @@ ddl_statement
 %type <traNode> tra_statement
 tra_statement
 	: set_transaction							{ $$ = $1; }
+	| pg_start_transaction						{ $$ = $1; }
 	| savepoint									{ $$ = $1; }
 	| commit									{ $$ = $1; }
 	| rollback									{ $$ = $1; }
@@ -6277,6 +6278,29 @@ set_transaction
 			{ $$ = newNode<SetTransactionNode>(); }
 		tran_option_list_opt($3)
 			{ $$ = $3; }
+	;
+
+%type <setTransactionNode> pg_start_transaction
+pg_start_transaction
+	: pg_start_transaction_clause
+		[
+			// Reject this root production with a token error, not an incomplete command.
+			if (!pgDialect)
+				yyerror_detailed("syntax error", 1, yylval, YYPOSNARG(1));
+		]
+		{
+			$$ = newNode<SetTransactionNode>();
+			$$->isoLevel = SetTransactionNode::ISO_LEVEL_READ_COMMITTED_READ_CONSISTENCY;
+			$$->readOnly = false;
+			$$->wait = true;
+		}
+	;
+
+pg_start_transaction_clause
+	: BEGIN
+	| BEGIN WORK
+	| BEGIN TRANSACTION
+	| START TRANSACTION
 	;
 
 %type <sessionResetNode> session_reset
