@@ -571,7 +571,7 @@ add_library                 (pgwire SHARED plugins/wire/pg/PgWire.cpp plugins/wi
     plugins/wire/pg/Execute.cpp plugins/wire/pg/Extended.cpp plugins/wire/pg/ErrorStatus.cpp
     plugins/wire/pg/InputCodec.cpp plugins/wire/pg/ResultCodec.cpp
     plugins/wire/pg/FloatCodec.cpp plugins/wire/pg/NumericCodec.cpp plugins/wire/pg/TemporalCodec.cpp
-    plugins/wire/pg/SqlInfo.cpp ${VERSION_RC})
+    plugins/wire/pg/SqlInfo.cpp isql/FrontendLexer.cpp ${VERSION_RC})
 add_dependencies_cc         (pgwire UpdateCloopInterfaces)
 target_link_libraries       (pgwire common yvalve)
 set_target_properties       (pgwire PROPERTIES OUTPUT_NAME PgWire)

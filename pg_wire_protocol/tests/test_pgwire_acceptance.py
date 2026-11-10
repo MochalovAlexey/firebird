@@ -354,14 +354,19 @@ def test_sql_error_recovery(pg_connect, kind, sqlstate):
         _assert_usable(conn)
 
 
-def test_multiple_statements_rejected_atomically(pg_connect, table):
+def test_multiple_statements_sequential_commit_and_stop(pg_connect, table):
     with pg_connect(autocommit=True) as conn:
         with conn.cursor() as cur:
+            cur.execute(f"INSERT INTO {table} (ID) VALUES (1); INSERT INTO {table} (ID) VALUES (2)")
+            assert cur.statusmessage == "INSERT 0 1"
             with pytest.raises(psycopg2.Error) as error:
-                cur.execute(f"INSERT INTO {table} (ID) VALUES (1); INSERT INTO {table} (ID) VALUES (2)")
+                cur.execute(f"INSERT INTO {table} (ID) VALUES (3); COMMIT; "
+                            f"INSERT INTO {table} (ID) VALUES (4); SELECT (; "
+                            f"INSERT INTO {table} (ID) VALUES (5)")
             assert error.value.pgcode == "42601"
         assert conn.get_transaction_status() == extensions.TRANSACTION_STATUS_IDLE
-        assert _rows(conn, f"SELECT ID FROM {table}") == []
+        assert _rows(conn, f"SELECT ID FROM {table} ORDER BY ID") == [(1,), (2,), (3,)]
+        _assert_usable(conn)
 
 
 @pytest.mark.parametrize("form", ["insert_values", "insert_select", "update", "delete"])

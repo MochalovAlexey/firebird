@@ -1,5 +1,93 @@
 # Проверки реализации
 
+## 10 ноября 2026: последовательные скрипты Simple Query
+
+База изменения — `83885f5759`. Реализован отдельный подэтап [профиля 1С](1c/README.md):
+несколько SQL-команд в одном Query, остановка при первой окончательной ошибке,
+один implicit transaction segment до полного COMMIT/ROLLBACK или конца сообщения.
+Предварительная проверка синтаксиса всего Query отложена по решению пользователя.
+Пакет семи SET из selected example 02 требует этой возможности, но сами настройки
+PostgreSQL ещё не реализованы. Открытие базы 1С и тест Гилёва не выполнялись.
+
+| Изменение | Переиспользование и граница |
+|---|---|
+| `FrontendLexer.*`, POSIX/CMake lists | В существующий lexer isql добавлен внутренний метод исходных offsets разделителей без trim/rewrite и чтения следующей команды; прежний путь isql сохранён. Исходник включён в PgWire без новой библиотеки |
+| `Execute.cpp/.h` | Цикл в QueryExecutor использует обычный prepare, PREPARE_REQUIRE_SEMICOLON и структурный isc_command_end_err2 по модели AUTOTERM. Успешный statement сразу исполняется; существующие codecs, controls, error handling и cleanup сохранены. Последний CommandComplete ждёт успешного implicit commit |
+| Unit tests и `pgwire_script_smoke.py` | Проверки границ и реального исполнения через существующие harness, raw decoder и libpq. Прежние batch-rejection fixtures заменены проверками ошибки первой команды и остановки хвоста |
+
+Новых public API/ABI, engine metadata, parser changes, конфигурационных параметров
+или runtime-зависимостей в этом подэтапе нет. Extended Parse остаётся однокомандным.
+
+Сборка: Linux x86-64, GCC 13.4.0, developer/Debug, Firebird `LI-T6.0.0.2199-dev`.
+Для существующего build directory повторён configure, чтобы обновить список
+объектов. Полная сборка завершилась с exit 0:
+
+```sh
+cd /tmp/firebird-pgwire-1c-build
+/home/aleksey/dev/my_firebird/firebird/configure \
+  --enable-developer --with-builtin-tommath --with-builtin-tomcrypt
+make -j2
+make -C gen -j2 TARGET=Debug \
+  /tmp/firebird-pgwire-1c-build/gen/Debug/firebird/tests/isql_test
+LD_LIBRARY_PATH=/tmp/firebird-pgwire-1c-build/gen/Debug/firebird/lib \
+  gen/Debug/firebird/tests/isql_test \
+  --run_test=ISqlSuite --report_level=detailed --log_level=error
+```
+
+Логи в build directory: `script-configure.log`, `script-build-final.log`,
+`script-isql-test-build.log`, `script-isql-test.log`. ISqlSuite: **12 cases,
+317 assertions PASS**, включая четыре новых случая reader; прежние frontend
+lexer/parser tests также прошли.
+
+Целевой прогон из корня репозитория:
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 python3 -B pg_wire_protocol/tools/pgwire_script_smoke.py \
+  --firebird-dir /tmp/firebird-pgwire-1c-build/gen/Debug/firebird \
+  --work-dir /tmp/firebird-pgwire-script-01 \
+  --libpq /lib/x86_64-linux-gnu/libpq.so.5
+```
+
+Каждый harness использовал собственные runtime, security DB, UTF8 database и
+loopback ports в `/tmp`; для повторения нужен новый work directory. Пользовательский
+сервер не менялся. Клиенты: libpq headers/runtime 14.24, psycopg2 2.9.2/libpq 14.24,
+pytest 7.4.3. Результаты:
+
+| Проверка | Результат / свидетельство |
+|---|---|
+| Новые скрипты | **8 групп PASS**: порядок всех результатов и один ReadyForQuery, DDL→DML→SELECT, строки/Q-strings/comments/UTF8, EXECUTE BLOCK, implicit rollback, сохранение раннего COMMIT при syntax/runtime/незакрытых tokens, T/E и recovery, native SET/RESET/savepoint/retaining, реальная ошибка финального commit, PQsendQuery/PQgetResult и native observer. `/tmp/firebird-pgwire-script-01/summary.json` |
+| Simple Query regression | **12 групп PASS**, включая native isql AUTOTERM и определения PROCEDURE. `/tmp/firebird-pgwire-script-simple-01/summary.json` |
+| Transaction regression | **14 групп PASS**. `/tmp/firebird-pgwire-script-transaction-01/summary.json` |
+| Extended Query regression | **16 групп PASS**, включая отказ batch в Parse. `/tmp/firebird-pgwire-script-extended-01/summary.json` |
+| Native TCP baseline | **9 проверок PASS**. `/tmp/firebird-pgwire-script-native-01/summary.json` |
+| Изменённый pytest case | **1 passed**: `test_multiple_statements_sequential_commit_and_stop`, psycopg2 и native visibility. `/tmp/firebird-pgwire-script-pytest-01/summary.json`; весь pytest-набор в этом подэтапе не запускался |
+| Source checks | Python syntax, локальные Markdown links и git diff --check: PASS |
+
+Регрессии запускаются через `pgwire_simple_query_smoke.py`,
+`pgwire_transaction_smoke.py`, `pgwire_extended_query_smoke.py`, `native_baseline.py`
+с тем же `--firebird-dir` и отдельными `--work-dir`. Первые три используют
+`--libpq-include-dir /tmp/firebird-pgwire-1c-deps/libpq-dev/usr/include/postgresql`
+и `--libpq-library /lib/x86_64-linux-gnu/libpq.so.5`; Simple дополнительно
+`--driver-python /usr/bin/python3`. Использованы уже доступные зависимости.
+Все серверы завершились штатно с exit 0. В syscall trace Simple/Transaction/Extended
+backend connect attempts = 0; новый script harness отдельный trace не выполняет.
+
+Сравнение с runtime предыдущего подэтапа (`firebird-pgwire-1c-select-03`) сохранено
+в `/tmp/firebird-pgwire-script-01/dependencies.json`: прямые NEEDED, транзитивный
+ldd и список plugin modules совпадают. SHA256 Engine14 также совпадает:
+`a395ba7a1349090bc4eec3dca3975e83486514add55151906da2d16e024310c1`.
+Проверенный PgWire: `3fa6a84b13d8cfb95a419a212052f51e1cbbe705cde3c62652ae293a549d2d68`.
+
+Ограничения: ранний COMMIT сохраняется и при поздней syntax error — принятое
+отличие от полного предварительного разбора PostgreSQL. Native session SET,
+sequences, autonomous transactions и внешние эффекты сохраняют native семантику;
+общая отмена этих эффектов не обещается. Отдельный `;` и пустые команды между
+разделителями остаются syntax errors. PG SET, BEGIN, `$n`, casts и остальные
+формы профиля требуют следующих этапов. CMake/Windows runtime и весь профиль 1С
+этим прогоном не проверены. Ранее установленные native ограничения ON CONNECT
+shutdown и READ CONSISTENCY + AUTO COMMIT не исправлялись и не воспроизводились
+повторно; regression использует принятые профили.
+
 ## 9 ноября 2026: первый подэтап записанного профиля 1С
 
 База изменения — `0e505759d0deb1693d912bbc9fee978a55d1e1f0`. Проверен небольшой

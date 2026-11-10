@@ -18,6 +18,8 @@
 #include "SqlInfo.h"
 #include "../common/classes/ImplementHelper.h"
 #include "../common/status.h"
+#include "../common/utils_proto.h"
+#include "../isql/FrontendLexer.h"
 
 #include <cstring>
 #include <limits>
@@ -241,7 +243,7 @@ bool QueryExecutor::execute(Protocol& protocol, std::string_view sql)
 	// A failing commit (including retaining) may have already changed durable
 	// state/savepoints. Do not continue with an unproven transaction boundary.
 	bool ending = false;
-	const bool failedAtEntry = state == 'E';
+	bool failedAtEntry = state == 'E';
 	auto fail = [&](const Diagnostic& diagnostic)
 	{
 		bool fatal = diagnostic.fatal || ending;
@@ -268,93 +270,127 @@ bool QueryExecutor::execute(Protocol& protocol, std::string_view sql)
 	try
 	{
 		clearUnnamed();
-		FbLocalStatus status;
-		// In I, prepare uses NULL (the engine's internal system transaction),
-		// avoiding a hidden application transaction before SET TRANSACTION/reset.
-		// In T/E, prepare sees the existing transaction and its uncommitted DDL.
-		request.statement = attachment->prepare(&status, transaction, sql.size(), sql.data(),
-			SQL_DIALECT_PG, IStatement::PREPARE_PREFETCH_METADATA);
-		if ((status->getState() & IStatus::STATE_ERRORS) &&
-			diagnose(&status).state == "42601" && inspectSql(sql).empty)
+		FrontendLexer lexer(sql);
+		std::size_t statementStart = 0;
+		bool completed = false;
+		// Only the last completion waits for the implicit commit. Rows are streamed.
+		std::string tag;
+		for (;;)
 		{
-			request.close();
-			finishImplicit(ending);
-			protocol.emptyQuery();
-			return true; // EMPTY preserves I, T or E.
-		}
-		check(&status);
-		preparing = false;
-		const auto info = inspectSql(sql);
-		if (state == 'E' && !recovery(info.control))
-			throw ProtocolError("25P02", "Current transaction is aborted; rollback is required");
-		checkStatement(request.statement, info);
+			preparing = true;
+			ending = false;
+			failedAtEntry = state == 'E';
+			const auto statementEnd = lexer.getStatementEnd();
+			const auto text = sql.substr(statementStart,
+				statementEnd.value_or(sql.size()) - statementStart);
+			const auto info = inspectSql(text);
+			if (completed && !statementEnd && info.empty)
+				break; // No extra EmptyQueryResponse for trailing whitespace/comments.
 
-		if (info.control != ControlKind::None)
-		{
-			const auto tag = control(request.statement, info, ending);
-			request.close();
-			finishImplicit(ending);
-			protocol.commandComplete(tag);
-			return true;
-		}
-
-		const bool hasCursor = request.statement->getFlags(&status) & IStatement::FLAG_HAS_CURSOR;
-		check(&status);
-		RefPtr<IMessageMetadata> input(REF_NO_INCR, request.statement->getInputMetadata(&status));
-		check(&status);
-		const auto inputCount = input->getCount(&status);
-		check(&status);
-		if (inputCount)
-			throw ProtocolError("0A000", "Query parameters require the Extended Query protocol");
-		RefPtr<IMessageMetadata> logicalOutput(REF_NO_INCR, request.statement->getOutputMetadata(&status));
-		check(&status);
-		const ResultCodec output(logicalOutput);
-		const bool hasOutput = !output.columns().empty();
-		if (hasCursor && !hasOutput)
-			throw ProtocolError("XX000", "Inconsistent engine output metadata");
-		std::vector<unsigned char> buffer(output.messageLength());
-		startImplicit();
-		if (hasOutput)
-			protocol.rowDescription(output.columns());
-		std::uint64_t rows = 0;
-		if (hasCursor)
-		{
-			request.cursor = request.statement->openCursor(&status, transaction,
-				nullptr, nullptr, output.fetchMetadata(), 0);
-			check(&status);
-			for (;;)
+			if (!tag.empty())
 			{
-				const auto result = request.cursor->fetchNext(&status, buffer.data());
+				protocol.commandComplete(tag);
+				tag.clear();
+			}
+
+			FbLocalStatus status;
+			// Probing a PSQL prefix must not start an application transaction.
+			// In T/E or an implicit script segment, prepare sees the current handle.
+			request.statement = attachment->prepare(&status, transaction, text.size(), text.data(),
+				SQL_DIALECT_PG, IStatement::PREPARE_PREFETCH_METADATA |
+					(statementEnd ? IStatement::PREPARE_REQUIRE_SEMICOLON : 0));
+			if (status->getState() & IStatus::STATE_ERRORS)
+			{
+				const auto diagnostic = diagnose(&status);
+				if (statementEnd && diagnostic.state == "42601" && !diagnostic.fatal &&
+					fb_utils::containsErrorCode(status->getErrors(), isc_command_end_err2))
+				{
+					// AUTOTERM: the delimiter may be inside a PSQL body. Keep the
+					// original prefix and try its next boundary, without executing it.
+					request.close();
+					continue;
+				}
+				if (!completed && !statementEnd && diagnostic.state == "42601" && info.empty)
+				{
+					request.close();
+					finishImplicit(ending);
+					protocol.emptyQuery();
+					return true; // EMPTY preserves I, T or E.
+				}
+			}
+			check(&status);
+			preparing = false;
+			if (state == 'E' && !recovery(info.control))
+				throw ProtocolError("25P02", "Current transaction is aborted; rollback is required");
+			checkStatement(request.statement, info);
+
+			if (info.control != ControlKind::None)
+				tag = control(request.statement, info, ending);
+			else
+			{
+				const bool hasCursor = request.statement->getFlags(&status) & IStatement::FLAG_HAS_CURSOR;
 				check(&status);
-				if (result == IStatus::RESULT_NO_DATA)
-					break;
-				if (result != IStatus::RESULT_OK || rows == std::numeric_limits<std::uint64_t>::max())
-					throw ProtocolError("XX000", "Invalid engine fetch result");
-				protocol.dataRow(output.decode(buffer.data(), buffer.size()));
-				++rows;
+				RefPtr<IMessageMetadata> input(REF_NO_INCR, request.statement->getInputMetadata(&status));
+				check(&status);
+				const auto inputCount = input->getCount(&status);
+				check(&status);
+				if (inputCount)
+					throw ProtocolError("0A000", "Query parameters require the Extended Query protocol");
+				RefPtr<IMessageMetadata> logicalOutput(REF_NO_INCR, request.statement->getOutputMetadata(&status));
+				check(&status);
+				const ResultCodec output(logicalOutput);
+				const bool hasOutput = !output.columns().empty();
+				if (hasCursor && !hasOutput)
+					throw ProtocolError("XX000", "Inconsistent engine output metadata");
+				std::vector<unsigned char> buffer(output.messageLength());
+				startImplicit();
+				if (hasOutput)
+					protocol.rowDescription(output.columns());
+				std::uint64_t rows = 0;
+				if (hasCursor)
+				{
+					request.cursor = request.statement->openCursor(&status, transaction,
+						nullptr, nullptr, output.fetchMetadata(), 0);
+					check(&status);
+					for (;;)
+					{
+						const auto result = request.cursor->fetchNext(&status, buffer.data());
+						check(&status);
+						if (result == IStatus::RESULT_NO_DATA)
+							break;
+						if (result != IStatus::RESULT_OK || rows == std::numeric_limits<std::uint64_t>::max())
+							throw ProtocolError("XX000", "Invalid engine fetch result");
+						protocol.dataRow(output.decode(buffer.data(), buffer.size()));
+						++rows;
+					}
+				}
+				else
+				{
+					const auto previous = transaction;
+					transaction = request.statement->execute(&status, transaction,
+						nullptr, nullptr, hasOutput ? output.fetchMetadata() : nullptr,
+						hasOutput ? buffer.data() : nullptr);
+					check(&status);
+					if (!transaction || transaction != previous)
+						throw ProtocolError("XX000", "Statement unexpectedly changed the transaction");
+					if (hasOutput)
+					{
+						protocol.dataRow(output.decode(buffer.data(), buffer.size()));
+						rows = 1;
+					}
+				}
+				const auto count = info.count == CountKind::Affected ?
+					request.statement->getAffectedRecords(&status) : rows;
+				check(&status);
+				tag = info.count == CountKind::None ? info.tag :
+					info.tag + " " + std::to_string(count);
 			}
+			request.close();
+			completed = true;
+			statementStart = statementEnd.value_or(sql.size());
+			if (!statementEnd)
+				break;
 		}
-		else
-		{
-			const auto previous = transaction;
-			transaction = request.statement->execute(&status, transaction,
-				nullptr, nullptr, hasOutput ? output.fetchMetadata() : nullptr,
-				hasOutput ? buffer.data() : nullptr);
-			check(&status);
-			if (!transaction || transaction != previous)
-				throw ProtocolError("XX000", "Statement unexpectedly changed the transaction");
-			if (hasOutput)
-			{
-				protocol.dataRow(output.decode(buffer.data(), buffer.size()));
-				rows = 1;
-			}
-		}
-		const auto count = info.count == CountKind::Affected ?
-			request.statement->getAffectedRecords(&status) : rows;
-		check(&status);
-		const auto tag = info.count == CountKind::None ? info.tag :
-			info.tag + " " + std::to_string(count);
-		request.close();
 		finishImplicit(ending);
 		protocol.commandComplete(tag);
 		return true;

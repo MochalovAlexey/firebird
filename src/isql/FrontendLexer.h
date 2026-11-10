@@ -24,6 +24,7 @@
 #ifndef FB_ISQL_FRONTEND_LEXER_H
 #define FB_ISQL_FRONTEND_LEXER_H
 
+#include <cstddef>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -106,6 +107,12 @@ public:
 	void appendBuffer(std::string_view newBuffer);
 	void reset();
 	std::variant<SingleStatement, FrontendLexer::IncompleteTokenError> getSingleStatement(std::string_view term);
+
+	// Advance to the next semicolon outside strings/comments and return its end offset.
+	// The buffer is preserved; the caller chooses the command start and confirms completeness
+	// with the SQL parser. No boundary means EOF or an incomplete token for the parser to diagnose.
+	// Use this scanning mode independently of getSingleStatement()/rewind().
+	std::optional<std::size_t> getStatementEnd();
 
 	Token getToken();
 	Token getNameToken();

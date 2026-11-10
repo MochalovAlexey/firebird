@@ -105,6 +105,89 @@ BOOST_AUTO_TEST_CASE(GetSingleStatementTest)
 		"select 1 from rdb$database; /*").getSingleStatement(";")).insideComment);
 }
 
+BOOST_AUTO_TEST_CASE(GetStatementEndPreservesSourceTest)
+{
+	const std::string first =
+		" \t/* leading ; */ SELECT ';'';' AS \"column;\", "
+		"q'{;}', q'(;)', q'[;]', q'<;>', q'!;!' FROM RDB$DATABASE;";
+	const std::string second = " -- trailing ;\r\n/* another ; */ SELECT 2;";
+	const std::string tail = "\nSELECT 3 -- comment at EOF";
+	const std::string source = first + second + tail;
+	FrontendLexer lexer(source);
+
+	const auto firstEnd = lexer.getStatementEnd();
+	BOOST_REQUIRE(firstEnd.has_value());
+	BOOST_TEST(*firstEnd == first.size());
+	const auto secondEnd = lexer.getStatementEnd();
+	BOOST_REQUIRE(secondEnd.has_value());
+	BOOST_TEST(*secondEnd == first.size() + second.size());
+	BOOST_TEST(!lexer.getStatementEnd().has_value());
+	BOOST_TEST(lexer.getBuffer() == source);
+}
+
+BOOST_AUTO_TEST_CASE(GetStatementEndDoesNotReadAheadTest)
+{
+	const std::string first = "SELECT 1;";
+	for (const std::string tail : {" /* unterminated", " 'unterminated;", " -- comment at EOF"})
+	{
+		FrontendLexer lexer(first + tail);
+		const auto statementEnd = lexer.getStatementEnd();
+		BOOST_REQUIRE(statementEnd.has_value());
+		BOOST_TEST(*statementEnd == first.size());
+		BOOST_TEST(!lexer.getStatementEnd().has_value());
+		BOOST_TEST(lexer.getBuffer() == first + tail);
+	}
+}
+
+BOOST_AUTO_TEST_CASE(GetStatementEndAccumulationTest)
+{
+	const std::string first = "EXECUTE BLOCK RETURNS (N INTEGER) AS BEGIN N = 1;";
+	const std::string second = " N = N + 1;";
+	const std::string third = " SUSPEND;";
+	const std::string fourth = " END;";
+	const std::string next = " SELECT 42;";
+	const std::string block = first + second + third + fourth;
+	FrontendLexer lexer(block + next);
+
+	// The caller keeps its command start unchanged while prepare reports an incomplete block.
+	std::size_t expectedEnd = 0;
+	for (const auto* part : {&first, &second, &third, &fourth, &next})
+	{
+		expectedEnd += part->size();
+		const auto statementEnd = lexer.getStatementEnd();
+		BOOST_REQUIRE(statementEnd.has_value());
+		BOOST_TEST(*statementEnd == expectedEnd);
+	}
+	BOOST_TEST(!lexer.getStatementEnd().has_value());
+	BOOST_TEST(lexer.getBuffer() == block + next);
+}
+
+BOOST_AUTO_TEST_CASE(GetStatementEndTailAndEmptyFragmentsTest)
+{
+	for (const std::string source : {"", " \t", "-- comment", "/* comment */", "SELECT 42",
+		"SELECT 'unterminated;", "SELECT q'{unterminated;", "SELECT 42 /* unterminated;"})
+	{
+		FrontendLexer lexer(source);
+		BOOST_TEST(!lexer.getStatementEnd().has_value());
+		BOOST_TEST(lexer.getBuffer() == source);
+	}
+
+	FrontendLexer emptyStatements("; ;");
+	const auto firstEnd = emptyStatements.getStatementEnd();
+	const auto secondEnd = emptyStatements.getStatementEnd();
+	BOOST_REQUIRE(firstEnd.has_value());
+	BOOST_REQUIRE(secondEnd.has_value());
+	BOOST_TEST(*firstEnd == 1u);
+	BOOST_TEST(*secondEnd == 3u);
+	BOOST_TEST(!emptyStatements.getStatementEnd().has_value());
+
+	const std::string source = "?\nSELECT 42;";
+	FrontendLexer question(source);
+	const auto statementEnd = question.getStatementEnd();
+	BOOST_REQUIRE(statementEnd.has_value());
+	BOOST_TEST(*statementEnd == source.size());
+}
+
 BOOST_AUTO_TEST_CASE(SkipSingleLineCommentsTest)
 {
 	FrontendLexer lexer(

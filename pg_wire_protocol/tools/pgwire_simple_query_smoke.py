@@ -324,13 +324,15 @@ FROM RDB$DATABASE""", "SELECT 1", [("1.20", "-12345.60", "-92233720368547758.08"
         require(failed["rows"] == [["1"]] and failed["command"] is None, "fetch error did not interrupt streamed rows")
         require(self.scalar_native("SELECT COUNT(*) AS OBSERVED FROM P4_EFFECTS WHERE ID=704") == 0,
                 "fetch error failed to roll back prior procedure changes")
-        for sql in ("INSERT INTO P4_ROWS(ID,V) VALUES(93,GEN_ID(P4_GUARD,1)); SELECT 42 FROM RDB$DATABASE",
-                    "CREATE TABLE P4_BATCH_BAD(ID INTEGER); SELECT 42 FROM RDB$DATABASE"):
+        # Sequential scripts must stop at an invalid first command. Successful
+        # prefixes and explicit commits are covered by pgwire_script_smoke.py.
+        for sql in ("INSERT INTO P4_ROWS(ID,V) VALUES(93,GEN_ID(P4_GUARD,1)) EXTRA_TOKEN; SELECT 42 FROM RDB$DATABASE",
+                    "CREATE TABLE P4_BATCH_BAD(ID INTEGER) EXTRA_TOKEN; SELECT 42 FROM RDB$DATABASE"):
             client.query_error(sql.encode(), "42601")
         require(self.scalar_native("SELECT GEN_ID(P4_GUARD,0) AS OBSERVED FROM RDB$DATABASE") == 0,
-                "SQL batch was partially executed")
+                "invalid first command was executed")
         require(self.scalar_native("SELECT COUNT(*) AS OBSERVED FROM RDB$RELATIONS WHERE RDB$RELATION_NAME='P4_BATCH_BAD'") == 0,
-                "DDL batch was partially committed")
+                "invalid first DDL command was committed")
         client.query_integer()
         client.close()
         self.no_attachments()
@@ -422,15 +424,14 @@ FROM RDB$DATABASE""", "SELECT 1", [("1.20", "-12345.60", "-92233720368547758.08"
                            ("USING DO", '42601'),
                            # Native USING requires parameters, local declarations or an autonomous clause.
                            ("USING DO INSERT INTO P4_EFFECTS VALUES(GEN_ID(P4_GUARD,1))", '42000'),
-                           ("USING DO INSERT INTO P4_EFFECTS VALUES(GEN_ID(P4_GUARD,1)); SELECT 42 FROM RDB$DATABASE", '42601'),
-                           ("INSERT INTO P4_EFFECTS VALUES(GEN_ID(P4_GUARD,1)); /* COMMIT */ SELECT 42 FROM RDB$DATABASE", '42601')):
+                           ("USING DO INSERT INTO P4_EFFECTS VALUES(GEN_ID(P4_GUARD,1)); SELECT 42 FROM RDB$DATABASE", '42000')):
             result = client.query(sql.encode())
             require(result['error'] is not None and result['error']['C'] == state,
                     f"invalid SQL {sql!r} did not return {state}: {result!r}")
             self.no_transactions()
             client.query_integer()
         require(self.scalar_native('SELECT GEN_ID(P4_GUARD,0) AS OBSERVED FROM RDB$DATABASE') == 0,
-                'classification executed an unsupported wrapper or part of an SQL batch')
+                'classification executed an unsupported or invalid first command')
         client.close()
         self.no_attachments()
 

@@ -92,7 +92,7 @@ Wire_Test_Objects:= $(call makeObjects,remote/server/wire/tests,WirePluginSmoke.
 Wire_Socket_Test_Objects:= $(call makeObjects,remote/server/wire/tests,SocketConnectionTest.cpp)
 AllObjects += $(Wire_Test_Plugin_Objects) $(Wire_Test_Objects) $(Wire_Socket_Test_Objects)
 
-PgWire_Objects:= $(call dirObjects,plugins/wire/pg)
+PgWire_Objects:= $(call dirObjects,plugins/wire/pg) $(call makeObjects,isql,FrontendLexer.cpp)
 PgWire_Test_Objects:= $(call makeObjects,plugins/wire/pg/tests,ProtocolTest.cpp)
 PgWire_Error_Test_Objects:= $(call makeObjects,plugins/wire/pg/tests,ErrorStatusTest.cpp)
 PgWire_Result_Test_Objects:= $(call makeObjects,plugins/wire/pg/tests,ResultCodecTest.cpp)

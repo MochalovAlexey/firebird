@@ -2,7 +2,7 @@
 
 Матрица M0–M3 задаёт границы этапов. База — master Firebird 6, SQL dialect 3, UTF8, wire 3.0. Архитектура — [ARCHITECTURE.md](ARCHITECTURE.md), execution contract — [CODEX_CONTEXT.md](CODEX_CONTEXT.md). Предыдущая P5-ревизия прошла целевую Linux/Super loopback приёмку: I/T/E, native transaction/session controls и recovery. В P6 сборка, unit tests и host/startup/Simple Query/transaction/lifecycle/native регрессии прошли. **Известное ограничение native baseline: READ COMMITTED READ CONSISTENCY + AUTO COMMIT не входит в подтверждённую совместимость; SNAPSHOT AUTO COMMIT проверен.** Целевой P6/M1 Linux/Super принят с известными native ограничениями. Shutdown во время ON CONNECT остаётся отдельным исключением: native Debug assertion воспроизводится также без wire endpoints. P7 Extended Query прошёл целевую Linux/Super приёмку: 16 групп. P8 codecs прошли целевую Linux/Super приёмку: восемь групп. P9 прошёл 17 групп с реальными C libpq, raw-wire и ограниченным профилем Psycopg 3; целевой M2 Linux/Super для совместимого SQL и реализованных codecs принят. Следующий этап — P10. Результаты и границы покрытия — в [VALIDATION.md](VALIDATION.md). TLS, Windows и другие server modes требуют отдельной реализации и приёмки.
 
-## Первый срез записанного профиля 1С
+## Срезы записанного профиля 1С
 
 PgWire использует клиентский `SQL_DIALECT_PG` (4), сохраняя dialect 3 базы и
 семантику типов. Только PG-режим принимает SELECT без FROM; native 1/2/3
@@ -12,8 +12,10 @@ int4 attachment ID, стабильный и различный у подключ
 CancelRequest key. Имя колонки остаётся Firebird `PG_BACKEND_PID`.
 
 Контракт, установка и оставшиеся этапы — в [1c/README.md](1c/README.md).
-Стартовые SET, пакеты, PG-параметры/касты/BEGIN, каталоги и остальная нагрузка
-ещё не реализованы. Полная совместимость и фактический запуск 1С не заявляются.
+Последовательные Simple Query скрипты реализованы и проверены 10 ноября 2026 года;
+результаты и отличие от полного PostgreSQL preparse — в [VALIDATION.md](VALIDATION.md).
+Семь стартовых PostgreSQL SET, PG-параметры/касты/BEGIN, каталоги и остальная
+неподдержанная нагрузка остаются отдельной работой. Полная совместимость и фактический запуск 1С не заявляются.
 
 ## Startup/authentication: Linux/Super P2 PASS
 
@@ -29,7 +31,7 @@ AuthenticationOk отправляется после attach, затем Paramete
 
 Текущий Simple Query использует text output из набора P8 ниже; поддержка M1 типов сохраняется. Формат 0, typmod-1, table OID/attribute 0; logical CHAR padding сохраняется через varying fetch metadata. Действительно неподдержанные types/charsets и любые input parameters в Simple Query получают 0A000 по metadata до execution.
 
-`QueryExecutor` живёт всю session и выдаёт ReadyForQuery I/T/E. В I prepare получает NULL, а обычный SQL — implicit READ WRITE / READ COMMITTED READ CONSISTENCY / WAIT transaction без заданного плагином lock timeout; commit выполняется до CommandComplete. В T/E prepare использует current native handle. DML tag отражает affected records, включая RETURNING; EXECUTE BLOCK/PROCEDURE не добавляют count. Recoverable explicit error сохраняет handle и E, implicit error откатывается в I; uncertain commit/cleanup закрывает connection. EMPTY сохраняет прежнее I/T/E.
+`QueryExecutor` живёт всю session и выдаёт ReadyForQuery I/T/E. Prepare использует текущий handle либо NULL, если application transaction ещё нет. Обычный SQL из I получает implicit READ WRITE / READ COMMITTED READ CONSISTENCY / WAIT transaction без заданного плагином lock timeout. В Simple Query implicit сегмент продолжается до полного COMMIT/ROLLBACK или конца Query; промежуточные CommandComplete не означают commit, последний ждёт успешного implicit commit. В T/E prepare использует current native handle. DML tag отражает affected records, включая RETURNING; EXECUTE BLOCK/PROCEDURE не добавляют count. Recoverable explicit error сохраняет handle и E, implicit error откатывается в I; uncertain commit/cleanup закрывает connection. EMPTY сохраняет прежнее I/T/E.
 
 Statement-level timeout остаётся 0: native configuration/session settings управляют SQL execution, плагин не задаёт собственные statement/lock timeouts. Firebird.conf StatementTimeout измеряется в секундах, ConnectionIdleTimeout — в минутах; 0 отключает соответствующий engine cap. Native idle shutdown закрывает attachment с rollback; следующий Query получает 57P05/close, без повторного подключения. Native DML timer не является hard deadline prepare/DDL/controls.
 
@@ -83,17 +85,17 @@ Source-аудит Psycopg 3.3.6 также показывает cache invalidati
 
 ## Главная граница
 
-SQL передаётся в engine prepare целиком, с исходной byte length и без изменения текста. Ограниченный lexer внутри PgWire определяет вид команды, command tag, профиль transaction/session controls и признак tokenless EMPTY. Он учитывает comments, строки и quoted identifiers, но не проверяет grammar, имена объектов, privileges или типы. Общий wire host SQL не анализирует.
+Исходные байты каждой SQL-команды передаются в engine prepare с явной длиной и без изменения текста. Для Simple Query существующий lexer isql выделяет кандидаты границ, а engine prepare подтверждает завершённость команды по модели AUTOTERM. Ограниченный SqlInfo внутри PgWire определяет вид команды, command tag, профиль transaction/session controls и признак tokenless EMPTY; grammar, имена объектов, privileges и типы проверяет движок. Общий wire host SQL не анализирует.
 
 После успешного engine prepare плагин сочетает lexical descriptor с существующими `getType()`, `getFlags()`, input/output metadata и affected records. `FLAG_HAS_CURSOR` выбирает cursor/fetch; output metadata определяет singleton output и codecs. RETURNING не превращает DML в SELECT. В I/T неподдержанный control либо UNKNOWN, включая USING wrapper, получает 0A000 до execution; в E успешно подготовленные команды, кроме разрешённого recovery, получают 25P02. Ошибка самого prepare имеет отдельный приоритет по CODEX_CONTEXT. Новые публичные DSQL getInfo items, AST annotations и parser diagnostics для PgWire не добавляются.
 
-Запрещены SQL rewriting, удаление comments из передаваемого текста, замена `$n` на `?`, подстановка параметров SQL-литералами и эмуляция успешного SET/BEGIN. Совместимость синтаксиса и реальное исполнение определяет только Firebird. Текущая реализация передаёт неподдержанный batch parser целиком и отвергает без частичных эффектов.
+Запрещены SQL rewriting, удаление comments из передаваемого текста, замена `$n` на `?`, подстановка параметров SQL-литералами и эмуляция успешного SET/BEGIN. Совместимость синтаксиса и реальное исполнение определяет только Firebird.
 
-Для следующего этапа согласована [последовательная обработка скриптов](1c/README.md): лексическое выделение исходных диапазонов по модели isql/AUTOTERM, обычный engine prepare и остановка на первой ошибке. Предварительная проверка синтаксиса всего Query отложена; ранний COMMIT сохранится и при поздней syntax error. Это пока план, не реализованная возможность.
+Simple Query поддерживает [последовательные скрипты](1c/README.md): исходные диапазоны выделяются по модели isql/AUTOTERM, каждая команда проходит обычный engine prepare и исполнение, первая окончательная ошибка прекращает остаток сообщения. Предварительная проверка синтаксиса всего Query отложена; ранний COMMIT сохраняется и при поздней syntax error. В I текущий implicit сегмент откатывается при ошибке, в T остаётся E. Extended Parse по-прежнему принимает одну команду. Приёмка от 10 ноября 2026 года — в [VALIDATION.md](VALIDATION.md).
 
 EMPTY определяется ограниченным lexer только для нулевой строки, whitespace и полностью закрытых comments без SQL tokens. Даже такой текст передаётся в обычный engine prepare неизменённым. Только сочетание этого признака с engine syntax error 42601 после успешного cleanup преобразуется в EmptyQueryResponse; permission, cancellation, resource и другие ошибки не маскируются. Незаконченные строка/comment/statement и отдельный `;` остаются parser errors. Native parser diagnostics и `isql -autoterm` не меняются.
 
-BEGIN/$n и другие несовместимые формы остаются parser errors. Дополнения сверх первого среза 1С требуют отдельной работы в движке; разрешённая классификация не добавляет SQL-совместимость.
+BEGIN/$n и другие несовместимые формы остаются parser errors. Дополнения SQL-грамматики сверх SELECT без FROM требуют отдельной работы в движке; последовательный reader и разрешённая классификация не добавляют новые SQL-конструкции.
 
 ## Возможности по этапам
 
@@ -152,7 +154,7 @@ BEGIN/$n и другие несовместимые формы остаются 
 
 Совместимые CREATE/ALTER/DROP, index и privilege операции покрываются descriptor и тестами. Неописанная команда получает явный 0A000 после prepare до исполнения. Command tag дополняет coarse getType сведениями ограниченного lexer: MERGE, UPDATE OR INSERT, RETURNING, DDL modifiers и control/session forms не смешиваются.
 
-Прежний M0 SELECT-only фильтр не является текущим execution gate. P4 поддерживает обычные DML/DDL; P5 добавляет plugin-local `ControlKind` и state policy без новых getInfo items или parser observers. Native `SET TRANSACTION` выдаёт BEGIN после реального начала transaction. Полные COMMIT/ROLLBACK в I — no-op; retaining и savepoints — 25000/I. Повторный SET TRANSACTION в T даёт 25001/E. BEGIN, START TRANSACTION и RETAINING остаются parser errors; native формы — `COMMIT/ROLLBACK [WORK] RETAIN [SNAPSHOT]`.
+Прежний M0 SELECT-only фильтр не является текущим execution gate. P4 поддерживает обычные DML/DDL; P5 добавляет plugin-local `ControlKind` и state policy без новых getInfo items или parser observers. Native `SET TRANSACTION` выдаёт BEGIN после реального начала transaction. Полные COMMIT/ROLLBACK в I завершают существующий implicit сегмент либо являются no-op при отсутствии handle; retaining и savepoints — 25000/I. Повторный SET TRANSACTION в T даёт 25001/E. BEGIN, START TRANSACTION и RETAINING остаются parser errors; native формы — `COMMIT/ROLLBACK [WORK] RETAIN [SNAPSHOT]`.
 
 P5 сохраняет native transaction при ошибке explicit block и ставит E. Обычный prepare выполняется на этом handle; descriptor после prepare разрешает recovery, остальные успешно подготовленные команды блокируются с 25P02 без execution. Failed-prepare whitelist содержит только настоящий `isc_dsql_relation_err` с итоговой nonfatal диагностикой 42P01; explicit SQLSTATE без причины недостаточен. Syntax остаётся 42601, permission — 42501; fatal/shutdown, cancel/timeout, invalid handle, resource/I/O и unknown errors не маскируются. Полный COMMIT из E откатывает текущую работу и выдаёт ROLLBACK/I; ROLLBACK завершает её; успешный ROLLBACK TO восстанавливает T и сохраняет изменения до savepoint. ROLLBACK RETAIN также восстанавливает T, COMMIT RETAIN в E получает 25P02. Полная таблица и edge cases заданы в CODEX_CONTEXT. Факт I/T/E не обещает совпадения isolation, locks или DDL semantics с PostgreSQL.
 
@@ -168,7 +170,7 @@ EMPTY определяется ограниченным lexer только дл�
 
 - PostgreSQL grammar/functions/catalog compatibility — будущий engine этап. Если он станет обязательным для целевого приложения, M3 этого приложения зависит от него явно.
 - Protocol 3.2, direct TLS negotiation, GSS encryption, PostgreSQL SCRAM/MD5 и channel binding — отдельные возможности. M3 начинает с password exchange внутри TLS и существующих Firebird credentials.
-- Simple Query batches, COPY, libpq pipeline mode, SQL named cursors, large-object API, LISTEN/NOTIFY и replication — отдельные wire/session contracts.
+- Полный предварительный разбор Simple Query остаётся отложенным: поддержаны последовательные скрипты с остановкой на первой окончательной ошибке. COPY, libpq pipeline mode, SQL named cursors, large-object API, LISTEN/NOTIFY и replication — отдельные wire/session contracts.
 - BLOB/bytea, ARRAY, OCTETS, DECFLOAT, типы с часовыми поясами и PostgreSQL custom types — отдельные codecs. Firebird BLOB handle не выдаётся за bytea.
 - Remote security database и базы, требующие ключ шифрования от native клиента, не входят в начальный authentication profile.
 - Текущая платформа — Linux/Super. SuperClassic/Classic пока диагностируются с сохранением native; для них требуется отдельная работа и приёмка. Windows host wiring/runtime отсутствуют; `.dll` входит в архитектуру plugin ABI, но не доказывает готовность Windows build.

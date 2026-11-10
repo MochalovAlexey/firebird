@@ -4,15 +4,18 @@
 
 Python scaffold мигрирован под текущий контракт: 58 live cases прошли в P6. Начальные host tests расположены в src/common/tests/WireProtocolConfigTest.cpp, src/remote/server/wire/tests и isolated tools harness. P2/P3/P4 приёмка сохранена в VALIDATION. Предыдущая P5-ревизия прошла целевую Linux/Super приёмку с native ограничением READ CONSISTENCY + AUTO COMMIT; P6 повторил сборку, unit tests и целевые регрессии по [VALIDATION.md](VALIDATION.md). Целевой P6/M1 Linux/Super принят с известными native ограничениями, включая отдельно исключённый ON CONNECT shutdown. P7 Extended Query прошёл целевую Linux/Super приёмку: 16 групп. P8 codecs прошли целевую Linux/Super приёмку: восемь групп. P9 прошёл 17 групп с реальными C libpq, raw-wire и ограниченным профилем Psycopg 3; целевой M2 Linux/Super для совместимого SQL и реализованных codecs принят. Следующий этап — P10. PASS относится к зафиксированным cases/fixtures, а наличие строки в полной матрице не означает её прохождения.
 
-## Следующий этап 1С: последовательные скрипты (ещё не реализован)
+## Подэтап 1С: последовательные скрипты — проверен 10 ноября 2026 года
 
 Решение пользователя от 9 ноября 2026 года: отказаться пока от предварительной
 синтаксической проверки всего Simple Query и останавливать скрипт при первой
-окончательной ошибке. [Архитектура и ограничение](1c/README.md). Ожидания ниже
-относятся к будущему этапу; прежние проверки отказа batches описывают текущую
-сборку. Extended Parse остаётся однокомандным.
+окончательной ошибке. [Архитектура и ограничение](1c/README.md).
+[pgwire_script_smoke.py](tools/pgwire_script_smoke.py) прошёл восемь групп через
+raw TCP и настоящую libpq; изменённый pytest-сценарий прошёл через psycopg2.
+Регрессии Simple Query, транзакций, Extended Query и native прошли 12/14/16/9
+групп/проверок. Точные результаты и границы покрытия — в [VALIDATION.md](VALIDATION.md).
+Extended Parse остаётся однокомандным.
 
-| Проверка | Ожидаемый результат после реализации |
+| Проверка | Критерий приёмки |
 |---|---|
 | Несколько SELECT через PQsendQuery/PQgetResult и raw TCP | Все строки/OID/tags, один ReadyForQuery; один PQexec недостаточен для проверки всех результатов |
 | CREATE TABLE; INSERT; SELECT | Последовательный prepare видит результат предыдущего DDL |
@@ -26,9 +29,9 @@ Python scaffold мигрирован под текущий контракт: 58 
 | Ошибка финального commit / ошибка после ранее успешного COMMIT | Нет финального успешного CommandComplete при commit failure; последующая обычная ошибка не становится fatal только из-за раннего COMMIT |
 | Однокомандные Simple/Extended, native isql/AUTOTERM, cleanup | Прежние сценарии и diagnostics сохранены; ресурсы освобождены, нет скрытых application transactions при пробных prepare |
 
-Не проверять наличие опечатки в хвосте до первого исполнения как обязательное
-условие успеха этого этапа. Не считать новые строки этой таблицы пройденными
-до фактического runtime-прогона.
+Наличие опечатки в хвосте до первого исполнения не проверяется: это принятое
+ограничение этапа. Приёмка совместимых скриптов не означает поддержку стартовых
+PostgreSQL SET или фактического запуска 1С.
 
 ## Этапы и обязательный минимум
 
@@ -95,7 +98,7 @@ P4-ревизия [pgwire_simple_query_smoke.py](tools/pgwire_simple_query_smoke
 | P4-09 | Parser 42601, relation 42P01, permission 42501, unique 23505, FK 23503, CHECK 23514, coarse NOT NULL/domain 23000. Реальный commit trigger даёт FATAL/EOF без CommandComplete/Ready, native observer видит rollback |
 | P4-10 | C libpq/psycopg2 autocommit, native coexistence, startup/lifecycle/trace; P4 остаётся I-only, explicit controls принимаются отдельно в P5 |
 
-Неподдержанный USING wrapper проверяется после engine prepare: валидный `USING IN AUTONOMOUS TRANSACTION DO ...` получает 0A000. USING без обязательной clause сохраняет native semantic 42000; malformed/batch SQL сохраняет syntax 42601. Эти ошибки не маскируются capability refusal; GEN_ID fixture исключает скрытое частичное execution. Отдельно проверяются следующие успешные queries после recoverable ошибок. Ошибки close/free и engine timeout отмечаются по фактическому evidence.
+Неподдержанный USING wrapper проверяется после engine prepare: валидный `USING IN AUTONOMOUS TRANSACTION DO ...` получает 0A000. USING без обязательной clause сохраняет native semantic 42000; malformed SQL сохраняет syntax 42601. Эти ошибки не маскируются capability refusal; GEN_ID fixture исключает исполнение отвергнутой команды. После добавления скриптов negative batch fixtures содержат ошибку в первой команде; успешный префикс и транзакционные границы проверяются отдельным script harness. Отдельно проверяются следующие успешные queries после recoverable ошибок. Ошибки close/free и engine timeout отмечаются по фактическому evidence.
 
 ## P2 — историческая startup приёмка и regression
 
@@ -175,10 +178,10 @@ Startup SQLSTATE проверять raw ErrorResponse field `C`: `psycopg2.conne
 | W04 | Startup 3.0/неподдержанные version/options, SSLRequest/GSSENCRequest | Реальный профиль: до TLS ровно `N`; неизвестные обещания не подтверждены успешным startup |
 | W05 | Независимые golden bytes результатов/errors | OID, lengths, NULL=-1, empty=0, required ErrorResponse fields, ReadyForQuery и tags; не только собственный encode→decode |
 | W06 | Native keepalive/crypt/compression и parallel sessions | PG stream не получает native bytes; framing/auth/SQL state разных sessions независимы |
-| W07 | Байты SQL на входе и в parser | Code review неизменной передачи bytes/length и TCP fixtures для comments, quotes, semicolons, whitespace и UTF8; wire frontend не нормализует и не переписывает SQL |
+| W07 | Байты SQL на входе и в parser | Code review неизменной передачи bytes/length исходных диапазонов команд и TCP fixtures для comments, quotes, semicolons, whitespace и UTF8; wire frontend не нормализует и не переписывает SQL |
 | W08 | EMPTY и malformed SQL | Исходный SQL проходит engine prepare; только tokenless closed-comments/whitespace + syntax 42601 даёт EMPTY. Незаконченные tokens, vertical tab и отдельный `;` остаются errors; non-syntax errors сохраняются |
 | W09 | `BEGIN`, `START TRANSACTION`, `COMMIT RETAINING`, `$1`, `::date` и похожие tokens внутри literals/comments | Engine syntax errors в неподдержанных позициях; внутри literals/comments смысл определяет parser. Ошибка в T переводит в E; в E syntax сохраняет 42601. Native RETAIN [SNAPSHOT] проверяется положительно, frontend replacement отсутствует |
-| W10 | Несколько statements в одном Query/Parse | Текущая сборка отвергает неподдержанный batch без частичного исполнения. Будущий Simple Query следует отдельной таблице последовательных скриптов выше; Extended Parse продолжает отвергать несколько statements |
+| W10 | Несколько statements в одном Query/Parse | Simple Query последовательно исполняет команды и прекращает остаток при первой окончательной ошибке по таблице выше. Нет предварительной проверки всего Query: ранний COMMIT сохраняется и при поздней syntax error. Extended Parse отвергает несколько statements |
 | W11 | Native callers и isql -autoterm | Штатные parser diagnostics, continuation и trace не меняются; PgWire не добавляет public EMPTY marker или metadata API |
 
 W07 требует code review неизменной передачи SQL и TCP fixtures с comments/quotes/CTE/semicolons. Ограниченный plugin lexer проверяется отдельно: он задаёт descriptor/EMPTY, а engine по-прежнему валидирует каждый SQL. Unsupported wire messages получают protocol/capability error; ожидания уточняются при Extended/TLS/cancel.

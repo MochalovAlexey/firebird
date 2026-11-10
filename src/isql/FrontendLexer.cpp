@@ -168,6 +168,31 @@ std::variant<FrontendLexer::SingleStatement, FrontendLexer::IncompleteTokenError
 	return IncompleteTokenError{false};
 }
 
+std::optional<std::size_t> FrontendLexer::getStatementEnd()
+{
+	try
+	{
+		while (pos < end)
+		{
+			skipSpacesAndComments();
+			if (pos == end)
+				break;
+
+			if (*pos == ';')
+				return ++pos - buffer.cbegin();
+
+			if (!getStringToken().has_value())
+				++pos;
+		}
+	}
+	catch (const IncompleteTokenError&)
+	{
+		// The SQL parser diagnoses the remaining original text at end of input.
+	}
+
+	return std::nullopt;
+}
+
 FrontendLexer::Token FrontendLexer::getToken()
 {
 	skipSpacesAndComments();

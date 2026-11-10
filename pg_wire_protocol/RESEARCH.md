@@ -16,7 +16,7 @@ Firebird уже имеет PluginManager, загрузку `.so`/`.dll`, factori
 
 ## SQL: ограниченная классификация в плагине, проверка и исполнение в движке
 
-SQL передаётся в Firebird неизменным, с явной длиной. Wire-код проверяет framing, NUL, encoding и лимиты. По уточнённому решению пользователя ограниченный lexer внутри PgWire определяет command tag, профиль transaction/session controls и tokenless EMPTY. Comments, strings и quoted identifiers учитываются при классификации, но исходный SQL не изменяется. Lexer не валидирует grammar, объекты, права или типы и не разбивает batch по `;`. Общий wire host SQL не анализирует.
+Исходные диапазоны SQL-команд передаются в Firebird неизменными, с явной длиной. Wire-код проверяет framing, NUL, encoding и лимиты. По уточнённому решению пользователя ограниченный SqlInfo внутри PgWire определяет command tag, профиль transaction/session controls и tokenless EMPTY. Comments, strings и quoted identifiers учитываются при классификации, но исходный SQL не изменяется. Для [последовательных скриптов](1c/README.md) используется lexer isql с подтверждением границы через обычный prepare по модели AUTOTERM; grammar, объекты, права и типы проверяет движок. Общий wire host SQL не анализирует.
 
 `JAttachment::prepare` передаёт запрос в DSQL. Текущее начальное правило grammar принимает один statement с необязательной завершающей `;`; несовместимый SQL получает ошибку этого parser. SQL whitelist только для CREATE/DROP TABLE не нужен. Ограничения wire codecs и API-возможностей должны быть явными, но не превращаться во второй SQL dialect [F4].
 
@@ -79,7 +79,7 @@ Super и SuperClassic используют общий многоклиентск
 - Штатная сборка master и отдельный shared plugin target; загрузка, отключение, ошибка модуля и доступность native listener.
 - CLOOP ABI, порядок загрузки/освобождения modules и позиционная config validation.
 - Общий pre-attach auth service, per-database policy, engine-only route и crypto profile.
-- Ограниченная lexical classification в PgWire вместе со штатными engine interfaces; engine validation каждого SQL, отсутствие rewriting/splitting/эмуляции и корректная модель transaction/session effects.
+- Ограниченная lexical classification в PgWire вместе со штатными engine interfaces; подтверждение границ и validation каждой команды через engine prepare, отсутствие rewriting/эмуляции и корректная модель transaction/session effects.
 - CHAR/numeric/binary conversions, полный status mapping, portal lifetime и recovery до/после Sync.
 - Super/SuperClassic shutdown, внешняя отмена, idle detection и TLS transport.
 - Миграция fixtures и trace конкретного приложения с разделением wire failures и SQL dependencies.

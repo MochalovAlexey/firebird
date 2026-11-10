@@ -276,8 +276,6 @@ QUIT;
         client = Client(self).login()
         for sql, state in (("not SQL", "42601"), ("BEGIN", "42601"),
                            ("SELECT $1 FROM RDB$DATABASE", "42601"),
-                           ("SELECT GEN_ID(PGWIRE_GUARD, 1) FROM RDB$DATABASE; "
-                            "SELECT CAST(42 AS INTEGER) FROM RDB$DATABASE", "42601"),
                            ("SELECT ID FROM PGWIRE_MISSING", "42P01"),
                            ("SELECT CAST(? AS INTEGER) FROM RDB$DATABASE", "0A000"),
                            ("SELECT CAST(1.25 AS NUMERIC(9,2)) FROM RDB$DATABASE", "0A000"),

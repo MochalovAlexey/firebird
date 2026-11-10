@@ -30,7 +30,8 @@ public:
 	QueryExecutor(const QueryExecutor&) = delete;
 	QueryExecutor& operator=(const QueryExecutor&) = delete;
 
-	// SQL goes unchanged to native prepare. Sends result/error, not ReadyForQuery.
+	// Simple Query script: original statement spans go unchanged to native prepare.
+	// Sends per-command results/error; the caller sends one ReadyForQuery.
 	// false means close the session; transport failures propagate to its owner.
 	bool execute(Protocol& protocol, std::string_view sql);
 	// Dispatches both query protocols, including recovery through Sync and Ready.
