@@ -328,6 +328,32 @@ void testBoundaries()
 		unknown(sql);
 }
 
+void testStringModeAndSavepoints()
+{
+	for (const auto sql : {"SET standard_conforming_strings=off", "set standard_conforming_strings TO 'ON'"})
+		expect(sql, "SET", CountKind::None, ControlKind::Session);
+	for (const auto sql : {"SAVEPOINT name", "SAVEPOINT \"NAME \"", "SAVEPOINT \"NA\"\"ME \""})
+	{
+		const auto info = inspectSql(sql);
+		if (!info.supported || info.savepoint != (std::string_view(sql).find("NA\"\"ME") != std::string_view::npos ? "NA\"ME" : "NAME"))
+			throw std::runtime_error("Savepoint identifier normalization differs");
+		++checks;
+	}
+	const auto only = inspectSql("RELEASE SAVEPOINT \"я🙂 \" ONLY");
+	const auto all = inspectSql("RELEASE SAVEPOINT \"я🙂\"");
+	if (!only.only || all.only || only.savepoint != "я🙂" || all.savepoint != only.savepoint)
+		throw std::runtime_error("RELEASE ONLY or UTF8 normalization differs");
+	++checks;
+	const auto rollback = inspectSql("ROLLBACK WORK TO SAVEPOINT \"я🙂 \"", false);
+	if (rollback.control != ControlKind::RollbackTo || rollback.savepoint != only.savepoint)
+		throw std::runtime_error("ROLLBACK savepoint descriptor differs");
+	++checks;
+	const auto escaped = inspectSql(R"(COMMIT '\'; SELECT 2')", false);
+	if (escaped.supported)
+		throw std::runtime_error("Quoted text became transaction control");
+	++checks;
+}
+
 } // namespace
 
 int main()
@@ -340,6 +366,7 @@ int main()
 		testTransactionControl();
 		testSessionControl();
 		testBoundaries();
+		testStringModeAndSavepoints();
 		std::printf("SQL classification: %u checks passed\n", checks);
 		return 0;
 	}

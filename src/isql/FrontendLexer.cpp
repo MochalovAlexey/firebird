@@ -321,6 +321,15 @@ std::optional<FrontendLexer::Token> FrontendLexer::getStringToken()
 
 			while (pos != end)
 			{
+				// Boundary scanning only: retain the source escape, never decode its value.
+				if (backslashStrings && quote == '\'' && *pos == '\\')
+				{
+					token.processedText += *pos++;
+					if (pos == end)
+						break;
+					token.processedText += *pos++;
+					continue;
+				}
 				if (*pos == quote)
 				{
 					if ((pos + 1) < end && *(pos + 1) == quote)

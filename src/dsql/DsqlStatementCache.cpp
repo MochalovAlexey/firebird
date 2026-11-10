@@ -70,10 +70,10 @@ int DsqlStatementCache::blockingAst(void* astObject)
 }
 
 RefPtr<DsqlStatement> DsqlStatementCache::getStatement(thread_db* tdbb, const string& text, USHORT clientDialect,
-	bool isInternalRequest)
+	bool pgStringEscapes, bool isInternalRequest)
 {
 	RefStrPtr key;
-	buildStatementKey(tdbb, key, text, clientDialect, isInternalRequest);
+	buildStatementKey(tdbb, key, text, clientDialect, pgStringEscapes, isInternalRequest);
 
 	if (const auto entryPtr = map.get(key))
 	{
@@ -114,7 +114,7 @@ RefPtr<DsqlStatement> DsqlStatementCache::getStatement(thread_db* tdbb, const st
 }
 
 void DsqlStatementCache::putStatement(thread_db* tdbb, const string& text, USHORT clientDialect,
-	bool isInternalRequest, RefPtr<DsqlStatement> dsqlStatement)
+	bool pgStringEscapes, bool isInternalRequest, RefPtr<DsqlStatement> dsqlStatement)
 {
 	fb_assert(dsqlStatement->isDml());
 
@@ -131,7 +131,7 @@ void DsqlStatementCache::putStatement(thread_db* tdbb, const string& text, USHOR
 	const unsigned statementSize = dsqlStatement->getSize();
 
 	RefStrPtr key;
-	buildStatementKey(tdbb, key, text, clientDialect, isInternalRequest);
+	buildStatementKey(tdbb, key, text, clientDialect, pgStringEscapes, isInternalRequest);
 
 	StatementEntry newStatement(getPool());
 	newStatement.key = key;
@@ -254,7 +254,7 @@ void DsqlStatementCache::purgeAllAttachments(thread_db* tdbb)
 }
 
 void DsqlStatementCache::buildStatementKey(thread_db* tdbb, RefStrPtr& key, const string& text, USHORT clientDialect,
-	bool isInternalRequest)
+	bool pgStringEscapes, bool isInternalRequest)
 {
 	const auto attachment = tdbb->getAttachment();
 
@@ -271,9 +271,10 @@ void DsqlStatementCache::buildStatementKey(thread_db* tdbb, RefStrPtr& key, cons
 	const int debugOptions = (int) attachment->getDebugOptions().getDsqlKeepBlr();
 
 	key = FB_NEW_POOL(getPool()) RefString(getPool());
-	key->resize(1 + sizeof(charSetId) + text.length() + 1 + searchPathLen + 1);
+	key->resize(2 + sizeof(charSetId) + text.length() + 1 + searchPathLen + 1);
 
 	char* p = key->begin();
+	*p++ = pgStringEscapes;
 	*p++ = (clientDialect << 2) | (int(isInternalRequest) << 1) | debugOptions;
 	memcpy(p, &charSetId, sizeof(charSetId));
 	p += sizeof(charSetId);

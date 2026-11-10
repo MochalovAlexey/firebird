@@ -49,6 +49,8 @@ struct SqlInfo
 	bool empty = false;
 	bool supported = false;
 	ControlKind control = ControlKind::None;
+	std::string savepoint;
+	bool only = false;
 };
 
 // Classify the leading command for wire completion and capability checks. This
@@ -56,7 +58,7 @@ struct SqlInfo
 // prepare. ControlKind describes the command, not the current transaction state.
 // The SQL is never modified, split or executed here. empty is true only for an
 // entirely tokenless input, including whitespace and fully closed comments.
-SqlInfo inspectSql(std::string_view sql);
+SqlInfo inspectSql(std::string_view sql, bool standardStrings = true);
 
 } // namespace Firebird::PgWire
 

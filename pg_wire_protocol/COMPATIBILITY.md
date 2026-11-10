@@ -18,8 +18,25 @@ CancelRequest key. Имя колонки остаётся Firebird `PG_BACKEND_P
 и `client_encoding` с проверками при Execute, без смены режима. Другие значения —
 22023, не-UTF8 attachment — 0A000. Проверка PostgreSQL-прав на `lc_messages`
 отложена по решению пользователя; точные ограничения — в 1c/README.md.
-Остальные шесть SET стартового пакета, PG-параметры/касты/BEGIN, каталоги и
+Остальные пять SET стартового пакета, PG-параметры/касты/BEGIN, каталоги и
 неподдержанная нагрузка остаются отдельной работой. Полная совместимость и фактический запуск 1С не заявляются.
+
+## Изменяемый режим строк PG4
+
+`standard_conforming_strings` поддерживает on/off, реальные decoded bytes,
+prepare/cache isolation, Simple message snapshot и Extended Parse snapshot.
+PgWire восстанавливает bool при ошибке уже в E и при rollback/savepoints,
+публикует фактический ParameterStatus. История одной настройки допускает native
+repeated names/RELEASE ONLY; undo данных остаётся engine-owned.
+Attachment getInfo + два prepare flags — единственное расширение публичного
+контракта, без новых методов. Прямой OO API не откатывает session bool автоматически.
+
+Off требует UTF8 attachment и UTF8 introducer обычных строк; Q-strings и native
+1/2/3 сохраняются. Длины и сцепление литералов остаются Firebird; E/dollar strings,
+SET LOCAL/SESSION/DEFAULT/SHOW/RESET parameter и новые startup keys не добавлены.
+Новая история совместно с TPB AUTO COMMIT либо nested RESET не заявляется;
+старый positive SNAPSHOT AUTO COMMIT baseline относится к native данным,
+не к этому новому контракту. Полные ограничения — в [1c/README.md](1c/README.md).
 
 ## Startup/authentication: Linux/Super P2 PASS
 
@@ -91,7 +108,7 @@ Source-аудит Psycopg 3.3.6 также показывает cache invalidati
 
 Исходные байты каждой SQL-команды передаются в engine prepare с явной длиной и без изменения текста. Для Simple Query существующий lexer isql выделяет кандидаты границ, а engine prepare подтверждает завершённость команды по модели AUTOTERM. Ограниченный SqlInfo внутри PgWire определяет вид команды, command tag, профиль transaction/session controls и признак tokenless EMPTY; grammar, имена объектов, privileges и типы проверяет движок. Общий wire host SQL не анализирует.
 
-После успешного engine prepare плагин сочетает lexical descriptor с существующими `getType()`, `getFlags()`, input/output metadata и affected records. `FLAG_HAS_CURSOR` выбирает cursor/fetch; output metadata определяет singleton output и codecs. RETURNING не превращает DML в SELECT. В I/T неподдержанный control либо UNKNOWN, включая USING wrapper, получает 0A000 до execution; в E успешно подготовленные команды, кроме разрешённого recovery, получают 25P02. Ошибка самого prepare имеет отдельный приоритет по CODEX_CONTEXT. Новые публичные DSQL getInfo items, AST annotations и parser diagnostics для PgWire не добавляются.
+После успешного engine prepare плагин сочетает lexical descriptor с существующими `getType()`, `getFlags()`, input/output metadata и affected records. `FLAG_HAS_CURSOR` выбирает cursor/fetch; output metadata определяет singleton output и codecs. RETURNING не превращает DML в SELECT. В I/T неподдержанный control либо UNKNOWN, включая USING wrapper, получает 0A000 до execution; в E успешно подготовленные команды, кроме разрешённого recovery, получают 25P02. Ошибка самого prepare имеет отдельный приоритет по CODEX_CONTEXT. Для классификации SQL новые публичные DSQL metadata, AST annotations и parser diagnostics не добавляются. Узкое исключение для standard_conforming_strings — attachment getInfo item и два prepare flags, описанные в 1c/README.md; методов и vtables оно не меняет.
 
 Запрещены SQL rewriting, удаление comments из передаваемого текста, замена `$n` на `?`, подстановка параметров SQL-литералами и эмуляция успешного SET/BEGIN. Совместимость синтаксиса и реальное исполнение определяет только Firebird.
 
@@ -162,7 +179,7 @@ BEGIN/$n и другие несовместимые формы остаются 
 
 P5 сохраняет native transaction при ошибке explicit block и ставит E. Обычный prepare выполняется на этом handle; descriptor после prepare разрешает recovery, остальные успешно подготовленные команды блокируются с 25P02 без execution. Failed-prepare whitelist содержит только настоящий `isc_dsql_relation_err` с итоговой nonfatal диагностикой 42P01; explicit SQLSTATE без причины недостаточен. Syntax остаётся 42601, permission — 42501; fatal/shutdown, cancel/timeout, invalid handle, resource/I/O и unknown errors не маскируются. Полный COMMIT из E откатывает текущую работу и выдаёт ROLLBACK/I; ROLLBACK завершает её; успешный ROLLBACK TO восстанавливает T и сохраняет изменения до savepoint. ROLLBACK RETAIN также восстанавливает T, COMMIT RETAIN в E получает 25P02. Полная таблица и edge cases заданы в CODEX_CONTEXT. Факт I/T/E не обещает совпадения isolation, locks или DDL semantics с PostgreSQL.
 
-PgWire session управляет максимум одной текущей application transaction на своём attachment. P7 хранит prepared statements и portals по контракту выше; клиентского кэша savepoint names нет. Native session SET реализованы по whitelist CODEX_CONTEXT, с tag SET и реальным изменением engine state. ALTER SESSION RESET выдаёт RESET и учитывает смену underlying transaction при том же interface pointer: I остаётся I, T — T, E получает 25P02. Внутренние engine system/security/autonomous transactions исключены из подсчёта application handles. Parse/Describe/statements/portals используют current handle либо prepare с NULL без скрытых transactions; RESET инвалидирует их кэш, а runtime cache/lifetime tests входят в P7 acceptance. Это ограничение PgWire, не native protocol или общего host для других plugins.
+PgWire session управляет максимум одной текущей application transaction на своём attachment. P7 хранит prepared statements и portals по контракту выше; для standard_conforming_strings добавлена узкая история пользовательских savepoint names/snapshots. Native session SET реализованы по whitelist CODEX_CONTEXT, с tag SET и реальным изменением engine state. ALTER SESSION RESET выдаёт RESET и учитывает смену underlying transaction при том же interface pointer: I остаётся I, T — T, E получает 25P02. Внутренние engine system/security/autonomous transactions исключены из подсчёта application handles. Parse/Describe/statements/portals используют current handle либо prepare с NULL без скрытых transactions; RESET инвалидирует их кэш, а runtime cache/lifetime tests входят в P7 acceptance. Это ограничение PgWire, не native protocol или общего host для других plugins.
 
 Явные native transaction characteristics сохраняют семантику Firebird. В частности, `SET TRANSACTION AUTO COMMIT` может зафиксировать изменения до конца логического блока: последующий rollback не отменяет прежние commits. AUTO COMMIT / NO AUTO UNDO не сканируются lexer и не извлекаются в descriptor; их применяет native engine, а приёмка сравнивает effects с native API. I/T/E не подменяет это поведение обещанием PostgreSQL atomicity.
 

@@ -55,7 +55,7 @@ Host проверяет UTF8 и byte limits: database/user/application_name до
 
 Исходные байты каждой SQL-команды передаются в engine prepare с явной длиной и без изменения текста. Для Simple Query существующий lexer isql выделяет кандидаты границ, а engine prepare подтверждает завершённость команды по модели AUTOTERM. Ограниченный SqlInfo внутри PgWire определяет вид команды, command tag, профиль transaction/session controls и признак tokenless EMPTY; grammar, имена объектов, privileges и типы проверяет движок. Общий wire host SQL не анализирует.
 
-После успешного engine prepare плагин сочетает lexical descriptor с существующими `getType()`, `getFlags()`, input/output metadata и affected records. `FLAG_HAS_CURSOR` выбирает cursor/fetch; output metadata определяет singleton output и codecs. RETURNING не превращает DML в SELECT. В I/T неподдержанный control либо UNKNOWN, включая USING wrapper, получает 0A000 до execution; в E успешно подготовленные команды, кроме разрешённого recovery, получают 25P02. Ошибка самого prepare имеет отдельный приоритет по CODEX_CONTEXT. Новые публичные DSQL getInfo items, AST annotations и parser diagnostics для PgWire не добавляются.
+После успешного engine prepare плагин сочетает lexical descriptor с существующими `getType()`, `getFlags()`, input/output metadata и affected records. `FLAG_HAS_CURSOR` выбирает cursor/fetch; output metadata определяет singleton output и codecs. RETURNING не превращает DML в SELECT. В I/T неподдержанный control либо UNKNOWN, включая USING wrapper, получает 0A000 до execution; в E успешно подготовленные команды, кроме разрешённого recovery, получают 25P02. Ошибка самого prepare имеет отдельный приоритет по CODEX_CONTEXT. Для классификации SQL новые публичные DSQL metadata, AST annotations и parser diagnostics не добавляются. Узкое исключение для standard_conforming_strings — attachment getInfo item и два prepare flags, описанные в 1c/README.md; методов и vtables оно не меняет.
 
 Запрещены SQL rewriting, удаление comments из передаваемого текста, замена `$n` на `?`, подстановка параметров SQL-литералами и эмуляция успешного SET/BEGIN. Совместимость синтаксиса и реальное исполнение определяет только Firebird.
 
@@ -63,9 +63,33 @@ Simple Query поддерживает [последовательные скри
 
 EMPTY определяется ограниченным lexer только для нулевой строки, whitespace и полностью закрытых comments без SQL tokens. Даже такой текст передаётся в обычный engine prepare неизменённым. Только сочетание этого признака с engine syntax error 42601 после успешного cleanup преобразуется в EmptyQueryResponse; permission, cancellation, resource и другие ошибки не маскируются. Незаконченные строка/comment/statement и отдельный `;` остаются parser errors. Native parser diagnostics и `isql -autoterm` не меняются.
 
-Coarse getType не различает все MERGE/UPDATE OR INSERT/RETURNING/DDL forms, поэтому исходный tag дополняется ограниченной lexical classification после успешного prepare. Наличие output columns не служит классификацией операции; getFlags и output metadata выбирают API исполнения. Плагин не расширяет AST, публичный getInfo или diagnostics движка ради этой задачи.
+Coarse getType не различает все MERGE/UPDATE OR INSERT/RETURNING/DDL forms, поэтому исходный tag дополняется ограниченной lexical classification после успешного prepare. Наличие output columns не служит классификацией операции; getFlags и output metadata выбирают API исполнения. Плагин не расширяет AST, публичный statement getInfo или diagnostics движка ради классификации. Attachment getInfo новой настройки не является SQL metadata.
 
 В P5 `ControlKind` остаётся локальным для PgWire: начало/полное завершение/retaining, savepoint action, session SET и reset. Transaction characteristics не извлекаются из текста: весь SET TRANSACTION обрабатывает движок. После исполнения учитываются фактические изменения native handle и session state. Descriptor не обещает PostgreSQL isolation/DDL semantics и не подменяет native execution.
+
+## Настройка строк: узкое расширение контракта
+
+По согласованной редакции 2 задания standard_conforming_strings хранится в
+attachment, а PostgreSQL-история отката — в существующем QueryExecutor.
+Разрешены getInfo item 163 и prepare flags ON/OFF, без новых методов/vtables.
+SqlInfo дополнительно извлекает имя пользовательского savepoint и ONLY;
+проверка грамматики и native undo остаются в движке. Plugin не декодирует
+литералы и не извлекает значение SET из текста: читает фактический bool.
+
+Baseline логического блока существует даже до появления native handle.
+Ошибка Simple/Extended сразу восстанавливает последний snapshot фиксированным
+служебным SET с NULL transaction; explicit native transaction остаётся живой в E.
+Readback/cleanup failure делает session FATAL. Retaining/reset очищают прежнюю
+историю, native repeated names/RELEASE ONLY сохраняют свою семантику.
+ParameterStatus отправляется при startup и перед ReadyForQuery, по getInfo.
+
+Simple Query фиксирует строковый режим для всего сообщения; Extended Parse —
+для prepared statement, включая последующие Bind prepares. Parser/cache используют
+один effective context. Engine transformString сохраняет decoded values в native
+hex notation для DDL/PSQL. Прямой OO API не получает PG rollback session bool.
+Подтверждённый профиль исключает TPB AUTO COMMIT и nested RESET вместе с новой
+историей. Подробные границы, длины, синтаксис и пример — в [1c/README.md](1c/README.md).
+
 
 ## 6. Startup и framing
 
@@ -74,7 +98,7 @@ Coarse getType не различает все MERGE/UPDATE OR INSERT/RETURNING/D
 - До M3 SSLRequest/GSSENCRequest получают один byte `N`, затем продолжается Startup. С M3 SSLRequest может перейти в TLS в том же endpoint.
 - Проверяются bounds до allocation, overflow, NUL terminators, UTF8 и допустимые startup keys. Query содержит ровно одну NUL-terminated SQL string; лишние bytes после terminator — protocol error.
 - Непустой user обязателен; при отсутствии database используется user и всё равно проверяется alias allowlist. Явно пустой database отвергается. client_encoding отсутствует либо равен точному UTF8; application_name поддержан. Неизвестные keys/options/replication получают 0A000; иная encoding — 22023, invalid UTF8 — 22021. Duplicate keys, неверные lengths/terminators и хвост после NUL — 08P01.
-- Начальные ParameterStatus: `client_encoding=UTF8`, `server_encoding=UTF8`, `standard_conforming_strings=on`, `DateStyle=ISO, MDY`. P8 публикует `integer_datetimes=on` для integer-based binary temporal codecs; TimeZone не публикуется, типы с TZ не поддержаны. IntervalStyle не заявлять без interval codec/session contract.
+- Начальные ParameterStatus: `client_encoding=UTF8`, `server_encoding=UTF8`, `standard_conforming_strings` из attachment getInfo (изначально on), `DateStyle=ISO, MDY`. P8 публикует `integer_datetimes=on` для integer-based binary temporal codecs; TimeZone не публикуется, типы с TZ не поддержаны. IntervalStyle не заявлять без interval codec/session contract.
 - `server_version` — документированный compatibility token. Исходное значение из probe: `16.0 (Firebird pgwire prototype)`; его влияние на целевого клиента проверяется отдельно. Оно не обещает PostgreSQL SQL compatibility.
 - До реализации cancellation BackendKeyData не выдаётся. После startup отправляется ReadyForQuery `I`.
 - Поддерживаются partial/coalesced frames, short writes, EOF, EINTR и backpressure. Native crypt/compression/op_dummy не попадают в PG stream.
@@ -83,7 +107,7 @@ Coarse getType не различает все MERGE/UPDATE OR INSERT/RETURNING/D
 
 ## 7. Simple Query и результаты
 
-Каждая команда Simple Query проходит обычный engine prepare с явной byte length и клиентским `SQL_DIALECT_PG` (4), без изменения исходных байтов. Extended Parse и повторный prepare portal используют тот же dialect. База/DPB остаются в dialect 3. PG-режим добавляет SELECT без FROM и фиксированный English/UTF8 профиль SET `lc_messages`/`client_encoding`, описанный в 1c/README.md; типы и арифметика сохраняют dialect 3. Штатный cache различает исходные клиентские dialects; native 1/2/3 сохраняют грамматику. Границы нового режима — в [первом срезе 1С](1c/README.md). Engine prepare принимает один statement. Для Simple Query `FrontendLexer::getStatementEnd()` возвращает кандидаты границ в исходном Query без чтения следующей команды; prepare с `PREPARE_REQUIRE_SEMICOLON` подтверждает их полноту. При `isc_command_end_err2` кандидат накапливается дальше, включая внутренние PSQL-разделители; последний хвост без `;` проходит обычный prepare. Предварительного разбора всего Query нет: первая окончательная ошибка прекращает остаток. Extended Parse остаётся однокомандным.
+Каждая команда Simple Query проходит обычный engine prepare с явной byte length и клиентским `SQL_DIALECT_PG` (4), без изменения исходных байтов. Extended Parse и повторный prepare portal используют тот же dialect. База/DPB остаются в dialect 3. PG-режим добавляет SELECT без FROM, изменяемый `standard_conforming_strings` и фиксированный English/UTF8 профиль SET `lc_messages`/`client_encoding`, описанный в 1c/README.md; типы и арифметика сохраняют dialect 3. Штатный cache различает исходные клиентские dialects и эффективный режим разбора обычных PG-строк; native 1/2/3 сохраняют грамматику. Границы нового режима — в [первом срезе 1С](1c/README.md). Engine prepare принимает один statement. Для Simple Query `FrontendLexer::getStatementEnd()` возвращает кандидаты границ в исходном Query без чтения следующей команды; prepare с `PREPARE_REQUIRE_SEMICOLON` подтверждает их полноту. При `isc_command_end_err2` кандидат накапливается дальше, включая внутренние PSQL-разделители; последний хвост без `;` проходит обычный prepare. Предварительного разбора всего Query нет: первая окончательная ошибка прекращает остаток. Extended Parse остаётся однокомандным.
 
 Текущий `Execute.cpp` создаёт один `QueryExecutor` на authenticated session. Prepare получает current native transaction, если она есть, иначе NULL/system prepare. В I это может быть handle текущего Simple Query сегмента или ещё не завершённого Extended cycle. После successful prepare проверяются plugin-local descriptor и input/output metadata. Обычный Query из I создаёт implicit transaction только перед execution; в T использует существующую. Cursor flag выбирает openCursor/fetch, иначе execute выдаёт singleton output при наличии output columns. RowDescription/DataRow передаются потоком; отсутствие output не создаёт RowDescription. Request handles закрываются до CommandComplete. Команды Simple Query используют один implicit сегмент до полного COMMIT/ROLLBACK или конца Query; промежуточные CommandComplete не завершают его. Последний CommandComplete отправляется после успешного implicit commit, explicit transaction сохраняется. ReadyForQuery отражает I/T/E. Ошибка прекращает остаток Query и откатывает текущий implicit сегмент; recoverable explicit error сохраняет transaction и E. Ранее завершённый COMMIT не отменяется поздней ошибкой, включая syntax error. Ошибка cleanup, неопределённый commit или fatal engine error завершают session. Целевая Linux/Super приёмка P5 прошла с известным native ограничением READ CONSISTENCY + AUTO COMMIT; evidence и исторические P4 результаты в VALIDATION.
 
@@ -136,7 +160,7 @@ Implicit TPB: READ WRITE, READ COMMITTED READ CONSISTENCY, WAIT без зада�
 
 Native session SET whitelist: ROLE / TRUSTED ROLE; DEBUG OPTION; DECFLOAT ROUND / TRAPS TO; SESSION IDLE TIMEOUT; STATEMENT TIMEOUT; TIME ZONE; BIND OF; OPTIMIZE; SEARCH_PATH TO. Подготовленные команды исполняются движком и выдают SET, сохраняя I либо T; в E они блокируются с 25P02. Их аргументы проверяет engine, и PostgreSQL-only SET не получает фиктивного успеха.
 
-`ALTER SESSION RESET` имеет отдельный descriptor и tag RESET. Он может откатить transaction и создать новую за тем же `ITransaction` interface; равенства указателей недостаточно для определения lifetime. После successful reset в T сохраняется T для новой transaction, в I — I; в E reset получает 25P02. P7 хранит statements/portals по разделу 11; RESET инвалидирует весь этот кэш. Имена savepoints плагин не хранит. Текущие ParameterStatus не описывают изменяемые reset options. Если reset закрыл attachment/сделал handle недействительным, session завершается через FATAL. P7 runtime-приёмка отдельно проверяет invalidation prepared objects/portals, зависящих от сброшенных settings/role/temp objects.
+`ALTER SESSION RESET` имеет отдельный descriptor и tag RESET. Он может откатить transaction и создать новую за тем же `ITransaction` interface; равенства указателей недостаточно для определения lifetime. После successful reset в T сохраняется T для новой transaction, в I — I; в E reset получает 25P02. P7 хранит statements/portals по разделу 11; RESET инвалидирует весь этот кэш. Для standard_conforming_strings плагин хранит узкую историю имён и bool snapshots пользовательских savepoints; native undo данных остаётся в движке. RESET очищает историю standard_conforming_strings и возвращает on; ParameterStatus читает это состояние из движка. Если reset закрыл attachment/сделал handle недействительным, session завершается через FATAL. P7 runtime-приёмка отдельно проверяет invalidation prepared objects/portals, зависящих от сброшенных settings/role/temp objects.
 
 После обнаружения disconnect/EOF закрываются cursor/statement, откатывается transaction и выполняется detach. Отдельного watcher socket во время engine call нет: обрыв обнаруживается после возврата из движка при следующем I/O, поэтому немедленная отмена по disconnect не обещается. Server shutdown отменяет engine operation явно. Cleanup имеет независимый status и сохраняет первичную ошибку.
 

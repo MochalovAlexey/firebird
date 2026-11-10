@@ -1612,6 +1612,8 @@ type
 		const PREPARE_PREFETCH_AFFECTED_RECORDS = Cardinal($20);
 		const PREPARE_PREFETCH_FLAGS = Cardinal($40);
 		const PREPARE_REQUIRE_SEMICOLON = Cardinal($80);
+		const PREPARE_STANDARD_CONFORMING_STRINGS_ON = Cardinal($100);
+		const PREPARE_STANDARD_CONFORMING_STRINGS_OFF = Cardinal($200);
 		const PREPARE_PREFETCH_METADATA = Cardinal(IStatement.PREPARE_PREFETCH_TYPE or IStatement.PREPARE_PREFETCH_FLAGS or IStatement.PREPARE_PREFETCH_INPUT_PARAMETERS or IStatement.PREPARE_PREFETCH_OUTPUT_PARAMETERS);
 		const PREPARE_PREFETCH_ALL = Cardinal(IStatement.PREPARE_PREFETCH_METADATA or IStatement.PREPARE_PREFETCH_LEGACY_PLAN or IStatement.PREPARE_PREFETCH_DETAILED_PLAN or IStatement.PREPARE_PREFETCH_AFFECTED_RECORDS);
 		const FLAG_HAS_CURSOR = Cardinal($1);
@@ -4936,6 +4938,7 @@ const
 	fb_info_max_inline_blob_size = byte(160);
 	fb_info_counts_scope_att = byte(161);
 	fb_info_counts_scope_db = byte(162);
+	fb_info_standard_conforming_strings = byte(163);
 	fb_info_crypt_encrypted = $01;
 	fb_info_crypt_process = $02;
 	fb_feature_multi_statements = byte(1);

@@ -569,6 +569,26 @@ static RefPtr<DsqlStatement> prepareStatement(thread_db* tdbb, dsql_dbb* databas
 				  Arg::Gds(isc_sql_too_long) << Arg::Num(MAX_SQL_LENGTH));
 	}
 
+	const unsigned stringFlags = prepareFlags &
+		(IStatement::PREPARE_STANDARD_CONFORMING_STRINGS_ON |
+		 IStatement::PREPARE_STANDARD_CONFORMING_STRINGS_OFF);
+	if (stringFlags == (IStatement::PREPARE_STANDARD_CONFORMING_STRINGS_ON |
+		IStatement::PREPARE_STANDARD_CONFORMING_STRINGS_OFF))
+	{
+		ERRD_post(Arg::Gds(isc_random) << "Conflicting standard_conforming_strings prepare flags" <<
+			Arg::SqlState("22023"));
+	}
+
+	// Resolve once: parser, cache lookup and cache insertion must use the same mode.
+	const bool pgStringEscapes = clientDialect == SQL_DIALECT_PG &&
+		(stringFlags ? stringFlags == IStatement::PREPARE_STANDARD_CONFORMING_STRINGS_OFF :
+		 !database->dbb_attachment->att_standard_conforming_strings);
+	if (pgStringEscapes && database->dbb_attachment->att_charset != CS_UTF8)
+	{
+		ERRD_post(Arg::Gds(isc_wish_list) << Arg::Gds(isc_random) <<
+			"STANDARD_CONFORMING_STRINGS OFF requires a UTF8 attachment");
+	}
+
 	string textStr(text, textLength);
 	const bool isStatementCacheActive = database->dbb_statement_cache->isActive() && !scratchFlags &&
 		(transaction ? (!transaction->isDdl()) : true);
@@ -577,7 +597,7 @@ static RefPtr<DsqlStatement> prepareStatement(thread_db* tdbb, dsql_dbb* databas
 
 	if (isStatementCacheActive)
 	{
-		dsqlStatement = database->dbb_statement_cache->getStatement(tdbb, textStr, clientDialect, isInternalRequest);
+		dsqlStatement = database->dbb_statement_cache->getStatement(tdbb, textStr, clientDialect, pgStringEscapes, isInternalRequest);
 
 		if (dsqlStatement)
 			return dsqlStatement;
@@ -618,7 +638,7 @@ static RefPtr<DsqlStatement> prepareStatement(thread_db* tdbb, dsql_dbb* databas
 			Parser parser(tdbb, *scratchPool, statementPool, scratch, clientDialect,
 				dbDialect,
 				(prepareFlags & IStatement::PREPARE_REQUIRE_SEMICOLON),
-				text, textLength, charSetId);
+				text, textLength, charSetId, pgStringEscapes);
 
 			// Parse the SQL statement.  If it croaks, return
 			dsqlStatement = parser.parse();
@@ -685,7 +705,7 @@ static RefPtr<DsqlStatement> prepareStatement(thread_db* tdbb, dsql_dbb* databas
 		if (isStatementCacheActive && dsqlStatement->isDml())
 		{
 			database->dbb_statement_cache->putStatement(tdbb,
-				textStr, clientDialect, isInternalRequest, dsqlStatement);
+				textStr, clientDialect, pgStringEscapes, isInternalRequest, dsqlStatement);
 		}
 
 		return dsqlStatement;

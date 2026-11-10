@@ -1932,7 +1932,8 @@ public:
 	enum Type : UCHAR
 	{
 		TYPE_LC_MESSAGES,
-		TYPE_CLIENT_ENCODING
+		TYPE_CLIENT_ENCODING,
+		TYPE_STANDARD_CONFORMING_STRINGS
 	};
 
 	SetPgSessionNode(MemoryPool& pool, Type aType, const Firebird::string& aValue)

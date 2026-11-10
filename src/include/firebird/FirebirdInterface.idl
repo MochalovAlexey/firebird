@@ -482,6 +482,9 @@ interface Statement : ReferenceCounted
 	const uint PREPARE_PREFETCH_AFFECTED_RECORDS	= 0x20;	// not used yet
 	const uint PREPARE_PREFETCH_FLAGS				= 0x40;
 	const uint PREPARE_REQUIRE_SEMICOLON			= 0x80;
+	// PG dialect only. Mutually exclusive overrides for this prepare, not session setters.
+	const uint PREPARE_STANDARD_CONFORMING_STRINGS_ON = 0x100;
+	const uint PREPARE_STANDARD_CONFORMING_STRINGS_OFF = 0x200;
 	const uint PREPARE_PREFETCH_METADATA =
 		PREPARE_PREFETCH_TYPE | PREPARE_PREFETCH_FLAGS |
 		PREPARE_PREFETCH_INPUT_PARAMETERS | PREPARE_PREFETCH_OUTPUT_PARAMETERS;

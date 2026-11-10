@@ -11,7 +11,9 @@
  *  All Rights Reserved.
  */
 
+#include "firebird.h"
 #include "SqlInfo.h"
+#include "../common/classes/MetaString.h"
 
 #include <utility>
 
@@ -60,7 +62,8 @@ bool identifier(unsigned char c) noexcept
 class Prefix final
 {
 public:
-	explicit Prefix(std::string_view value) : sql(value) {}
+	explicit Prefix(std::string_view value, bool standardStrings)
+		: sql(value), backslashStrings(!standardStrings) {}
 
 	Token next()
 	{
@@ -101,6 +104,13 @@ public:
 			const auto quote = sql[start];
 			while (position < sql.size())
 			{
+				if (backslashStrings && quote == '\'' && sql[position] == '\\')
+				{
+					if (++position == sql.size())
+						return {TokenKind::Invalid, {}};
+					++position;
+					continue;
+				}
 				if (sql[position++] != quote)
 					continue;
 				if (position < sql.size() && sql[position] == quote)
@@ -119,6 +129,7 @@ public:
 private:
 	std::string_view sql;
 	std::size_t position = 0;
+	const bool backslashStrings;
 };
 
 SqlInfo command(std::string tag, CountKind count = CountKind::None)
@@ -139,6 +150,37 @@ bool name(const Token& token)
 		(token.kind == TokenKind::Other && token.text.front() == '"');
 }
 
+// Only used after engine prepare has validated the identifier and control grammar.
+SqlInfo savepointCommand(std::string tag, ControlKind kind, const Token& token)
+{
+	if (!name(token))
+		return {};
+	auto info = controlCommand(std::move(tag), kind);
+	std::string decoded;
+	if (token.kind == TokenKind::Word)
+	{
+		for (const unsigned char c : token.text)
+			decoded += char(c >= 'a' && c <= 'z' ? c - ('a' - 'A') : c);
+	}
+	else
+	{
+		for (std::size_t i = 1; i + 1 < token.text.size(); ++i)
+		{
+			decoded += token.text[i];
+			if (token.text[i] == '"')
+				++i; // doubled quote
+		}
+	}
+	// MetaString shares the engine's trailing-space normalization. Length and UTF8
+	// validity are checked by prepare, before this descriptor is used as history.
+	if (decoded.size() <= MAX_SQL_IDENTIFIER_LEN)
+	{
+		const MetaString normalized(decoded.data(), decoded.size());
+		info.savepoint.assign(normalized.c_str(), normalized.length());
+	}
+	return info;
+}
+
 SqlInfo endTransaction(Prefix& prefix, bool commit)
 {
 	auto token = prefix.next();
@@ -149,7 +191,7 @@ SqlInfo endTransaction(Prefix& prefix, bool commit)
 		token = prefix.next();
 		if (token.is("SAVEPOINT"))
 			token = prefix.next();
-		return name(token) ? controlCommand("ROLLBACK", ControlKind::RollbackTo) : SqlInfo{};
+		return savepointCommand("ROLLBACK", ControlKind::RollbackTo, token);
 	}
 	const bool retain = token.is("RETAIN");
 	if (retain)
@@ -176,7 +218,8 @@ bool sessionCommand(Prefix& prefix, const Token& second)
 	// Supported mng_statement prefixes from dsql/parse.y. Options and values
 	// remain the engine's responsibility, including the fixed PG session profile.
 	if (second.is("ROLE") || second.is("OPTIMIZE") ||
-		second.is("LC_MESSAGES") || second.is("CLIENT_ENCODING"))
+		second.is("LC_MESSAGES") || second.is("CLIENT_ENCODING") ||
+		second.is("STANDARD_CONFORMING_STRINGS"))
 		return true;
 	if (second.is("TRUSTED"))
 		return prefix.next().is("ROLE");
@@ -283,9 +326,9 @@ std::string_view ddlObject(Prefix& prefix, Token token)
 
 } // namespace
 
-SqlInfo inspectSql(std::string_view sql)
+SqlInfo inspectSql(std::string_view sql, bool standardStrings)
 {
-	Prefix prefix(sql);
+	Prefix prefix(sql, standardStrings);
 	const auto first = prefix.next();
 	if (first.kind == TokenKind::End)
 		return {{}, CountKind::None, true, false};
@@ -337,13 +380,15 @@ SqlInfo inspectSql(std::string_view sql)
 		return endTransaction(prefix, false);
 	if (first.is("SAVEPOINT"))
 	{
-		return name(prefix.next()) ?
-			controlCommand("SAVEPOINT", ControlKind::Savepoint) : SqlInfo{};
+		return savepointCommand("SAVEPOINT", ControlKind::Savepoint, prefix.next());
 	}
 	if (first.is("RELEASE"))
 	{
-		return prefix.next().is("SAVEPOINT") && name(prefix.next()) ?
-			controlCommand("RELEASE", ControlKind::ReleaseSavepoint) : SqlInfo{};
+		if (!prefix.next().is("SAVEPOINT"))
+			return {};
+		auto info = savepointCommand("RELEASE", ControlKind::ReleaseSavepoint, prefix.next());
+		info.only = prefix.next().is("ONLY");
+		return info;
 	}
 	if (first.is("SET"))
 	{

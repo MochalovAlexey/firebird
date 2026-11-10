@@ -4,6 +4,30 @@
 
 Python scaffold мигрирован под текущий контракт: 58 live cases прошли в P6. Начальные host tests расположены в src/common/tests/WireProtocolConfigTest.cpp, src/remote/server/wire/tests и isolated tools harness. P2/P3/P4 приёмка сохранена в VALIDATION. Предыдущая P5-ревизия прошла целевую Linux/Super приёмку с native ограничением READ CONSISTENCY + AUTO COMMIT; P6 повторил сборку, unit tests и целевые регрессии по [VALIDATION.md](VALIDATION.md). Целевой P6/M1 Linux/Super принят с известными native ограничениями, включая отдельно исключённый ON CONNECT shutdown. P7 Extended Query прошёл целевую Linux/Super приёмку: 16 групп. P8 codecs прошли целевую Linux/Super приёмку: восемь групп. P9 прошёл 17 групп с реальными C libpq, raw-wire и ограниченным профилем Psycopg 3; целевой M2 Linux/Super для совместимого SQL и реализованных codecs принят. Следующий этап — P10. PASS относится к зафиксированным cases/fixtures, а наличие строки в полной матрице не означает её прохождения.
 
+## Подэтап 1С: standard_conforming_strings, редакция 2
+
+[pgwire_1c_smoke.py --strings](tools/pgwire_1c_smoke.py) переиспользует частный
+runtime/security DB/loopback и реальный libpq; checks находятся в
+[pgwire_strings_checks.py](tools/pgwire_strings_checks.py). OO helper
+[pgwire_strings_api.cpp](tools/pgwire_strings_api.cpp) собирается тем же harness.
+
+| Группа | Проверяемый контракт |
+|---|---|
+| Значения и диагностики | Escape bytes, Unicode/surrogates, malformed UTF8/NUL, длины и metadata; общий набор с эталоном 18.6 |
+| Prepare/execute/cache | ON→OFF→ON, override≠attachment, оба flags, SET только при Execute/reuse, native1/2/3, WIN1251 rejection |
+| Simple | Один snapshot всего Query, escaped quote/semicolon, PSQL continuation, stop/error, data rollback, сегмент после COMMIT |
+| Extended/raw | Parse snapshot в обе стороны, независимые portals, Bind bytes, несколько Execute/Flush до Sync, точный ParameterStatus order |
+| История | Implicit без handle, T/E, runtime/syntax/invalid SET, Parse/Bind/duplicate name failures, повторный E, commit-in-E |
+| Native controls | Quoted/doubled/UTF8/trailing-space names, replacement/ONLY, failed controls, retaining/NO AUTO UNDO, внешние точки после EXECUTE STATEMENT |
+| Сохранённый SQL/reset | Stored procedure после reconnect и native source reprepare, два attachments, RESET в I/T |
+| Служебное восстановление | SessionTest: success, prepare failure, execute failure, неверный readback, отсутствующий info item; без transaction/results/leaks, original error/FATAL |
+| Регрессии | Все pgwire unit executables, полный isql suite, fixed settings, scripts, Simple/Extended, transactions и native baseline |
+
+Native TPB AUTO COMMIT и вложенный RESET совместно с историей исключены из
+подтверждённого профиля. Их исключение не превращает отдельное наблюдение сбоя
+в PASS. Команды, результаты, эталон и ограничения — в [VALIDATION.md](VALIDATION.md).
+
+
 ## Подэтап 1С: фиксированные lc_messages/client_encoding
 
 `pgwire_1c_smoke.py --settings` проверяет английский/UTF8 профиль, исходный запрос
@@ -13,7 +37,7 @@ Native dialects 1/2/3 с AUTOTERM должны отвергать новые SET
 SQL; оба имени остаются допустимыми идентификаторами. Отдельный OO probe проверяет
 не-UTF8 attachment, same-attachment dialect cache и запрет вложенного PSQL.
 Целевой PASS и точные ограничения зафиксированы в [VALIDATION.md](VALIDATION.md).
-Исходный пакет 03 остаётся отрицательной проверкой: остальные шесть SET не реализованы.
+Исходный пакет 03 остаётся отрицательной проверкой: после среза standard_conforming_strings остальные пять SET не реализованы.
 Проверка прав на `lc_messages` отложена; 42501 для этой настройки сейчас не ожидается.
 
 ## Подэтап 1С: последовательные скрипты — проверен 10 ноября 2026 года
@@ -220,7 +244,7 @@ W07 требует code review неизменной передачи SQL и TCP 
 | T07 | Полный COMMIT/ROLLBACK в I | Подготовленный native control и локальный descriptor дают no-op/I, optional notice |
 | T08 | Disconnect с незавершённой transaction | Rollback и освобождение lock; native observer подтверждает отсутствие uncommitted changes |
 | T09 | Native SNAPSHOT AUTO COMMIT / NO AUTO UNDO | Lexer не сканирует опции; SNAPSHOT AUTO COMMIT проверяется native/PG visibility и сохранением прежних commits после rollback. NO AUTO UNDO/savepoint recovery проверяется независимо. AUTO COMMIT + READ COMMITTED READ CONSISTENCY имеет отдельный native Savepoint assertion и не входит в заявленное покрытие |
-| T10 | ALTER SESSION RESET в I/T/E, включая ошибку reset | Проверяются сброс USER_SESSION/settings, rollback и новая native transaction при возможном прежнем interface pointer. В T сохраняется T, в I — I, в E — 25P02 без reset. P7 RESET инвалидирует все statements/portals; cache/lifetime cases заданы отдельно в E11. Savepoint names не кэшируются. Invalid attachment/handle после reset требует FATAL/close |
+| T10 | ALTER SESSION RESET в I/T/E, включая ошибку reset | Проверяются сброс USER_SESSION/settings, rollback и новая native transaction при возможном прежнем interface pointer. В T сохраняется T, в I — I, в E — 25P02 без reset. P7 RESET инвалидирует все statements/portals; cache/lifetime cases заданы отдельно в E11. История имён и bool snapshots standard_conforming_strings очищается; native undo не дублируется. Invalid attachment/handle после reset требует FATAL/close |
 | T11 | Prepare в E: actual missing relation, syntax, permission, cancel/timeout, fatal и unknown error | Только native isc_dsql_relation_err с итоговым nonfatal 42P01 даёт 25P02; explicit SQLSTATE 42P01 без причины не входит в whitelist. Syntax 42601 и permission 42501 сохраняются. Отмена/timeout, shutdown/invalid handle, resource/I/O и unknown errors не маскируются. Проверяются full-vector priority и отсутствие execution |
 | T12 | Число current application transactions и phase boundaries | QueryExecutor владеет максимум одним handle; prepare в I получает NULL, в T/E — current и видит uncommitted DDL. Нет cached statement transaction. Engine system/security/autonomous transactions отделяются при подсчёте; native и другие plugins этим правилом не ограничиваются |
 | T13 | Native session SET whitelist в I/T/E | ROLE/TRUSTED ROLE, DEBUG OPTION, DECFLOAT ROUND/TRAPS, idle/statement timeout, TIME ZONE, BIND, OPTIMIZE, SEARCH_PATH: settings реально меняются и выдаётся SET, I/T сохраняются; в E после successful prepare — 25P02 без effect. Native configuration/session timeout ограничивает DML без дополнительного лимита плагина; проверить 100 ms timeout в I/T, реальный interrupt и recovery. Не заявлять hard deadline prepare/DDL/controls |

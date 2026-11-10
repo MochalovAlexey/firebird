@@ -18,6 +18,8 @@
 #include "SqlInfo.h"
 #include "../common/classes/ImplementHelper.h"
 #include "../common/status.h"
+#include "../common/classes/ClumpletReader.h"
+#include <algorithm>
 #include "../common/utils_proto.h"
 #include "../isql/FrontendLexer.h"
 
@@ -78,6 +80,119 @@ struct Request
 };
 
 } // namespace
+
+bool QueryExecutor::readStrings()
+{
+	FbLocalStatus status;
+	const unsigned char items[] = {fb_info_standard_conforming_strings};
+	unsigned char buffer[16] = {};
+	attachment->getInfo(&status, sizeof(items), items, sizeof(buffer), buffer);
+	check(&status);
+	ClumpletReader info(ClumpletReader::InfoResponse, buffer, sizeof(buffer));
+	if (info.isEof() || info.getClumpTag() != fb_info_standard_conforming_strings ||
+		info.getClumpLength() != 4)
+	{
+		throw ProtocolError("XX000", "Engine does not report standard_conforming_strings");
+	}
+	const auto value = info.getInt();
+	info.moveNext();
+	if ((value != 0 && value != 1) || info.isEof() || info.getClumpTag() != isc_info_end)
+		throw ProtocolError("XX000", "Invalid standard_conforming_strings info response");
+	return value != 0;
+}
+
+unsigned QueryExecutor::stringPrepareFlags(bool value)
+{
+	return value ? IStatement::PREPARE_STANDARD_CONFORMING_STRINGS_ON :
+		IStatement::PREPARE_STANDARD_CONFORMING_STRINGS_OFF;
+}
+
+void QueryExecutor::beginStrings()
+{
+	if (!stringsAtStart)
+		stringsAtStart = readStrings();
+}
+
+void QueryExecutor::clearStringHistory()
+{
+	stringsAtStart.reset();
+	stringSavepoints.clear();
+}
+
+void QueryExecutor::restoreStrings(bool value)
+{
+	if (readStrings() == value)
+		return;
+	// Fixed maintenance SQL: no user text, dispatcher, application transaction,
+	// journal entry or protocol result. A failure makes the connection unusable.
+	const char* sql = value ? "SET standard_conforming_strings = on" :
+		"SET standard_conforming_strings = off";
+	Request request;
+	FbLocalStatus status;
+	request.statement = attachment->prepare(&status, nullptr, 0, sql, SQL_DIALECT_PG,
+		stringPrepareFlags(true));
+	check(&status);
+	const auto unexpected = request.statement->execute(&status, nullptr, nullptr, nullptr, nullptr, nullptr);
+	check(&status);
+	if (unexpected)
+	{
+		unexpected->rollback(&status);
+		if (status->getState() & IStatus::STATE_ERRORS)
+			unexpected->release();
+		throw ProtocolError("XX000", "Session restoration unexpectedly started a transaction");
+	}
+	request.close();
+	if (readStrings() != value)
+		throw ProtocolError("XX000", "Could not restore standard_conforming_strings");
+}
+
+void QueryExecutor::sendStrings(Protocol& protocol, bool value)
+{
+	if (!stringsSent || *stringsSent != value)
+	{
+		protocol.parameterStatus("standard_conforming_strings", value ? "on" : "off");
+		stringsSent = value;
+	}
+}
+
+void QueryExecutor::reportStrings(Protocol& protocol)
+{
+	sendStrings(protocol, readStrings());
+}
+
+// Shared Simple/Extended abort path. Native data undo remains owned by the engine;
+// the single setting follows the logical block, even before a native handle exists.
+bool QueryExecutor::fail(Protocol& protocol, const Diagnostic& diagnostic, bool fatal)
+{
+	if (state != 'I' && !fatal && !transactionIsValid())
+		fatal = true;
+	if (!fatal)
+	{
+		try
+		{
+			if (state != 'E' && stringsAtStart)
+			{
+				restoreStrings(stringSavepoints.empty() ? *stringsAtStart : stringSavepoints.back().value);
+			}
+			readStrings();
+		}
+		catch (...)
+		{
+			fatal = true;
+		}
+	}
+	if (state == 'I' || fatal)
+	{
+		if (!rollback())
+			fatal = true;
+		state = 'I';
+		clearStringHistory();
+	}
+	else
+		state = 'E';
+	protocol.error(diagnostic.state, diagnostic.message, fatal);
+	return !fatal;
+}
 
 bool QueryExecutor::recovery(ControlKind control)
 {
@@ -172,6 +287,7 @@ void QueryExecutor::finishImplicit(bool& ending)
 		check(&status);
 		transaction = nullptr;
 	}
+	clearStringHistory();
 }
 
 std::string QueryExecutor::control(IStatement* statement, const SqlInfo& info, bool& ending)
@@ -196,7 +312,14 @@ std::string QueryExecutor::control(IStatement* statement, const SqlInfo& info, b
 	if (kind == ControlKind::ResetSession && !clearStatements())
 		throw ProtocolError("XX000", "Could not close prepared statements");
 	if (!transaction && (kind == ControlKind::Commit || kind == ControlKind::Rollback))
+	{
+		ending = true;
+		if (kind == ControlKind::Rollback && stringsAtStart)
+			restoreStrings(*stringsAtStart);
+		clearStringHistory();
+		ending = false;
 		return info.tag;
+	}
 	ending = kind == ControlKind::Commit || kind == ControlKind::CommitRetaining ||
 		kind == ControlKind::Rollback;
 	FbLocalStatus status;
@@ -206,7 +329,22 @@ std::string QueryExecutor::control(IStatement* statement, const SqlInfo& info, b
 		check(&status);
 		transaction = nullptr;
 		state = 'I';
+		if (stringsAtStart)
+			restoreStrings(*stringsAtStart);
+		clearStringHistory();
 		return "ROLLBACK";
+	}
+	// Allocate the prospective entry before executing the native control. History
+	// mutation afterwards must not fail halfway through a successful SAVEPOINT.
+	StringSavepoint pending;
+	if (kind == ControlKind::Savepoint)
+	{
+		if (stringSavepoints.size() >= 1024 &&
+			std::none_of(stringSavepoints.begin(), stringSavepoints.end(),
+				[&](const auto& item) { return item.name == info.savepoint; }))
+			throw ProtocolError("54000", "Too many tracked savepoints");
+		pending = {info.savepoint, readStrings()};
+		stringSavepoints.reserve(stringSavepoints.size() + 1);
 	}
 	const auto previous = transaction;
 	transaction = statement->execute(&status, transaction, nullptr, nullptr, nullptr, nullptr);
@@ -233,6 +371,58 @@ std::string QueryExecutor::control(IStatement* statement, const SqlInfo& info, b
 		if (state != 'I')
 			state = transaction ? 'T' : 'I';
 	}
+	// A native control has succeeded. Failure to reconcile the setting/history is
+	// fatal, including a failed maintenance SET after a successful data rollback.
+	const bool wasEnding = ending;
+	ending = true;
+	switch (kind)
+	{
+	case ControlKind::Session:
+		readStrings(); // validate actual post-Execute state, without interpreting SET text
+		break;
+	case ControlKind::Savepoint:
+	{
+		const auto old = std::find_if(stringSavepoints.begin(), stringSavepoints.end(),
+			[&](const auto& item) { return item.name == info.savepoint; });
+		if (old != stringSavepoints.end())
+			stringSavepoints.erase(old); // native repeated name replaces only that point
+		stringSavepoints.push_back(std::move(pending));
+		break;
+	}
+	case ControlKind::RollbackTo:
+	case ControlKind::ReleaseSavepoint:
+	{
+		const auto found = std::find_if(stringSavepoints.begin(), stringSavepoints.end(),
+			[&](const auto& item) { return item.name == info.savepoint; });
+		if (found == stringSavepoints.end())
+			throw ProtocolError("XX000", "Native savepoint is missing from session history");
+		if (kind == ControlKind::RollbackTo)
+		{
+			restoreStrings(found->value);
+			stringSavepoints.erase(found + 1, stringSavepoints.end());
+		}
+		else if (info.only)
+			stringSavepoints.erase(found);
+		else
+			stringSavepoints.erase(found, stringSavepoints.end());
+		break;
+	}
+	case ControlKind::Rollback:
+	case ControlKind::RollbackRetaining:
+		if (stringsAtStart)
+			restoreStrings(*stringsAtStart);
+		[[fallthrough]];
+	case ControlKind::Commit:
+	case ControlKind::CommitRetaining:
+	case ControlKind::ResetSession:
+		clearStringHistory();
+		if (state == 'T')
+			beginStrings(); // retaining and reset begin a new logical block
+		break;
+	default:
+		break;
+	}
+	ending = wasEnding;
 	return info.tag;
 }
 
@@ -251,39 +441,27 @@ bool QueryExecutor::execute(Protocol& protocol, std::string_view sql)
 			fatal = true;
 		if (!clearPortals())
 			fatal = true;
-		if (state != 'I' && !fatal)
-		{
-			if (transactionIsValid())
-				state = 'E';
-			else
-				fatal = true;
-		}
-		if (state == 'I' || fatal)
-		{
-			if (!rollback())
-				fatal = true;
-			state = 'I';
-		}
-		protocol.error(diagnostic.state, diagnostic.message, fatal);
-		return !fatal;
+		return this->fail(protocol, diagnostic, fatal);
 	};
 	try
 	{
 		clearUnnamed();
-		FrontendLexer lexer(sql);
+		const bool standardStrings = readStrings();
+		FrontendLexer lexer(sql, !standardStrings);
 		std::size_t statementStart = 0;
 		bool completed = false;
 		// Only the last completion waits for the implicit commit. Rows are streamed.
 		std::string tag;
 		for (;;)
 		{
+			beginStrings();
 			preparing = true;
 			ending = false;
 			failedAtEntry = state == 'E';
 			const auto statementEnd = lexer.getStatementEnd();
 			const auto text = sql.substr(statementStart,
 				statementEnd.value_or(sql.size()) - statementStart);
-			const auto info = inspectSql(text);
+			const auto info = inspectSql(text, standardStrings);
 			if (completed && !statementEnd && info.empty)
 				break; // No extra EmptyQueryResponse for trailing whitespace/comments.
 
@@ -297,7 +475,7 @@ bool QueryExecutor::execute(Protocol& protocol, std::string_view sql)
 			// Probing a PSQL prefix must not start an application transaction.
 			// In T/E or an implicit script segment, prepare sees the current handle.
 			request.statement = attachment->prepare(&status, transaction, text.size(), text.data(),
-				SQL_DIALECT_PG, IStatement::PREPARE_PREFETCH_METADATA |
+				SQL_DIALECT_PG, IStatement::PREPARE_PREFETCH_METADATA | stringPrepareFlags(standardStrings) |
 					(statementEnd ? IStatement::PREPARE_REQUIRE_SEMICOLON : 0));
 			if (status->getState() & IStatus::STATE_ERRORS)
 			{

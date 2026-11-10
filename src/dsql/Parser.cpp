@@ -29,6 +29,7 @@
 #include "../jrd/DataTypeUtil.h"
 #include "../dsql/metd_proto.h"
 #include "../jrd/intl_proto.h"
+#include "../common/unicode_util.h"
 
 #ifdef HAVE_FLOAT_H
 #include <float.h>
@@ -42,11 +43,12 @@ using namespace Jrd;
 
 Parser::Parser(thread_db* tdbb, MemoryPool& pool, MemoryPool* aStatementPool, DsqlCompilerScratch* aScratch,
 			USHORT aClientDialect, USHORT aDbDialect, bool aRequireSemicolon,
-			const TEXT* string, size_t length, CSetId charSetId)
+			const TEXT* string, size_t length, CSetId charSetId, bool aPgStringEscapes)
 	: PermanentStorage(pool),
 	  statementPool(aStatementPool),
 	  scratch(aScratch),
 	  pgDialect(aClientDialect == SQL_DIALECT_PG),
+	  pgStringEscapes(pgDialect && aPgStringEscapes),
 	  client_dialect(pgDialect ? SQL_DIALECT_V6 : aClientDialect),
 	  db_dialect(aDbDialect),
 	  requireSemicolon(aRequireSemicolon),
@@ -133,7 +135,7 @@ DsqlStatement* Parser::parse()
 }
 
 
-// Transform strings (or substrings) prefixed with introducer (_charset) to ASCII equivalent.
+// Preserve introduced and PG-decoded strings in native, ASCII SQL notation.
 void Parser::transformString(const char* start, unsigned length, string& dest)
 {
 	const static char HEX_DIGITS[] = {'0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
@@ -143,8 +145,7 @@ void Parser::transformString(const char* start, unsigned length, string& dest)
 	HalfStaticArray<char, 256> buffer;
 	const char* pos = start;
 
-	// We need only the "introduced" strings, in the bounds of "start" and "length" and in "pos"
-	// order. Let collect them.
+	// Collect marked strings within this source range, in source order.
 
 	SortedArray<StrMark> introducedMarks;
 
@@ -152,7 +153,7 @@ void Parser::transformString(const char* start, unsigned length, string& dest)
 	for (bool found = accessor.getFirst(); found; found = accessor.getNext())
 	{
 		const StrMark& mark = accessor.current()->second;
-		if (mark.introduced && mark.pos >= fromBegin && mark.pos < fromBegin + length)
+		if ((mark.introduced || mark.escaped) && mark.pos >= fromBegin && mark.pos < fromBegin + length)
 			introducedMarks.add(mark);
 	}
 
@@ -163,8 +164,13 @@ void Parser::transformString(const char* start, unsigned length, string& dest)
 		const char* s = lex.start + mark.pos;
 		buffer.add(pos, s - pos);
 
-		if (!fb_utils::isspace(pos[s - pos - 1]))
+		if (s > pos && !fb_utils::isspace(s[-1]))
 			buffer.add(' ');	// fix _charset'' becoming invalid syntax _charsetX''
+
+		// Preserve decoded ordinary literals in stored DDL/PSQL and internal prepares.
+		// An actual introducer is already present in the original SQL prefix.
+		if (mark.escaped && !mark.introduced)
+			buffer.add("_UTF8 ", 6);
 
 		const FB_SIZE_T count = buffer.getCount();
 		const FB_SIZE_T newSize = count + 2 + mark.str->getString().length() * 2 + 1;
@@ -393,6 +399,164 @@ bool Parser::yylexSkipEol()
 }
 
 
+// Ordinary PG4 strings with standard_conforming_strings=off. The lexer consumes
+// original bytes (including escaped quotes); offsets never refer to decoded SQL.
+int Parser::lexPgString()
+{
+
+	StrMark mark;
+	mark.escaped = true; // canonicalize this decoded ordinary literal for internal native prepares
+	mark.pos = lex.last_token - lex.start;
+	Firebird::string value;
+	const auto error = [&](const char* message, const char* state)
+	{
+		Firebird::string detail;
+		detail.printf("%s at line %d, column %d", message, int(lex.lines),
+			int(lex.ptr - lex.line_start + 1));
+		ERRD_post(Arg::Gds(isc_random) << detail << Arg::SqlState(state));
+	};
+	const auto hex = [](unsigned char c) -> int
+	{
+		if (c >= '0' && c <= '9') return c - '0';
+		if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+		if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+		return -1;
+	};
+	const auto unicode = [&]() -> ULONG
+	{
+		const unsigned digits = *lex.ptr++ == 'u' ? 4 : 8;
+		ULONG code = 0;
+		for (unsigned i = 0; i < digits; ++i)
+		{
+			if (lex.ptr == lex.end || hex(*lex.ptr) < 0)
+				error("Invalid Unicode escape", "22025");
+			code = (code << 4) | hex(*lex.ptr++);
+		}
+		return code;
+	};
+
+	for (;;)
+	{
+		for (;;)
+		{
+			if (lex.ptr == lex.end)
+			{
+				yyerror("unterminated string");
+				return -1;
+			}
+			unsigned char c = *lex.ptr++;
+			if (c == '\'')
+			{
+				if (lex.ptr == lex.end || *lex.ptr != '\'')
+					break;
+				++lex.ptr;
+			}
+			else if (c == '\\')
+			{
+				if (lex.ptr == lex.end)
+				{
+					yyerror("unterminated string");
+					return -1;
+				}
+				c = *lex.ptr++;
+				if (c == 'u' || c == 'U')
+				{
+					--lex.ptr;
+					ULONG code = unicode();
+					if (code >= 0xD800 && code <= 0xDBFF)
+					{
+						if (lex.end - lex.ptr < 2 || lex.ptr[0] != '\\' ||
+							(lex.ptr[1] != 'u' && lex.ptr[1] != 'U'))
+						{
+							error("Invalid Unicode surrogate pair", "42601");
+						}
+						++lex.ptr;
+						const ULONG low = unicode();
+						if (low < 0xDC00 || low > 0xDFFF)
+							error("Invalid Unicode surrogate pair", "42601");
+						code = 0x10000 + ((code - 0xD800) << 10) + low - 0xDC00;
+					}
+					if (!code || code > 0x10FFFF || (code >= 0xDC00 && code <= 0xDFFF))
+						error("Invalid Unicode escape value", "42601");
+
+					USHORT utf16[2], conversionError;
+					ULONG errorPosition;
+					UCHAR utf8[4];
+					const auto bytes = UnicodeUtil::utf32ToUtf16(sizeof(code), &code,
+						sizeof(utf16), utf16, &conversionError, &errorPosition);
+					fb_assert(!conversionError);
+					const auto length = UnicodeUtil::utf16ToUtf8(bytes, utf16,
+						sizeof(utf8), utf8, &conversionError, &errorPosition);
+					fb_assert(!conversionError);
+					value.append(reinterpret_cast<const char*>(utf8), length);
+					continue;
+				}
+				if (c >= '0' && c <= '7')
+				{
+					unsigned number = c - '0';
+					for (unsigned i = 1; i < 3 && lex.ptr < lex.end &&
+						*lex.ptr >= '0' && *lex.ptr <= '7'; ++i)
+					{
+						number = (number << 3) | (*lex.ptr++ - '0');
+					}
+					c = number; // PostgreSQL octal escapes are bytes, including truncation.
+				}
+				else if (c == 'x' && lex.ptr < lex.end && hex(*lex.ptr) >= 0)
+				{
+					c = hex(*lex.ptr++);
+					if (lex.ptr < lex.end && hex(*lex.ptr) >= 0)
+						c = (c << 4) | hex(*lex.ptr++);
+				}
+				else
+				{
+					// Unknown escapes preserve the character following the backslash.
+					switch (c)
+					{
+					case 'b': c = '\b'; break;
+					case 'f': c = '\f'; break;
+					case 'n': c = '\n'; break;
+					case 'r': c = '\r'; break;
+					case 't': c = '\t'; break;
+					case 'v': c = '\v'; break;
+					}
+				}
+			}
+			// Count source newlines, not the newlines produced by escape decoding.
+			if (lex.ptr[-1] == '\n')
+			{
+				++lex.lines;
+				lex.line_start = lex.ptr;
+			}
+			value += char(c);
+		}
+
+		LexerState saved = lex;
+		if (!yylexSkipSpaces() || lex.ptr[-1] != '\'')
+		{
+			lex = saved;
+			break;
+		}
+	}
+
+	if (value.length() > MAX_STR_SIZE)
+	{
+		ERRD_post(Arg::Gds(isc_sqlerr) << Arg::Num(-104) <<
+			Arg::Gds(isc_dsql_string_byte_length) << Arg::Num(value.length()) << Arg::Num(MAX_STR_SIZE));
+	}
+	if (memchr(value.c_str(), 0, value.length()) ||
+		!charSet->wellFormed(value.length(), reinterpret_cast<const UCHAR*>(value.c_str()), nullptr))
+	{
+		error("Invalid UTF8 string", "22021");
+	}
+
+	yylval.intlStringPtr = newIntlString(value);
+	mark.length = lex.ptr - lex.start - mark.pos;
+	mark.str = yylval.intlStringPtr;
+	strMarks.put(mark.str, mark);
+	return TOK_STRING;
+}
+
+
 int Parser::yylexAux()
 {
 	thread_db* tdbb = JRD_get_thread_data();
@@ -426,6 +590,9 @@ int Parser::yylexAux()
 
 	if (tok_class & CHR_QUOTE)
 	{
+		if (c == '\'' && pgStringEscapes)
+			return lexPgString();
+
 		StrMark mark;
 		mark.pos = lex.last_token - lex.start;
 
@@ -1198,7 +1365,8 @@ int Parser::yylexAux()
 		if (const auto keyVer = dbb->dbb_keywords().get(str);
 			keyVer && (keyVer->keyword != TOK_COMMENT || lex.prev_keyword == -1) &&
 			(pgDialect || (keyVer->keyword != TOK_LC_MESSAGES &&
-				keyVer->keyword != TOK_CLIENT_ENCODING)))
+				keyVer->keyword != TOK_CLIENT_ENCODING &&
+				keyVer->keyword != TOK_STANDARD_CONFORMING_STRINGS)))
 		{
 			yylval.metaNamePtr = keyVer->str;
 			lex.last_token_bk = lex.last_token;

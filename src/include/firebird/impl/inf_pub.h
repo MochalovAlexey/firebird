@@ -194,6 +194,7 @@ enum db_info_types
 
 	fb_info_counts_scope_att = 161,
 	fb_info_counts_scope_db = 162,
+	fb_info_standard_conforming_strings = 163,
 
 	isc_info_db_last_value   /* Leave this LAST! */
 };

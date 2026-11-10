@@ -36,12 +36,11 @@ context keys, счётчиков и реестров нет. Добавлена 
 ### Граница диалекта
 
 PgWire выбирает dialect 4 при Simple Query, Extended Parse и повторной подготовке
-portal. Этот режим включает PG-дополнения грамматики; типы, арифметика и кавычки
-пока сохраняют семантику dialect 3. Поддержаны `SELECT` без `FROM` и описанный ниже
-фиксированный профиль `lc_messages`/`client_encoding`. Это ещё не полный PostgreSQL SQL dialect: `$n`, `::`,
+portal. Этот режим включает PG-дополнения грамматики; типы и арифметика сохраняют семантику dialect 3. Обычные одинарные строки учитывают новую настройку; native Q-строки и двойные кавычки сохраняются. Поддержаны `SELECT` без `FROM` и описанный ниже
+фиксированный профиль `lc_messages`/`client_encoding`, а также изменяемый `standard_conforming_strings`. Это ещё не полный PostgreSQL SQL dialect: `$n`, `::`,
 BEGIN и LIMIT пока отвергаются.
 
-Ключ штатного statement cache уже содержит исходный клиентский dialect: PG и
+Ключ штатного statement cache содержит исходный клиентский dialect и эффективный режим строк: PG и
 native планы не смешиваются. Обычные native dialects 1/2/3 по-прежнему требуют
 FROM. Базу не нужно создавать или переводить в dialect 4; DPB и isql его не
 принимают. Режим выбирается явно на границе API подготовки SQL, а не по имени
@@ -83,7 +82,7 @@ USAGE schema и EXECUTE function выдаются PUBLIC. Он не создаё
 
 | Группа исходного задания | Текущее состояние / что требуется |
 |---|---|
-| 1. Начало сессии | SELECT без FROM, ограниченная identity-функция, последовательные скрипты и фиксированный English/UTF8 профиль двух SET; остальные шесть SET стартового пакета ещё не реализованы |
+| 1. Начало сессии | SELECT без FROM, ограниченная identity-функция, последовательные скрипты и фиксированный English/UTF8 профиль двух SET и настоящий standard_conforming_strings; остальные пять SET стартового пакета ещё не реализованы |
 | 2. SQL и параметры | Simple Query выполняет скрипты совместимого SQL; `$n`, `::`, BEGIN TRANSACTION и LIMIT ещё не реализованы; использовать ParameterNode, CastNode, SetTransactionNode и RowsClause |
 | 3. Открытие базы | pg_class/pg_database/visibility и служебные таблицы 1С ещё не реализованы; нужны настоящие metadata и данные |
 | 4. Типы и функции | bytea, mchar/mvarchar и BINROWVER ещё не реализованы; сначала измерить форматы/семантику, затем использовать BLOB API, intl/collations и SQL/PSQL |
@@ -127,9 +126,93 @@ Execute подтверждает единственный уже действу�
 текст в native dialect, а наследование PG dialect во вложенном SQL — отдельная работа.
 
 Исходный пакет семи SET целиком ещё не выполняется: первый `enable_mergejoin`
-остаётся parser error. Следующий отдельный срез — `standard_conforming_strings`
-с настоящим декодированием строк и согласованной семантикой lexer/cache/rollback.
+остаётся parser error. Реализованный отдельный срез `standard_conforming_strings` описан ниже; это не успех полного пакета.
 Результаты и воспроизводимые команды — в [VALIDATION.md](../VALIDATION.md).
+
+## standard_conforming_strings: редакция 2, 10 ноября 2026
+
+Настоящий SET меняет bool на attachment при Execute, начальное значение — on.
+Допустимы `=`/`TO`, идентификаторы и строки `on`/`off` без учёта регистра;
+прочие значения дают 22023. Parse/Bind сами SET не исполняют. ALTER SESSION RESET
+возвращает on. Пример для интерактивного psql: отправить каждую строку отдельным Query.
+
+```sql
+SET standard_conforming_strings = on;
+SELECT OCTET_LENGTH('\n');  -- 2
+SET standard_conforming_strings = off;
+SELECT OCTET_LENGTH('\n');  -- 1
+SET TRANSACTION;
+SET standard_conforming_strings = on;
+ROLLBACK;
+SELECT OCTET_LENGTH('\n');  -- 1
+```
+
+При off обычные одинарные литералы декодирует существующий engine lexer:
+кавычки, backslash, управляющие `b/f/n/r/t/v`, octal (1–3 цифры), hex (1–2),
+Unicode `u` (4)/`U` (8) и surrogate pairs. Неизвестный escape оставляет следующий
+символ. NUL/неверные UTF8 bytes дают 22021, неверная форма Unicode — 22025,
+недопустимый codepoint/surrogate — 42601. Off разрешён только для UTF8 attachment;
+иной charset и не-UTF8 introducer обычной строки явно отвергаются с 0A000.
+Native Q-strings, hex strings, double-quoted identifiers и codecs не меняются.
+Остаются native ограничения длины: 65535 bytes и 16383 UTF8 characters для
+строковой константы. Сцепление соседних строк сохраняет Firebird whitespace
+правило, а не PostgreSQL newline-only. Escape warnings и настройки
+`escape_string_warning`/`backslash_quote` не реализованы.
+
+Публичное расширение ограничено `fb_info_standard_conforming_strings = 163`
+(4-byte integer 0/1 в существующем attachment getInfo) и
+`IStatement::PREPARE_STANDARD_CONFORMING_STRINGS_ON = 0x100` / `OFF = 0x200`.
+Без flags PG4 читает attachment; один flag фиксирует только prepare context,
+оба дают 22023. Native dialects 1/2/3 не включают PG-разбор даже с OFF.
+Методов, версий интерфейсов и vtables не добавлено; CLOOP bindings сгенерированы.
+Один разрешённый режим используется parser, cache lookup и cache insertion.
+
+Simple Query фиксирует режим **на всё сообщение**, включая продолжение EXECUTE
+BLOCK через AUTOTERM; SET влияет на следующее сообщение. Extended Parse фиксирует
+режим prepared statement; повторный prepare при Bind использует его же, даже
+после SET. Portals сохраняют независимые cursors; Bind values не являются SQL
+и повторно не декодируются. PgWire передаёт исходные SQL bytes без rewriting.
+Engine StrMark/transformString сохраняет декодированные литералы в native
+`_UTF8 X'...'` при сохранении DDL/PSQL source, чтобы внутренняя переподготовка
+не меняла значение. Исходные позиции lexer остаются позициями входного SQL.
+PG SET внутри PSQL по-прежнему отвергается существующим guard (0A000).
+
+История одной настройки принадлежит QueryExecutor: baseline логического блока
+и имена/snapshots пользовательских savepoints (не более 1024 активных имён).
+Она начинается до SET, даже без native transaction handle. Implicit Simple
+сегмент заканчивается на COMMIT/ROLLBACK или конце Query, Extended — на Sync;
+Flush и несколько Execute не сбрасывают историю. Explicit transaction живёт до
+фактического завершения; COMMIT в E выполняет rollback. При первой ошибке,
+включая Parse/Bind/duplicate prepared name, настройка немедленно восстанавливается
+к последнему savepoint либо baseline, ещё в E. Повторные ошибки в E внешний
+уровень не снимают; native transaction остаётся доступной для recovery.
+
+ROLLBACK TO восстанавливает snapshot и сохраняет целевую точку, удаляя поздние.
+Повторное имя заменяет только прежнюю одноимённую точку; RELEASE удаляет целевую
+и поздние, RELEASE ONLY — только целевую. Имена следуют MetaString/native правилам
+регистра, doubled quotes, UTF8 и концевых пробелов. История изменяется после
+успешного native control. Commit сохраняет значение, rollback возвращает baseline;
+retaining/reset начинают новую историю. Внутренние PSQL savepoints не учитываются.
+Проверены NO AUTO UNDO и EXECUTE STATEMENT внутри внешнего savepoint.
+
+Восстановление использует две фиксированные команды SET через обычные
+prepare/execute с NULL transaction, минуя dispatcher. Оно не создаёт application
+handle, wire results или повторные записи истории. Readback проверяет результат;
+отказ завершает session с FATAL и первичной диагностикой, без ложного
+ParameterStatus/ReadyForQuery. ParameterStatus читает действительное состояние
+при startup и перед ReadyForQuery на Query/Sync; Flush сам уведомление не выдаёт.
+Это соответствует измеренному порядку сообщений эталона Postgres Pro 18.6.
+
+Прямой OO API PG4 поддерживает SET/parser/cache/flags, но его native rollback
+**не восстанавливает session bool**. PG lifetime обеспечивает только PgWire;
+undo-полей/hooks в jrd_tra/Savepoint нет. Сочетания новой истории с native TPB
+AUTO COMMIT и RESET внутри PSQL исключены из подтверждённого профиля: скрытые
+границы не описываются одним interface pointer. Native возможности сохранены;
+наблюдения и отдельный отказ nested RESET приведены в VALIDATION.
+
+Не реализованы E-literals, dollar quoting, SET LOCAL/SESSION, DEFAULT, SHOW,
+RESET parameter, новые startup options, BEGIN/$n/::/LIMIT. Whole-query preparse
+по-прежнему отложен. Полный startup batch и запуск 1С/Гилёва этим срезом не доказаны.
 
 ## Решение от 9 ноября 2026: последовательные скрипты, остановка на ошибке
 

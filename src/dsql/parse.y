@@ -88,6 +88,7 @@
 #include "../jrd/jrd.h"
 #include "../jrd/DataTypeUtil.h"
 #include "../dsql/errd_proto.h"
+#include "../dsql/metd_proto.h"
 #include "../dsql/make_proto.h"
 #include "../yvalve/gds_proto.h"
 #include "../jrd/err_proto.h"
@@ -735,6 +736,7 @@ using namespace Firebird;
 %token <metaNamePtr> VALIDATE
 %token <metaNamePtr> LC_MESSAGES
 %token <metaNamePtr> CLIENT_ENCODING
+%token <metaNamePtr> STANDARD_CONFORMING_STRINGS
 
 // precedence declarations for expression evaluation
 
@@ -6400,6 +6402,8 @@ set_pg_session
 		{ $$ = newNode<SetPgSessionNode>(SetPgSessionNode::TYPE_LC_MESSAGES, *$4); }
 	| SET CLIENT_ENCODING pg_setting_assignment pg_setting_value
 		{ $$ = newNode<SetPgSessionNode>(SetPgSessionNode::TYPE_CLIENT_ENCODING, *$4); }
+	| SET STANDARD_CONFORMING_STRINGS pg_setting_assignment pg_setting_value
+		{ $$ = newNode<SetPgSessionNode>(SetPgSessionNode::TYPE_STANDARD_CONFORMING_STRINGS, *$4); }
 	;
 
 pg_setting_assignment
@@ -6411,6 +6415,7 @@ pg_setting_assignment
 pg_setting_value
 	: STRING			{ $$ = newString($1->getString()); }
 	| valid_symbol_name	{ $$ = newString($1->c_str()); }
+	| ON				{ $$ = newString("ON"); }
 	;
 
 %type <metaNameArray> schema_name_list
@@ -8914,7 +8919,22 @@ sql_string
 			StrMark* mark = strMarks.get($4);
 
 			if (mark)	// hex string is not in strMarks
+			{
+				// Charset feedback can arrive after the lexer has read its lookahead.
+				// Validate the decoded ordinary literal once its introducer is known.
+				if (mark->escaped)
+				{
+					auto charSet = *$2;
+					scratch->qualifyExistingName(charSet, obj_charset);
+					const auto symbol = METD_get_charset(scratch->getTransaction(), charSet);
+					if (!symbol || symbol->intlsym_charset_id != CS_UTF8)
+					{
+						ERRD_post(Arg::Gds(isc_wish_list) << Arg::Gds(isc_random) <<
+							"PG backslash strings require a UTF8 introducer");
+					}
+				}
 				mark->introduced = true;
+			}
 		}
 	;
 
@@ -10636,6 +10656,7 @@ non_reserved_word
 	| VALIDATE
 	| LC_MESSAGES
 	| CLIENT_ENCODING
+	| STANDARD_CONFORMING_STRINGS
 	;
 
 %%

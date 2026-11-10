@@ -162,6 +162,28 @@ BOOST_AUTO_TEST_CASE(GetStatementEndAccumulationTest)
 	BOOST_TEST(lexer.getBuffer() == block + next);
 }
 
+
+BOOST_AUTO_TEST_CASE(BackslashStatementBoundariesTest)
+{
+	const std::string source = R"(SELECT 'a\';b'; SELECT q'{\';}'; SELECT "x\"; SELECT 2;)";
+	FrontendLexer pg(source, true);
+	const auto first = pg.getStatementEnd();
+	BOOST_REQUIRE(first.has_value());
+	BOOST_TEST(source.substr(0, *first) == R"(SELECT 'a\';b';)");
+	BOOST_REQUIRE(pg.getStatementEnd().has_value());
+	BOOST_REQUIRE(pg.getStatementEnd().has_value());
+	BOOST_REQUIRE(pg.getStatementEnd().has_value());
+	BOOST_TEST(!pg.getStatementEnd().has_value());
+	BOOST_TEST(pg.getBuffer() == source);
+
+	FrontendLexer native(source);
+	const auto nativeFirst = native.getStatementEnd();
+	BOOST_REQUIRE(nativeFirst.has_value());
+	BOOST_TEST(source.substr(0, *nativeFirst) == R"(SELECT 'a\';)");
+	FrontendLexer incomplete(R"(SELECT 'a\'; SELECT 2;)", true);
+	BOOST_TEST(!incomplete.getStatementEnd().has_value());
+}
+
 BOOST_AUTO_TEST_CASE(GetStatementEndTailAndEmptyFragmentsTest)
 {
 	for (const std::string source : {"", " \t", "-- comment", "/* comment */", "SELECT 42",

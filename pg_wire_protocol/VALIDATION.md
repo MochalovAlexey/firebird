@@ -1,5 +1,169 @@
 # Проверки реализации
 
+## 10 ноября 2026: standard_conforming_strings, редакция 2
+
+База — `da23d2d60cf011fec192696e9c4e5abd6b797365`. Реализовано согласованное
+разделение: bool на attachment, история отката одной настройки в PgWire,
+восстановление фиксированным SET через существующий API. Результат не закоммичен;
+пользовательская [инструкция](1c/STANDARD_CONFORMING_STRINGS_TASK.md) не изменялась.
+Подробный контракт и ручной пример — в [1c/README.md](1c/README.md).
+
+| Группа файлов | Необходимое изменение / использованный механизм |
+|---|---|
+| `jrd/Attachment.*`, `jrd/inf.cpp`, `inf_pub.h` | Один session bool, существующий reset и attachment getInfo (item 163, integer 0/1). В transaction/savepoint engine undo изменений нет |
+| `StmtNodes.*`, `ParserTokens.h`, `parse.y` | Существующий SetPgSessionNode/SessionManagementNode, PG-only token gate, Execute-only on/off; штатное разрешение charset/schema для introducer |
+| `Parser.*` | Обычный engine lexer декодирует off-литералы; StrMark/transformString сохраняет native hex notation для внутренней переподготовки, с исходными offsets |
+| `dsql.cpp`, `DsqlStatementCache.*`, IDL/generated bindings | Один effective prepare context для parser и обеих операций cache; два flags, без методов, версий и vtables |
+| `Execute.*`, `Extended.cpp`, `PgWire.cpp`, `SqlInfo.*` | Narrow history, native savepoint names/ONLY через MetaString, общий abort path, fixed maintenance SET/readback, Simple/Parse snapshots, фактический ParameterStatus |
+| `FrontendLexer.*` | Опциональный skip backslash пары для границ исходных строк; isql/native defaults сохранены |
+| Existing tests/build targets, `SessionTest.cpp`, `pgwire_1c_smoke.py`, `pgwire_strings_checks.py`, `pgwire_strings_api.cpp` | Переиспользованы unit targets, private runtime harness, libpq/raw-wire и OO API; нового framework нет |
+
+### Сборка и зависимости
+
+Linux x86-64, Firebird `LI-T6.0.0.2199-dev`, GCC 13.4.0, GNU Make 4.3,
+Python 3.10.12. Существующий out-of-tree configure:
+
+```sh
+cd /tmp/firebird-pgwire-1c-build
+/home/aleksey/dev/my_firebird/firebird/configure \
+  --enable-developer --with-builtin-tommath --with-builtin-tomcrypt
+make -j2
+make -C gen -j2 TARGET=Debug pgwire_tests
+LD_LIBRARY_PATH=gen/Debug/firebird/lib gen/Debug/firebird/tests/pgwire_session_test
+LD_LIBRARY_PATH=gen/Debug/firebird/lib gen/Debug/firebird/tests/isql_test --log_level=message
+```
+
+Configure повторно вручную не запускался; make использовал существующий build и
+перегенерировал затронутые outputs. Финальный полный build — **PASS**,
+`/tmp/firebird-pgwire-1c-build/strings-build-10.log`. Parser baseline сохранён:
+**154 shift/reduce, 11 reduce/reduce**, новых конфликтов нет. CLOOP bindings
+перегенерированы штатной целью `updateCloopInterfaces`.
+
+Build dependencies прежние: toolchain/autotools, bundled btyacc/CLOOP и
+tommath/tomcrypt, существующие Firebird/ICU dependencies. Tests используют
+существующие Boost/isql targets, Python stdlib, libpq headers/runtime 14.24;
+Simple driver probe — psycopg2 2.9.2/libpq 14.24 на `/usr/bin/python3`.
+OO helper собирается g++ с runtime headers/libfbclient, без новой библиотеки.
+
+`readelf -d` и `ldd` сравнили текущий PgWire с
+`/tmp/firebird-pgwire-1c-settings-04/runtime/plugins/libPgWire.so`.
+**DT_NEEDED одинаков**: libfbclient.so.2, libtommath.so.0, libtomcrypt.so.1,
+libm.so.6, libgcc_s.so.1, libc.so.6, ld-linux-x86-64.so.2. Все зависимости
+разрешились; нового runtime dependency нет. Полный отчёт:
+`/tmp/firebird-pgwire-1c-build/strings-dependencies.json`.
+
+### Приёмка
+
+Команды запускались из корня репозитория, серверы/базы были частными копиями,
+рабочий сервер и базы пользователя не менялись. Финальный целевой запуск:
+
+```sh
+python3 -B pg_wire_protocol/tools/pgwire_1c_smoke.py --strings \
+  --firebird-dir /tmp/firebird-pgwire-1c-build/gen/Debug/firebird \
+  --work-dir /tmp/firebird-pgwire-strings-10 \
+  --libpq /lib/x86_64-linux-gnu/libpq.so.5
+```
+
+**PASS**: 126 запросов настоящей libpq; raw-wire Parse/Bind/Execute/Flush/Sync
+и ParameterStatus; native dialects 1/2/3 с AUTOTERM; **292 OO API checks**.
+OO покрывает getInfo, flags/cache/metadata, prepare без изменения режима,
+повторный SET Execute, native rollback без PG undo, UTF8/WIN1251,
+introduced/Q strings и отсутствие ложного command_end_err2.
+Проверены immediate restore в E, repeated errors, implicit без handle,
+COMMIT из E, retaining/NO AUTO UNDO, имена savepoints/ONLY/replacement,
+stored PSQL после reconnect и native source reprepare, два attachments/reset.
+Сервер завершился exit 0, forced kill не применялся.
+Evidence — `/tmp/firebird-pgwire-strings-10/summary.json`.
+SHA256 PgWire: `30ae096fead56aba0651911ac15572babcc4a39b0d4f3f6d9ece6275f97b2a17`;
+Engine14: `d850255dfc7f295c13ff80201010eb51598b7bfc96fcc52d76c38fa25090585a`.
+
+Unit acceptance: **9 PgWire executables PASS** (SQL classifier 509,
+SessionTest 5 fault/success scenarios, остальные codecs/protocol/error tests);
+**полный isql suite: 13 cases, no errors**.
+Логи/сводка: `/tmp/firebird-pgwire-1c-build/strings-unit-results.json`,
+`strings-tests-build-08.log`. SessionTest проверяет original error/FATAL,
+отсутствие лишних результатов/handles, освобождение служебного statement,
+prepare/execute/readback failure и отсутствие обязательного info item.
+
+Регрессионные команды (общие значения переменных приведены для воспроизведения;
+фактические вызовы использовали эти же полные пути):
+
+```sh
+fb_strings_runtime=/tmp/firebird-pgwire-1c-build/gen/Debug/firebird
+fb_strings_headers=/tmp/firebird-pgwire-1c-deps/libpq-dev/usr/include/postgresql
+fb_strings_libpq=/lib/x86_64-linux-gnu/libpq.so.5
+python3 -B pg_wire_protocol/tools/pgwire_1c_smoke.py --settings \
+  --firebird-dir "$fb_strings_runtime" --work-dir /tmp/firebird-pgwire-strings-settings-01 \
+  --capture-dir /home/aleksey/dev/1c/captures/20261109T105635Z --libpq "$fb_strings_libpq"
+python3 -B pg_wire_protocol/tools/pgwire_script_smoke.py \
+  --firebird-dir "$fb_strings_runtime" --work-dir /tmp/firebird-pgwire-strings-scripts-01 --libpq "$fb_strings_libpq"
+python3 -B pg_wire_protocol/tools/pgwire_simple_query_smoke.py \
+  --firebird-dir "$fb_strings_runtime" --work-dir /tmp/firebird-pgwire-strings-simple-01 \
+  --libpq-include-dir "$fb_strings_headers" --libpq-library "$fb_strings_libpq" --driver-python /usr/bin/python3
+python3 -B pg_wire_protocol/tools/pgwire_transaction_smoke.py \
+  --firebird-dir "$fb_strings_runtime" --work-dir /tmp/firebird-pgwire-strings-transactions-01 \
+  --libpq-include-dir "$fb_strings_headers" --libpq-library "$fb_strings_libpq"
+python3 -B pg_wire_protocol/tools/pgwire_extended_query_smoke.py \
+  --firebird-dir "$fb_strings_runtime" --work-dir /tmp/firebird-pgwire-strings-extended-01 \
+  --libpq-include-dir "$fb_strings_headers" --libpq-library "$fb_strings_libpq"
+python3 -B pg_wire_protocol/tools/native_baseline.py \
+  --firebird-dir "$fb_strings_runtime" --work-dir /tmp/firebird-pgwire-strings-native-01
+```
+
+| Проверка | Фактический результат |
+|---|---|
+| Fixed settings | PASS, исходные capture bytes/ordinary user, UTF8/English, unsupported batch, native AUTOTERM |
+| Scripts | PASS, 8 групп |
+| Simple Query | PASS, 12 групп, включая C libpq/psycopg2/native observer/trace |
+| Transactions | PASS, 14 групп, в том числе прежние SNAPSHOT AUTO COMMIT и NO AUTO UNDO |
+| Extended Query | PASS, 16 групп, C libpq/raw-wire; optional Psycopg 3 profile не запускался |
+| Native baseline | PASS, 9 checks |
+
+Каждый work-dir содержит `summary.json`; все серверы этих регрессий завершились
+exit 0. Регрессии и unit suite выполнены на build-08; затем изменена только
+проверка charset/schema introduced off-литералов (`parse.y`). Полный build-10
+и целевой --strings подтвердили окончательный код, включая `_UTF8`/`_WIN1251`.
+Предварительные неуспешные strings runs не считаются приёмкой.
+
+### Эталон и ограничения
+
+Использованы прежние 14 запросов abort/savepoint reference:
+`/tmp/pgwire-1c-reference-iss_20tu/summary.json`. Дополнительно проверены 32
+escape/error cases (`/tmp/pgwire-1c-reference-b7ja5gp8/summary.json`) и точный
+wire order с Flush (`/tmp/pgwire-1c-reference-r5lqv8my/summary.json`).
+Эталон — `/opt/pgpro/1c-18/bin`, сервер сообщает PostgreSQL 18.6,
+gcc Ubuntu 11.4.0, 64-bit; libpq 14.24. Частные reference servers завершились
+exit 0. Набор ESCAPES/INVALID_UNICODE в test helper использован и эталонным probe.
+Подтверждено: ParameterStatus перед ReadyForQuery, без промежуточного уведомления
+на Flush; SET, отменённый ошибкой до Sync, не публикует транзитный режим.
+
+Гарантия нового PG undo **не включает TPB AUTO COMMIT и RESET внутри PSQL**.
+Старые native AUTO COMMIT возможности не удалены; их positive data baseline не
+доказывает согласованность новой истории при скрытом retaining.
+Отдельный nested RESET probe выявил существующий сбой и сохранён как **FAIL**:
+
+```sql
+SET TRANSACTION;
+SAVEPOINT boundary_point;
+EXECUTE BLOCK AS BEGIN ALTER SESSION RESET; END;
+```
+
+Через PgWire этот пример без нового SET вызывает Debug assertion
+`ExtDS.cpp:2021 (!isAllocated())`, SIGABRT/exit -6 **и на исходной сборке**
+из `firebird-pgwire-1c-settings-04`, и на текущей. Артефакты:
+`/tmp/pgwire-strings-nested-wire-{baseline,current}-02/summary.json`,
+reproducer `/tmp/pgwire_strings_nested_wire.py`.
+Embedded isql на обеих сборках вместо этого возвращает 01002 (2 active transactions),
+`/tmp/pgwire-strings-nested-reset-{baseline,current}-02/summary.json`.
+Этот отдельный дефект не исправлялся; данные работающего сервера не затрагивались.
+
+Off ограничен UTF8, сохраняются native длины и whitespace concatenation.
+Прямой OO rollback оставляет session bool. E/dollar strings, SET LOCAL/SESSION,
+DEFAULT/SHOW/RESET parameter, новые startup keys и BEGIN/$n/::/LIMIT не добавлены.
+Не выполнялись полная CMake/Windows/Classic/SuperClassic приёмка, TLS/cancellation,
+фактический запуск 1С/Гилёва и полный startup batch. Отложенные ON CONNECT shutdown
+и READ CONSISTENCY + AUTO COMMIT defects не исправлялись и не перепроверялись.
+
 ## 10 ноября 2026: фиксированный English/UTF8 профиль двух SET
 
 База изменения — `5374cc50e5`. Отдельный срез реализует исходный запрос

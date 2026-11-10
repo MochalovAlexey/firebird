@@ -545,6 +545,7 @@ public:
 	ULONG		att_flags;					// Flags describing the state of the attachment
 	CSetId		att_client_charset;			// user's charset specified in dpb
 	CSetId		att_charset;				// current (client or external) attachment charset
+	bool att_standard_conforming_strings = true;	// PG4 parser default; native session lifetime
 
 	// ASF: Attention: att_in_system_routine was initially added to support the profiler plugin
 	// writing to system tables. But a modified implementation used non-system tables and

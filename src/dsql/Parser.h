@@ -124,6 +124,7 @@ private:
 		}
 
 		bool introduced;
+		bool escaped = false;
 		unsigned pos;
 		unsigned length;
 		IntlString* str;
@@ -135,7 +136,7 @@ public:
 public:
 	Parser(thread_db* tdbb, MemoryPool& pool, MemoryPool* aStatementPool, DsqlCompilerScratch* aScratch,
 		USHORT aClientDialect, USHORT aDbDialect, bool aRequireSemicolon,
-		const TEXT* string, size_t length, CSetId charSetId);
+		const TEXT* string, size_t length, CSetId charSetId, bool aPgStringEscapes);
 	~Parser();
 
 public:
@@ -232,6 +233,7 @@ private:
 		return (name ? *name : QualifiedName());
 	}
 
+	int lexPgString();
 	void transformString(const char* start, unsigned length, Firebird::string& dest);
 	Firebird::string makeParseStr(const Position& p1, const Position& p2);
 	ParameterNode* make_parameter();
@@ -388,6 +390,7 @@ private:
 	MemoryPool* statementPool;
 	DsqlCompilerScratch* scratch;
 	const bool pgDialect;
+	const bool pgStringEscapes;
 	USHORT client_dialect;
 	USHORT db_dialect;
 	const bool requireSemicolon;

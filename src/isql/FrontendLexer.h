@@ -66,11 +66,12 @@ public:
 	};
 
 public:
-	FrontendLexer(std::string_view aBuffer = {})
+	FrontendLexer(std::string_view aBuffer = {}, bool aBackslashStrings = false)
 		: buffer(aBuffer),
 		  pos(buffer.begin()),
 		  end(buffer.end()),
-		  deletePos(buffer.begin())
+		  deletePos(buffer.begin()),
+		  backslashStrings(aBackslashStrings)
 	{
 	}
 
@@ -126,6 +127,7 @@ private:
 	std::string::const_iterator pos;
 	std::string::const_iterator end;
 	std::string::const_iterator deletePos;
+	const bool backslashStrings;
 };
 
 #endif	// FB_ISQL_FRONTEND_LEXER_H

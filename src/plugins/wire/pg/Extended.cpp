@@ -72,12 +72,13 @@ struct Prepared
 	NativeRequest native;
 	std::string sql;
 	SqlInfo info;
+	bool standardStrings = true;
 	std::unique_ptr<InputCodec> input;
 	std::unique_ptr<ResultCodec> output;
 
 	std::size_t bytes() const
 	{
-		std::size_t size = sizeof(*this) + sql.capacity() + info.tag.capacity();
+		std::size_t size = sizeof(*this) + sql.capacity() + info.tag.capacity() + info.savepoint.capacity();
 		if (input)
 			size += input->messageLength() + input->retainedBytes();
 		if (output)
@@ -230,6 +231,7 @@ bool QueryExecutor::process(Protocol& protocol, const Message& message)
 	{
 		if (!execute(protocol, message.text()))
 			return false;
+		reportStrings(protocol);
 		protocol.ready(state);
 		return true;
 	}
@@ -270,29 +272,20 @@ bool QueryExecutor::process(Protocol& protocol, const Message& message)
 		pendingPrepared.reset();
 		if (!clearPortals())
 			fatal = true;
-		if (state != 'I' && !fatal)
-		{
-			if (transactionIsValid())
-				state = 'E';
-			else
-				fatal = true;
-		}
-		if (state == 'I' || fatal)
-		{
-			if (!rollback())
-				fatal = true;
-			state = 'I';
-		}
 		objects->discard = message.type != 'S';
-		protocol.error(diagnostic.state, diagnostic.message, fatal);
-		if (!fatal && message.type == 'S')
+		const bool alive = this->fail(protocol, diagnostic, fatal);
+		if (alive && message.type == 'S')
+		{
+			reportStrings(protocol);
 			protocol.ready(state);
-		return !fatal;
+		}
+		return alive;
 	};
 
 	try
 	{
 		FbLocalStatus status;
+		beginStrings();
 		if (parse)
 		{
 			if (parse->name.empty())
@@ -304,11 +297,12 @@ bool QueryExecutor::process(Protocol& protocol, const Message& message)
 			objects->reserve(parse->name.size() + parse->sql.size());
 			const auto prepared = pendingPrepared = std::make_shared<Prepared>();
 			prepared->sql = std::move(parse->sql);
+			prepared->standardStrings = readStrings();
 			preparing = true;
 			prepared->native.statement = attachment->prepare(&status, transaction,
 				prepared->sql.size(), prepared->sql.data(), SQL_DIALECT_PG,
-				IStatement::PREPARE_PREFETCH_METADATA);
-			prepared->info = inspectSql(prepared->sql);
+				IStatement::PREPARE_PREFETCH_METADATA | stringPrepareFlags(prepared->standardStrings));
+			prepared->info = inspectSql(prepared->sql, prepared->standardStrings);
 			if ((status->getState() & IStatus::STATE_ERRORS) &&
 				diagnose(&status).state == "42601" && prepared->info.empty)
 			{
@@ -367,7 +361,7 @@ bool QueryExecutor::process(Protocol& protocol, const Message& message)
 				preparing = true;
 				portal->native.statement = attachment->prepare(&status, transaction,
 					source.sql.size(), source.sql.data(), SQL_DIALECT_PG,
-					IStatement::PREPARE_PREFETCH_METADATA);
+					IStatement::PREPARE_PREFETCH_METADATA | stringPrepareFlags(source.standardStrings));
 				check(&status);
 				preparing = false;
 				checkStatement(portal->native.statement, source.info);
@@ -549,6 +543,7 @@ bool QueryExecutor::process(Protocol& protocol, const Message& message)
 		{
 			objects->discard = false;
 			finishImplicit(ending);
+			reportStrings(protocol);
 			protocol.ready(state);
 		}
 		return true;

@@ -111,10 +111,10 @@ public:
 			protocol.parameterStatus("client_encoding", "UTF8");
 			protocol.parameterStatus("DateStyle", "ISO, MDY");
 			protocol.parameterStatus("integer_datetimes", "on");
-			protocol.parameterStatus("standard_conforming_strings", "on");
+			QueryExecutor executor(owned.attachment);
+			executor.reportStrings(protocol);
 			protocol.parameterStatus("application_name", startup.applicationName);
 			protocol.ready('I');
-			QueryExecutor executor(owned.attachment);
 
 			while (!stopping() && protocol.readMessage(message, executor.discarding()))
 			{

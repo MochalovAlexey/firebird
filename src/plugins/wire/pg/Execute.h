@@ -20,6 +20,8 @@
 namespace Firebird::PgWire
 {
 
+struct Diagnostic;
+
 // One executor per authenticated session, destroyed before the borrowed
 // attachment is detached. Only this object owns an application transaction.
 class QueryExecutor final
@@ -38,6 +40,7 @@ public:
 	bool process(Protocol& protocol, const Message& message);
 	bool discarding() const noexcept;
 	char transactionState() const noexcept { return state; }
+	void reportStrings(Protocol& protocol);
 
 private:
 	struct Objects;
@@ -52,6 +55,22 @@ private:
 	void clearUnnamed();
 	bool rollback() noexcept;
 	bool transactionIsValid() noexcept;
+	bool readStrings();
+	static unsigned stringPrepareFlags(bool value);
+	void beginStrings();
+	void restoreStrings(bool value);
+	void clearStringHistory();
+	void sendStrings(Protocol& protocol, bool value);
+	bool fail(Protocol& protocol, const Diagnostic& diagnostic, bool fatal);
+
+	struct StringSavepoint
+	{
+		std::string name;
+		bool value;
+	};
+	std::optional<bool> stringsAtStart;
+	std::vector<StringSavepoint> stringSavepoints;
+	std::optional<bool> stringsSent;
 
 	IAttachment* const attachment;
 	ITransaction* transaction = nullptr;

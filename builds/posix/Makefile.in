@@ -932,6 +932,7 @@ PGWIRE_PROTOCOL_TEST = $(FB_TESTS_DIR)/pgwire_protocol_test$(EXEC_EXT)
 PGWIRE_ERROR_TEST = $(FB_TESTS_DIR)/pgwire_error_test$(EXEC_EXT)
 PGWIRE_RESULT_TEST = $(FB_TESTS_DIR)/pgwire_result_test$(EXEC_EXT)
 PGWIRE_INPUT_TEST = $(FB_TESTS_DIR)/pgwire_input_test$(EXEC_EXT)
+PGWIRE_SESSION_TEST = $(FB_TESTS_DIR)/pgwire_session_test$(EXEC_EXT)
 PGWIRE_SQL_TEST = $(FB_TESTS_DIR)/pgwire_sql_test$(EXEC_EXT)
 PGWIRE_FLOAT_TEST = $(FB_TESTS_DIR)/pgwire_float_test$(EXEC_EXT)
 PGWIRE_NUMERIC_TEST = $(FB_TESTS_DIR)/pgwire_numeric_test$(EXEC_EXT)
@@ -944,7 +945,7 @@ PYTHON ?= python3
 pgwire_tests:
 	$(MAKE) TARGET?=$(DefaultTarget) pgwire_tests_process
 
-pgwire_tests_process: $(PGWIRE_PROTOCOL_TEST) $(PGWIRE_ERROR_TEST) $(PGWIRE_RESULT_TEST) $(PGWIRE_INPUT_TEST) $(PGWIRE_SQL_TEST) $(PGWIRE_FLOAT_TEST) $(PGWIRE_NUMERIC_TEST) $(PGWIRE_TEMPORAL_TEST)
+pgwire_tests_process: $(PGWIRE_SESSION_TEST) $(PGWIRE_PROTOCOL_TEST) $(PGWIRE_ERROR_TEST) $(PGWIRE_RESULT_TEST) $(PGWIRE_INPUT_TEST) $(PGWIRE_SQL_TEST) $(PGWIRE_FLOAT_TEST) $(PGWIRE_NUMERIC_TEST) $(PGWIRE_TEMPORAL_TEST)
 
 $(PGWIRE_INPUT_TEST): $(PgWire_Input_Test_Objects) $(call makeObjects,plugins/wire/pg,InputCodec.cpp FloatCodec.cpp NumericCodec.cpp TemporalCodec.cpp Protocol.cpp) $(COMMON_LIB) | $(LIBFIREBIRD_BASENAME)
 	@mkdir -p $(dir $@)
@@ -962,9 +963,13 @@ $(PGWIRE_TEMPORAL_TEST): $(PgWire_Temporal_Test_Objects) $(call makeObjects,plug
 	@mkdir -p $(dir $@)
 	$(EXE_LINK) $(EXE_LINK_OPTIONS) $^ -o $@ $(FIREBIRD_LIBRARY_LINK) $(LINK_LIBS)
 
-$(PGWIRE_SQL_TEST): $(PgWire_Sql_Test_Objects) $(call makeObjects,plugins/wire/pg,SqlInfo.cpp)
+$(PGWIRE_SESSION_TEST): $(PgWire_Session_Test_Objects) $(filter-out $(call makeObjects,plugins/wire/pg,PgWire.cpp),$(PgWire_Objects)) $(COMMON_LIB) | $(LIBFIREBIRD_BASENAME)
 	@mkdir -p $(dir $@)
-	$(EXE_LINK) $(EXE_LINK_OPTIONS) $^ -o $@
+	$(EXE_LINK) $(EXE_LINK_OPTIONS) $^ -o $@ $(FIREBIRD_LIBRARY_LINK) $(LINK_LIBS)
+
+$(PGWIRE_SQL_TEST): $(PgWire_Sql_Test_Objects) $(call makeObjects,plugins/wire/pg,SqlInfo.cpp) $(call makeObjects,common/classes,MetaString.cpp) | $(LIBFIREBIRD_BASENAME)
+	@mkdir -p $(dir $@)
+	$(EXE_LINK) $(EXE_LINK_OPTIONS) $^ -o $@ $(FIREBIRD_LIBRARY_LINK)
 
 $(PGWIRE_RESULT_TEST): $(PgWire_Result_Test_Objects) $(call makeObjects,plugins/wire/pg,ResultCodec.cpp FloatCodec.cpp NumericCodec.cpp TemporalCodec.cpp Protocol.cpp) $(COMMON_LIB) | $(LIBFIREBIRD_BASENAME)
 	@mkdir -p $(dir $@)

@@ -101,9 +101,9 @@ public:
 	}
 
 	Firebird::RefPtr<DsqlStatement> getStatement(thread_db* tdbb, const Firebird::string& text,
-		USHORT clientDialect, bool isInternalRequest);
+		USHORT clientDialect, bool pgStringEscapes, bool isInternalRequest);
 
-	void putStatement(thread_db* tdbb, const Firebird::string& text, USHORT clientDialect, bool isInternalRequest,
+	void putStatement(thread_db* tdbb, const Firebird::string& text, USHORT clientDialect, bool pgStringEscapes, bool isInternalRequest,
 		Firebird::RefPtr<DsqlStatement> dsqlStatement);
 
 	void removeStatement(thread_db* tdbb, DsqlStatement* statement);
@@ -119,7 +119,7 @@ public:
 
 private:
 	void buildStatementKey(thread_db* tdbb, Firebird::RefStrPtr& key, const Firebird::string& text,
-		USHORT clientDialect, bool isInternalRequest);
+		USHORT clientDialect, bool pgStringEscapes, bool isInternalRequest);
 
 	void buildVerifyKey(thread_db* tdbb, Firebird::string& key, bool isInternalRequest);
 	void shrink();

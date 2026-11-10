@@ -459,6 +459,7 @@ void Jrd::Attachment::resetSession(thread_db* tdbb, jrd_tra** traHandle)
 		}
 
 		att_initial_options.resetAttachment(this);
+		att_standard_conforming_strings = true;
 
 		// reset timeouts
 		setIdleTimeout(0);

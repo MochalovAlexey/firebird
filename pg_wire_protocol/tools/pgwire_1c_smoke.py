@@ -56,6 +56,7 @@ class Libpq(Connection):
             ('PQdescribePrepared', C.c_void_p, [C.c_void_p,C.c_char_p]),
             ('PQnparams', C.c_int, [C.c_void_p]),
             ('PQparamtype', C.c_uint, [C.c_void_p,C.c_int]),
+            ('PQparameterStatus', C.c_char_p, [C.c_void_p,C.c_char_p]),
         ]:
             function = getattr(self.pq, name)
             function.restype, function.argtypes = result, args
@@ -208,7 +209,10 @@ def client_child():
     try:
         connection = Libpq(config)
         output = {'libpq_version': connection.pq.PQlibVersion(), 'cases': []}
-        if config.get('settings'):
+        if config.get('strings'):
+            from pgwire_strings_checks import strings_client
+            output['strings'] = strings_client(config, connection)
+        elif config.get('settings'):
             output['settings'] = settings_client(config, connection)
         elif config['baseline']:
             selected = Path(config['capture_dir']) / 'profile/selected'
@@ -365,17 +369,22 @@ class OneCHarness(StartupHarness):
         finally:
             ready.close()
         self.native_probe('native_before')
-        config = {'port':pg,'password':self.password,'baseline':args.baseline,'settings':args.settings,
+        config = {'port':pg,'password':self.password,'baseline':args.baseline,'settings':args.settings,'strings':args.strings,
                   'capture_dir':str(args.capture_dir),'libpq':args.libpq, 'native_port':native,
                   'runtime':str(self.runtime),'work':str(self.work),'timeout':self.timeout}
         client_env = {key:value for key,value in self.env.items() if not key.startswith('PG')}
         result = subprocess.run([sys.executable,'-B',str(Path(__file__).resolve()),'--child'],
             input=json.dumps(config),text=True,capture_output=True,env=client_env,cwd=self.temp,timeout=self.timeout)
         (self.work / 'libpq.log').write_text(self.redact(result.stdout + result.stderr))
+        require(result.stdout, 'libpq child produced no report; exit ' + str(result.returncode))
         child = json.loads(result.stdout)
         self.summary['client'] = child
         require(result.returncode == 0, 'libpq child failed; see libpq.log')
-        if args.settings:
+        if args.strings:
+            from pgwire_strings_checks import strings_protocols, strings_api
+            self.summary['strings_protocols'] = strings_protocols(self)
+            self.summary['strings_api'] = strings_api(self)
+        elif args.settings:
             self.settings_protocols()
         elif not args.baseline:
             for name, sql, expected, _ in SELECTS:
@@ -408,6 +417,7 @@ def main():
     parser.add_argument('--work-dir',type=Path,required=True)
     parser.add_argument('--capture-dir',type=Path)
     mode = parser.add_mutually_exclusive_group()
+    mode.add_argument('--strings',action='store_true',help='test standard_conforming_strings')
     mode.add_argument('--baseline',action='store_true')
     mode.add_argument('--settings',action='store_true',help='test fixed English/UTF8 settings with an ordinary user')
     parser.add_argument('--libpq')
@@ -428,8 +438,9 @@ def main():
     work.mkdir(mode=0o700)
     harness = OneCHarness(source,work.resolve(),args.timeout)
     harness.summary.pop('passed')
-    harness.summary.update(completed=False, mode='settings' if args.settings else 'baseline' if args.baseline else 'select_without_from',
-        stage='Fixed English/UTF8 settings with an ordinary user' if args.settings else '1C observations / first engine slice',
+    harness.summary.update(completed=False, mode='strings' if args.strings else 'settings' if args.settings else 'baseline' if args.baseline else 'select_without_from',
+        stage='standard_conforming_strings / revision 2' if args.strings else
+            'Fixed English/UTF8 settings with an ordinary user' if args.settings else '1C observations / first engine slice',
         capture_dir=str(args.capture_dir), workers=6,
         module_sha256=hashlib.sha256((source/'plugins/libPgWire.so').read_bytes()).hexdigest(),
         engine_sha256=hashlib.sha256((source/'plugins/libEngine14.so').read_bytes()).hexdigest(),
@@ -440,7 +451,9 @@ def main():
         ['git','diff','HEAD','--','src'],cwd=repo)).hexdigest()
     try:
         harness.prepare()
-        if not args.settings and not args.baseline:
+        if args.strings:
+            harness.isql('strings_grants', f"CONNECT '{harness.database}';\nGRANT CREATE PROCEDURE TO USER WIRE_HOST_TEST;\nCOMMIT;\nQUIT;\n", embedded=True)
+        elif not args.settings and not args.baseline:
             compat = Path(__file__).resolve().parents[1] / '1c/compat.sql'
             harness.isql('install_compat', f"CONNECT '{harness.database}';\n" +
                          compat.read_text() + '\nGRANT CREATE TABLE TO USER WIRE_HOST_TEST;\nCOMMIT;\nQUIT;\n',
@@ -448,7 +461,9 @@ def main():
             harness.summary['compat_script_sha256'] = hashlib.sha256(compat.read_bytes()).hexdigest()
         harness.run(args)
         harness.summary['completed'] = True
-        if args.settings:
+        if args.strings:
+            harness.summary['strings_passed'] = True
+        elif args.settings:
             harness.summary['settings_passed'] = True
         elif not args.baseline:
             harness.summary['select_without_from_passed'] = True

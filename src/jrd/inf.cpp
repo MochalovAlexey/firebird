@@ -752,6 +752,10 @@ void INF_database_info(thread_db* tdbb,
 			length = INF_convert(attachment->att_charset, buffer);
 			break;
 
+		case fb_info_standard_conforming_strings:
+			length = INF_convert(attachment->att_standard_conforming_strings, buffer);
+			break;
+
 		case fb_info_page_contents:
 			{
 				bool validArgs = false;

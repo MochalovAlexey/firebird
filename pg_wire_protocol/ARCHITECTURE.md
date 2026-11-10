@@ -38,7 +38,7 @@ PG-дополнения parser изолируются клиентским `SQL_
 
 Исходные байты каждой SQL-команды передаются в engine prepare с явной длиной и без изменения текста. Для Simple Query существующий lexer isql выделяет кандидаты границ, а engine prepare подтверждает завершённость команды по модели AUTOTERM. Ограниченный SqlInfo внутри PgWire определяет вид команды, command tag, профиль transaction/session controls и признак tokenless EMPTY; grammar, имена объектов, privileges и типы проверяет движок. Общий wire host SQL не анализирует.
 
-После успешного engine prepare плагин сочетает lexical descriptor с существующими `getType()`, `getFlags()`, input/output metadata и affected records. `FLAG_HAS_CURSOR` выбирает cursor/fetch; output metadata определяет singleton output и codecs. RETURNING не превращает DML в SELECT. В I/T неподдержанный control либо UNKNOWN, включая USING wrapper, получает 0A000 до execution; в E успешно подготовленные команды, кроме разрешённого recovery, получают 25P02. Ошибка самого prepare имеет отдельный приоритет по CODEX_CONTEXT. Новые публичные DSQL getInfo items, AST annotations и parser diagnostics для PgWire не добавляются.
+После успешного engine prepare плагин сочетает lexical descriptor с существующими `getType()`, `getFlags()`, input/output metadata и affected records. `FLAG_HAS_CURSOR` выбирает cursor/fetch; output metadata определяет singleton output и codecs. RETURNING не превращает DML в SELECT. В I/T неподдержанный control либо UNKNOWN, включая USING wrapper, получает 0A000 до execution; в E успешно подготовленные команды, кроме разрешённого recovery, получают 25P02. Ошибка самого prepare имеет отдельный приоритет по CODEX_CONTEXT. Для классификации SQL новые публичные DSQL metadata, AST annotations и parser diagnostics не добавляются. Узкое исключение для standard_conforming_strings — attachment getInfo item и два prepare flags, описанные в 1c/README.md; методов и vtables оно не меняет.
 
 Запрещены SQL rewriting, удаление comments из передаваемого текста, замена `$n` на `?`, подстановка параметров SQL-литералами и эмуляция успешного SET/BEGIN. Совместимость синтаксиса и реальное исполнение определяет только Firebird.
 
@@ -52,11 +52,35 @@ EMPTY определяется ограниченным lexer только дл�
 
 P5 добавляет plugin-local `ControlKind` для native start/full completion/retaining/savepoints/session SET/RESET. `SET TRANSACTION` начинает настоящую transaction и выдаёт tag BEGIN. В I полный COMMIT/ROLLBACK — no-op, retaining/savepoints дают 25000; повторный start в T — 25001/E. В E разрешены полный rollback, COMMIT с фактическим rollback/tag ROLLBACK, ROLLBACK RETAIN и ROLLBACK TO; остальные успешно подготовленные команды получают 25P02. Failed prepare переводится в 25P02 только для фактической native missing-relation причины, если она осталась итоговой nonfatal диагностикой; syntax/permission/cancel/fatal/unknown ошибки сохраняются.
 
-Native session SET проходят явный whitelist и исполняются движком. ALTER SESSION RESET учитывает новую native transaction даже при том же interface pointer; в I/T сохраняется соответствующее состояние, в E reset запрещён. P7 хранит statements/portals по контракту ниже; RESET инвалидирует их все. Имена savepoints плагин не хранит. AUTO COMMIT / NO AUTO UNDO сохраняют native семантику без сканирования опций SET TRANSACTION. Полная state/error таблица — в CODEX_CONTEXT. Граница относится только к PgWire и не ограничивает общий host ABI.
+Native session SET проходят явный whitelist и исполняются движком. ALTER SESSION RESET учитывает новую native transaction даже при том же interface pointer; в I/T сохраняется соответствующее состояние, в E reset запрещён. P7 хранит statements/portals по контракту ниже; RESET инвалидирует их все. Для standard_conforming_strings плагин хранит узкую историю имён и bool snapshots пользовательских savepoints; native undo данных остаётся в движке. AUTO COMMIT / NO AUTO UNDO сохраняют native семантику без сканирования опций SET TRANSACTION. Полная state/error таблица — в CODEX_CONTEXT. Граница относится только к PgWire и не ограничивает общий host ABI.
 
 AUTO COMMIT DML проверяется с SNAPSHOT; NO AUTO UNDO имеет отдельную проверку. Известный native defect относится к сочетанию AUTO COMMIT с READ COMMITTED READ CONSISTENCY: assertion `Savepoint.cpp:833` воспроизводится embedded isql без PgWire/server/triggers. Этот профиль исключён из подтверждённой совместимости. Обход через изменение core или сканирование transaction options не вводится; evidence — в VALIDATION.
 
 BEGIN, START TRANSACTION, `$n` и RETAINING не поддерживаются native grammar. Для retaining применяется `COMMIT/ROLLBACK [WORK] RETAIN [SNAPSHOT]`. Будущее расширение PostgreSQL grammar/functions остаётся отдельной задачей. Целевая приёмка P5 прошла с native ограничением выше; целевой M1 принят в P6 с указанными исключениями.
+
+## Настройка строк: узкое расширение контракта
+
+По согласованной редакции 2 задания standard_conforming_strings хранится в
+attachment, а PostgreSQL-история отката — в существующем QueryExecutor.
+Разрешены getInfo item 163 и prepare flags ON/OFF, без новых методов/vtables.
+SqlInfo дополнительно извлекает имя пользовательского savepoint и ONLY;
+проверка грамматики и native undo остаются в движке. Plugin не декодирует
+литералы и не извлекает значение SET из текста: читает фактический bool.
+
+Baseline логического блока существует даже до появления native handle.
+Ошибка Simple/Extended сразу восстанавливает последний snapshot фиксированным
+служебным SET с NULL transaction; explicit native transaction остаётся живой в E.
+Readback/cleanup failure делает session FATAL. Retaining/reset очищают прежнюю
+историю, native repeated names/RELEASE ONLY сохраняют свою семантику.
+ParameterStatus отправляется при startup и перед ReadyForQuery, по getInfo.
+
+Simple Query фиксирует строковый режим для всего сообщения; Extended Parse —
+для prepared statement, включая последующие Bind prepares. Parser/cache используют
+один effective context. Engine transformString сохраняет decoded values в native
+hex notation для DDL/PSQL. Прямой OO API не получает PG rollback session bool.
+Подтверждённый профиль исключает TPB AUTO COMMIT и nested RESET вместе с новой
+историей. Подробные границы, длины, синтаксис и пример — в [1c/README.md](1c/README.md).
+
 
 ## Загрузка через существующий PluginManager
 

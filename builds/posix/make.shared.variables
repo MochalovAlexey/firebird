@@ -97,11 +97,12 @@ PgWire_Test_Objects:= $(call makeObjects,plugins/wire/pg/tests,ProtocolTest.cpp)
 PgWire_Error_Test_Objects:= $(call makeObjects,plugins/wire/pg/tests,ErrorStatusTest.cpp)
 PgWire_Result_Test_Objects:= $(call makeObjects,plugins/wire/pg/tests,ResultCodecTest.cpp)
 PgWire_Input_Test_Objects:= $(call makeObjects,plugins/wire/pg/tests,InputCodecTest.cpp)
+PgWire_Session_Test_Objects:= $(call makeObjects,plugins/wire/pg/tests,SessionTest.cpp)
 PgWire_Sql_Test_Objects:= $(call makeObjects,plugins/wire/pg/tests,SqlInfoTest.cpp)
 PgWire_Float_Test_Objects:= $(call makeObjects,plugins/wire/pg/tests,FloatCodecTest.cpp)
 PgWire_Numeric_Test_Objects:= $(call makeObjects,plugins/wire/pg/tests,NumericCodecTest.cpp)
 PgWire_Temporal_Test_Objects:= $(call makeObjects,plugins/wire/pg/tests,TemporalCodecTest.cpp)
-AllObjects += $(PgWire_Objects) $(PgWire_Test_Objects) $(PgWire_Error_Test_Objects) $(PgWire_Result_Test_Objects) $(PgWire_Input_Test_Objects) $(PgWire_Sql_Test_Objects) $(PgWire_Float_Test_Objects) $(PgWire_Numeric_Test_Objects) $(PgWire_Temporal_Test_Objects)
+AllObjects += $(PgWire_Session_Test_Objects) $(PgWire_Objects) $(PgWire_Test_Objects) $(PgWire_Error_Test_Objects) $(PgWire_Result_Test_Objects) $(PgWire_Input_Test_Objects) $(PgWire_Sql_Test_Objects) $(PgWire_Float_Test_Objects) $(PgWire_Numeric_Test_Objects) $(PgWire_Temporal_Test_Objects)
 
 
 # Chacha plugin
