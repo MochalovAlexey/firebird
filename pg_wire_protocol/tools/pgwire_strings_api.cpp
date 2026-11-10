@@ -102,7 +102,7 @@ int main(int argc, char** argv)
 			{
 				const auto tag = *p++;
 				require(tag != isc_arg_gds || *p != isc_command_end_err2, "Definitive error became incomplete SQL");
-				if (line && tag == isc_arg_gds && *p == isc_dsql_token_unk_err)
+				if (line && tag == isc_arg_gds && (*p == isc_dsql_token_unk_err || *p == isc_dsql_line_col_error))
 				{
 					require(p[1] == isc_arg_number && p[2] == line &&
 						p[3] == isc_arg_number && p[4] == column, "Error position is not the original SQL position");
@@ -118,6 +118,34 @@ int main(int argc, char** argv)
 		const std::string cast = "SELECT CAST('\\n' AS VARCHAR(8)) FROM RDB$DATABASE";
 		attach("UTF8", true);
 		require(mode(), "Initial mode is not on");
+		// Same attachment/cache: PG numbered inputs must never enter native prepares.
+		const auto input = [&](const char* text, unsigned dialect)
+		{
+			statement = attachment->prepare(&status, nullptr, 0, text, dialect, 0);
+			metadata = statement->getInputMetadata(&status);
+			require(metadata->getCount(&status) == 1 &&
+				(metadata->getType(&status, 0) & ~1u) == SQL_LONG, "Input metadata changed");
+			metadata->release(); metadata = nullptr;
+			statement->free(&status); statement = nullptr;
+		};
+		const char* numbered = "SELECT CAST($1 AS INTEGER) FROM RDB$DATABASE";
+		for (unsigned dialect : {1u, 2u, 3u})
+		{
+			input(numbered, SQL_DIALECT_PG);
+			reject(numbered, dialect, 0, "42000", 1, 13);
+			input("SELECT CAST(? AS INTEGER) FROM RDB$DATABASE", dialect);
+			query(dialect, 0, "SELECT A$1 FROM (SELECT 42 AS A$1 FROM RDB$DATABASE)", "42");
+			input(numbered, SQL_DIALECT_PG);
+		}
+		input("USING (A INTEGER=?) DO SELECT :A FROM RDB$DATABASE", SQL_DIALECT_PG);
+		for (unsigned flags : {ON, OFF})
+		{
+			reject("SELECT\n CAST($1foo AS INTEGER) FROM RDB$DATABASE", 4, flags, "42000", 2, 7);
+			reject("SELECT\n CAST($0 AS INTEGER) FROM RDB$DATABASE", 4, flags, "42P02", 2, 7);
+			reject("SELECT\n CAST($32768 AS INTEGER) FROM RDB$DATABASE", 4, flags, "54000", 2, 7);
+			reject("SELECT\n CAST($2 AS INTEGER) FROM RDB$DATABASE", 4, flags, "0A000", 2, 7);
+			reject("SELECT CAST($01 AS INTEGER),\n  @ FROM RDB$DATABASE", 4, flags, "42000", 2, 3);
+		}
 		const auto onLength = query(4, 0, sql, "\\n");
 		setting(false);
 		const auto offLength = query(4, 0, sql, "\n");

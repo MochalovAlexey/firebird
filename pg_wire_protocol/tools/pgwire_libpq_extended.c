@@ -154,7 +154,7 @@ static void asynchronous(PGconn* c, const char* sql, const Oid* types, const cha
 
     /* Parse, Bind and Execute errors are distinct server paths. Each libpq
        command supplies Sync; collect_single must reach NULL before reuse. */
-    error(c, send_params(c, "SELECT $1 FROM RDB$DATABASE", 1, &values[1]), "42601", PQTRANS_IDLE);
+    error(c, send_params(c, "SELECT $1 FROM RDB$DATABASE", 1, &values[1]), "HY004", PQTRANS_IDLE);
     values[1] = "2147483648";
     require(PQsendQueryPrepared(c, "c_async_values", 6, values, NULL, NULL, 0),
         "async invalid Bind send failed");
@@ -262,7 +262,10 @@ int main(void)
     }
     PQclear(r);
     asynchronous(c, sql, explicit_types, values);
-    error(c,PQexecParams(c,"SELECT $1 FROM RDB$DATABASE",1,NULL,&values[1],NULL,NULL,0),"42601",PQTRANS_IDLE);
+    r = checked(c, PQexecParams(c,"SELECT CAST($1 AS INTEGER) FROM RDB$DATABASE",
+        1,NULL,&values[1],NULL,NULL,0), PGRES_TUPLES_OK,"SELECT 1");
+    value(r, 0, values[1], 23); PQclear(r);
+    error(c,PQexecParams(c,"SELECT $1 FROM RDB$DATABASE",1,NULL,&values[1],NULL,NULL,0),"HY004",PQTRANS_IDLE);
     r = checked(c,PQexecParams(c,"BEGIN",0,NULL,NULL,NULL,NULL,0),PGRES_COMMAND_OK,"BEGIN"); PQclear(r);
     require(PQtransactionStatus(c) == PQTRANS_INTRANS, "Extended BEGIN did not open a block");
     r = checked(c,PQexec(c,"ROLLBACK"),PGRES_COMMAND_OK,"ROLLBACK"); PQclear(r);
@@ -278,7 +281,8 @@ int main(void)
         "\"PQexecParams\":true,\"PQprepare_PQexecPrepared\":true,\"async_nonblocking_api\":true,"
         "\"nonblocking_poll_loop\":true,\"async_commands\":%u,\"async_results\":%u,\"poll_calls\":%u,"
         "\"named_unnamed_reuse\":true,\"async_error_recovery\":true,\"explicit_E_rollback\":true,"
-        "\"native_question_mark_parameters\":true,\"postgres_dollar_parameters\":\"42601\"}\n",
+        "\"native_question_mark_parameters\":true,\"typed_numbered_parameter\":true,"
+        "\"untyped_parameter_sqlstate\":\"HY004\"}\n",
         PQlibVersion(),PG_VERSION_NUM,async_commands,async_results,poll_calls);
     return 0;
 }

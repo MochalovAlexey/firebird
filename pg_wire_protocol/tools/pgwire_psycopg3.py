@@ -184,15 +184,16 @@ class Profiles:
             state(connection,pq.TransactionStatus.IDLE)
         self.summary['checks'].append('default_autocommit_false_implicit_BEGIN')
         with self.connect('parameter_and_literal',autocommit=True) as connection:
-            expected_error(lambda:connection.execute('SELECT CAST(%s AS INTEGER) FROM RDB$DATABASE',(42,)),'42601')
+            require(connection.execute('SELECT CAST(%s AS INTEGER) FROM RDB$DATABASE',(42,)).fetchone() == (42,),
+                    'typed numbered parameter Bind failed')
             state(connection,pq.TransactionStatus.IDLE)
             query = sql.SQL('SELECT {} FROM RDB$DATABASE').format(sql.Literal(date(2000,1,1)))
             rendered = query.as_string(connection)
             require('::date' in rendered, 'installed driver did not generate the expected date literal cast')
             expected_error(lambda:connection.execute(query),'42601')
             require(connection.execute(ANSWER,prepare=False).fetchone() == (42,), 'no recovery after parser limits')
+        self.summary['checks'].append('ordinary_cursor_typed_numbered_parameter')
         self.summary['expected_limits'].extend([
-            {'profile':'ordinary_cursor_percent_s_generates_dollar_parameter','sqlstate':'42601'},
             {'profile':'sql_Literal_date_generates_postgresql_cast','sqlstate':'42601','generated_sql':rendered}])
 
     def rollback_cache_limit(self):

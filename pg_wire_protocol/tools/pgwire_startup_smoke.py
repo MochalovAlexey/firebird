@@ -459,7 +459,7 @@ QUIT;
                 "plaintext PG connection reported encryption")
         self.native_probe("native_with_pg_identities")
         first.query_integer()
-        for text in (b"BEGIN READ ONLY", b"not SQL", b"SELECT $1 FROM RDB$DATABASE"):
+        for text in (b"BEGIN READ ONLY", b"not SQL", b"SELECT $1foo FROM RDB$DATABASE"):
             first.query_error(text, "42601")
             first.query_integer()
         second.send(packet(b"Q", b"SELECT CAST(1 AS INTEGER) FROM RDB$DATABASE\0") +

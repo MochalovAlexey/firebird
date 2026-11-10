@@ -1,5 +1,187 @@
 # Проверки реализации
 
+## 10 ноября 2026: последовательные `$1` … `$n`, реализация для review
+
+Первый срез реализован: PG4 lexer/parser распознаёт уникальные последовательные
+inputs в корневых SELECT/INSERT/UPDATE/DELETE/MERGE и использует прежние
+ParameterNode/metadata/Bind. Production diff — только Parser.cpp, Parser.h,
+parse.y; MAKE_parameter, GEN_port, Extended, InputCodec, API/flags не изменены.
+Новые зависимости не устанавливались. Git add/commit/amend/reset/checkout
+не выполнялись; прежние изменения пользователя в документации сохранены.
+
+База: `97e44d0188020177b18c2a713880796890e13a17`, ветка `pg_wire_protocol`.
+SHA256 `git diff HEAD -- src`:
+`f161f3f1ea387c4194bf525d29dcebef294555a376d6a124c8f06a7f00d2bad2`.
+Сборка Debug/Linux/Super: `/tmp/firebird-pgwire-1c-build`.
+
+| Бинарник / исходник | SHA256 |
+|---|---|
+| Исходный libEngine14.so | `c0832e0b14dd5513a25ccff22c772c3dc9240d950d4a31ed0f3ca20f791f2304` |
+| Новый libEngine14.so | `5c12e32835d10e6dac40750f58ec6dd18de934210b8b01acd25cfcb594041785` |
+| libPgWire.so до и после | `56302018b7cec2c643d90e99570f56bbdee1c795b8bfcd730ae07a2830244ced` |
+| pgwire_1c_smoke.py | `5f5235dbb1f26a0ffd3e0baacb7dc3de1fd9e03af8e6b5d68b4b54545160ac3b` |
+| pgwire_parameters_checks.py | `e8100b552f07babf0d76aa547add052bf84911f4c809dc302f0730bf709b7469` |
+| pgwire_strings_api.cpp | `70cfd0a21dfb9ed39956004cb526ac4fec1ba0b809862c1d0f07e8c075440edb` |
+
+### Проверенные результаты
+
+Все обязательные проверки PASS. У каждого запущенного сервера в перечисленных
+наборах `exit_code=0`, `forced_kill=false`; runtime/security DB/fixtures находятся
+в отдельных `/tmp` каталогах. Поля `runs` в summary подтверждают shutdown,
+а parent harness проверяет native recovery и отсутствие оставшихся attachments.
+
+| Набор | Фактический результат | Work-dir (`/tmp/firebird-pgwire-…`) |
+|---|---|---|
+| Исходный отказ | Typed `SELECT CAST($1 AS INTEGER)` → 42601; native unused CTE с `?` описывает `[23,23]` | `params-baseline-01` |
+| `make -j2` | PASS, exit 0; parser 154 shift/reduce, 11 reduce/reduce | build log `numbered-parameters-build-01.log` |
+| `pgwire_tests` / isql | PASS: SQL classification 575, Session restoration 5, isql 13 | build logs `numbered-parameters-*-unit.log` |
+| `--parameters` | PASS: 73 libpq checks, 13 native observations, 29 raw Parse rejections с recovery; дополнительно Describe/portals/bad Bind/leading zeros/string modes | `params-08` |
+| `--settings` | PASS: 190 запросов, raw/native; исходный startup batch | `params-settings-01` |
+| `--begin` | PASS: 88 запросов, 43 native observations; raw/native/psql | `params-begin-01` |
+| `--strings` | PASS: 156 запросов, raw; OO API 546 checks с новым native/cache/offset покрытием | `params-strings-02` |
+| Extended | PASS: 16 групп, C libpq/raw; async 20 commands/20 results, 40 poll calls | `params-extended-02` |
+| Simple Query | PASS: 12 групп, C libpq/psycopg2/raw | `params-simple-01` |
+| Startup | PASS: 49 групп, включая заменённый syntax-negative `$1foo` | `params-startup-01` |
+| Psycopg 3 | **SKIP**, модуль не установлен; ожидание typed `%s` обновлено, новые зависимости не ставились | отсутствие подтверждено в `params-08/summary.json` |
+
+Реальные PQexecParams и named PQprepare/PQdescribePrepared/PQexecPrepared
+подтвердили native CAST/column/DML inference, SMALLINT/BIGINT/VARCHAR/BOOLEAN,
+UTF8, NULL и empty text, text/binary Bind, повторное исполнение. Raw Describe
+содержит input OIDs `[23,1043]`; два portals с разными values исполняются в обратном
+порядке без смешения. Ошибки Bind count/excess Parse OIDs дают 08P01,
+incompatible OID — 0A000, bad text/binary payload — 22P02/22P03, recovery работает.
+
+Синтетический INSERT с `$1` … `$92` описывает ровно 92 input slots; native isql
+проверил все 92 разные значения `10000 + 37*i` по каждой колонке. Поиск
+`FILENAME=$1` реально возвращает синтетическую строку. Это формы selected 19/06,
+не исходная схема/типы BinaryData/bytea, не replay записанного Bind и не открытие
+базы 1С. Неиспользуемый CTE сохраняет два inputs, результат использует второй Bind;
+used CTE/subquery/WHERE EXISTS, MERGE insert/update, UPDATE/DELETE RETURNING
+не сдвигают входы. BEGIN/DML/COMMIT и ROLLBACK проверены независимым native observer;
+ошибка в T даёт E, последующая команда — 25P02, rollback восстанавливает I и данные.
+
+Повтор/gap/reorder/смешение `?`/`$n` отказаны с 0A000. `$0`/`$000` — 42P02;
+`$32767` первым номером — 0A000 (диапазон допустим, последовательность нет),
+`$32768` и 200 девяток — 54000. `$01`, `$0002` и сто ведущих нулей работают.
+Identifier suffix `$1foo`/`$1_foo`/`$1$foo` — 42601. Bare `$`, `$-1`, `$ 1`,
+dollar quotes не добавлены. Comments/quoted identifiers/ordinary/Q strings при
+on/off не создают inputs; A$1 и RDB$DATABASE сохраняются.
+
+Guard отклоняет распознанные CALL с output/named arguments, EXECUTE PROCEDURE,
+EXECUTE BLOCK header/body, USING, VIEW/PROCEDURE DDL, UPDATE OR INSERT до DSQL.
+Неверная grammar остаётся 42601. Native `?` CALL сохраняет compacted input count=1
+при input/output аргументах, named CALL/PROCEDURE/BLOCK и UPDATE OR INSERT работают;
+USING с `?` принимается native OO, но остаётся вне wire execution с прежним 0A000.
+Stored PSQL/DDL с literal `$1` и локальная функция с синтетическими параметрами
+работают. Отброшенные после ошибки команды и отвергнутые DDL не оставляют объектов/строк.
+
+Native dialects 1/2/3 отвергают `$n` с engine 42000 и принимают `?`/A$1.
+На одном OO attachment/cache проверено PG→native→PG; исходные line/column
+сохранены для suffix/zero/overflow/sequence и токена после `$01` при ON/OFF flags.
+Wire mapping syntax → 42601 не менялся. В generated parser root/parameter actions
+защищены `if (!yytrial)`; настоящие `?` отмечаются в production, make_parameter()
+синтетических локальных функций не изменён. DSQL checkUnusedCTEs уже сохраняет
+unused input slots, поэтому GEN_port не требует изменений.
+
+`SELECT $1` без SQL-контекста даёт **HY004**, как `SELECT ?`, с omitted OID и
+supplied OID=23. Это прежний inference limit, без text fallback/нового prepare API.
+Simple typed `$1` даёт 0A000 и не выполняется с неявным NULL. Предел 32767 не
+обещает поддержку engine message такого размера. Повторы/перестановки не реализованы.
+
+### Команды
+
+Сборка и units (рабочий каталог `/tmp/firebird-pgwire-1c-build`):
+
+```sh
+make -j2 > numbered-parameters-build-01.log 2>&1
+make -C gen -j2 TARGET=Debug pgwire_tests > numbered-parameters-units-build-01.log 2>&1
+LD_LIBRARY_PATH=gen/Debug/firebird/lib gen/Debug/firebird/tests/pgwire_sql_test > numbered-parameters-sql-unit.log 2>&1
+LD_LIBRARY_PATH=gen/Debug/firebird/lib gen/Debug/firebird/tests/pgwire_session_test > numbered-parameters-session-unit.log 2>&1
+LD_LIBRARY_PATH=gen/Debug/firebird/lib gen/Debug/firebird/tests/isql_test --log_level=message > numbered-parameters-isql-unit.log 2>&1
+```
+
+TCP harness (рабочий каталог репозитория; переменные сокращают повторение
+фактических путей, каждый work-dir должен быть новым):
+
+```sh
+PARAM_RUNTIME=/tmp/firebird-pgwire-1c-build/gen/Debug/firebird
+PARAM_HEADERS=/tmp/firebird-pgwire-1c-deps/libpq-dev/usr/include/postgresql
+PARAM_LIBPQ=/lib/x86_64-linux-gnu/libpq.so.5
+PARAM_CAPTURE=/home/aleksey/dev/1c/captures/20261109T105635Z
+python3 -B pg_wire_protocol/tools/pgwire_1c_smoke.py --parameters --firebird-dir "$PARAM_RUNTIME" --work-dir /tmp/firebird-pgwire-params-08 --libpq "$PARAM_LIBPQ" --timeout 120
+python3 -B pg_wire_protocol/tools/pgwire_1c_smoke.py --settings --firebird-dir "$PARAM_RUNTIME" --work-dir /tmp/firebird-pgwire-params-settings-01 --capture-dir "$PARAM_CAPTURE" --libpq "$PARAM_LIBPQ" --timeout 120
+python3 -B pg_wire_protocol/tools/pgwire_1c_smoke.py --begin --firebird-dir "$PARAM_RUNTIME" --work-dir /tmp/firebird-pgwire-params-begin-01 --capture-dir "$PARAM_CAPTURE" --libpq "$PARAM_LIBPQ" --timeout 120
+python3 -B pg_wire_protocol/tools/pgwire_1c_smoke.py --strings --firebird-dir "$PARAM_RUNTIME" --work-dir /tmp/firebird-pgwire-params-strings-02 --libpq "$PARAM_LIBPQ" --timeout 120
+python3 -B pg_wire_protocol/tools/pgwire_extended_query_smoke.py --firebird-dir "$PARAM_RUNTIME" --work-dir /tmp/firebird-pgwire-params-extended-02 --libpq-include-dir "$PARAM_HEADERS" --libpq-library "$PARAM_LIBPQ"
+python3 -B pg_wire_protocol/tools/pgwire_simple_query_smoke.py --firebird-dir "$PARAM_RUNTIME" --work-dir /tmp/firebird-pgwire-params-simple-01 --libpq-include-dir "$PARAM_HEADERS" --libpq-library "$PARAM_LIBPQ" --driver-python /usr/bin/python3
+python3 -B pg_wire_protocol/tools/pgwire_startup_smoke.py --firebird-dir "$PARAM_RUNTIME" --work-dir /tmp/firebird-pgwire-params-startup-01
+```
+
+C libpq headers/runtime 14.24, Python 3.10.12, psycopg2 2.9.2, psql 18.6;
+версии C driver и compiler записаны существующими harness. OO helper собирается
+внутри `--strings`. Python source syntax и `git diff --check` также проверены.
+
+### Отрицательные результаты и границы
+
+Дополнительный исторический `pgwire_query_smoke.py` (**не** обязательный текущий
+Simple/Extended acceptance) завершился **FAIL** в C P3-наборе: он всё ещё ожидает
+0A000 для `SELECT CAST('x' AS VARCHAR(1)) FROM RDB$DATABASE`, тогда как VARCHAR
+давно поддержан. Рабочий каталог `params-query-01`, команда как для Simple выше,
+но `pgwire_query_smoke.py` и этот work-dir. Вне `$n` его старые ожидания не менялись.
+Отдельные наблюдения на исходном/new engine подтвердили одинаковый успех и `x`:
+`params-p3-baseline-02` / `params-p3-current-01`, серверы exit 0, без forced kill.
+Для исходного engine использован сохранённый libEngine14.so с указанным выше SHA
+и новая security DB; начальная попытка скопировать уже использованный runtime
+(`params-p3-baseline-01`) отказала на bootstrap до запуска TCP из-за существующего
+тестового пользователя. Это ошибка подготовки probe, не engine regression.
+
+Промежуточные `params-01` … `params-06` сохранены как **FAIL**: исправлялись только
+тестовые ожидания/fixtures (чтение пустой NAME native observer, квалификация MERGE
+RETURNING, фактический HY004, `:A` в USING и его прежний wire 0A000, tag UPDATE OR
+INSERT). Production после первой сборки не менялся. `params-07` PASS; `params-08`
+добавил binary UTF8/NULL и repeated INSERT и также PASS. `params-strings-01` PASS
+с 545 OO checks; `-02` добавил native USING и дал 546. `params-extended-01` PASS,
+но его C JSON ещё содержал устаревшую метку `$n=42601`; `-02` проверяет исправленный
+отчёт `typed_numbered_parameter=true`, `untyped_parameter_sqlstate=HY004`.
+Все запущенные серверы промежуточных прогонов завершились с exit 0 без forced kill.
+
+Известные crash repro (nested SAVEPOINT/RESET, ON CONNECT shutdown,
+READ CONSISTENCY + AUTO COMMIT) не запускались. Реальные эффекты трёх ignored SET,
+`::`, LIMIT, произвольная PG-нумерация, новые codecs/OID inference и полный запуск
+1С остаются отложенными. Результат передан на review, без commit.
+
+## 10 ноября 2026: review ignored SET и PG BEGIN
+
+Проверены `1f9af20db4` и `97e44d0188020177b18c2a713880796890e13a17`
+по заданиям IGNORED_STARTUP_SETTINGS_TASK/BEGIN_TASK. Замечаний не обнаружено.
+Три SET действительно не применяют и не сохраняют значения; старые проверки
+настроек/native dialects сохранены. PG BEGIN использует SetTransactionNode;
+promotion/повтор сохраняют handle, portals, savepoints и string history.
+Отказ E проверяется до общего control(); native SET TRANSACTION не изменён.
+Guard грамматики не создаёт ложного command_end_err2; generated parser проверен.
+Новых API/ABI, metadata, состояния или зависимостей нет.
+
+Независимо повторены на чистом HEAD:
+
+| Проверка | Результат |
+| --- | --- |
+| Classifier / SessionTest / isql | **575 checks / 5 scenarios / 13 cases PASS** |
+| --settings с capture | **190 libpq queries PASS**, полный пакет семи SET, raw/Extended/native1/2/3 |
+| --begin с capture | **88 libpq queries, 43 native observations PASS**, Simple/Extended promotion, повтор BEGIN, история, suspended portal, EOF rollback, native1/2/3 и psql AUTOCOMMIT off |
+
+Отчёты: `/tmp/firebird-pgwire-startup-settings-review-01/summary.json` и
+`/tmp/firebird-pgwire-begin-review-01/summary.json`. Оба частных сервера завершились
+exit 0 без forced kill. Рабочие базы и сервер пользователя не менялись.
+Повторная сборка не выполнялась: SHA Engine14/PgWire совпали с приёмкой BEGIN ниже;
+`git diff 1f9af20db4 HEAD -- src` также совпал с её source diff SHA
+`a1077950ff040246be9685b1c6ab0326a012a45a1d2c738da899cf5acb168bd8`.
+Предыдущие отчёты --strings/широких suites не заменяются этим прогоном;
+они повторно не запускались. Исходники реализации в review не изменены.
+
+Подготовлена [инструкция первого среза numbered parameters](1c/NUMBERED_PARAMETERS_TASK.md):
+последовательные уникальные номера и типы из SQL-контекста, без нового API.
+Этот следующий этап ещё не реализован.
+
 ## 10 ноября 2026: PG BEGIN через штатные транзакции
 
 Выполнено [BEGIN_TASK.md](1c/BEGIN_TASK.md) на базе

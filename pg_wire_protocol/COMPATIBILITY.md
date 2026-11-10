@@ -44,7 +44,26 @@ Native1/2/3/AUTOTERM, PSQL и DDL START WITH сохранены. Нет ново
 psycopg2 transactional mode и connection context. Контракт и границы — в
 [1c/README.md](1c/README.md); результаты — в [VALIDATION.md](VALIDATION.md).
 Это не полная PG transaction compatibility или запуск 1С; остальные options,
-default_transaction_*, `$n`, `::`, LIMIT и каталоги остаются за границей.
+default_transaction_*, произвольные `$n`, `::`, LIMIT и каталоги остаются за границей.
+
+## Последовательные `$1` … `$n` в PG4
+
+Разрешены только уникальные номера по порядку исходного SQL в корневых
+SELECT/INSERT/UPDATE/DELETE/MERGE, с обычными CTE/subqueries. Типы выводятся
+из колонки/DML/native CAST. Повтор, gap, reorder и смесь с `?` — 0A000;
+`$0` — 42P02, номер >32767 — 54000, identifier suffix — 42601; `$01` означает 1.
+CALL/EXECUTE PROCEDURE/BLOCK, USING, DDL/PSQL и UPDATE OR INSERT с настоящим `$n`
+отклоняются до DSQL transformations. Native `?`, dollar identifiers и текст `$n`
+в literals/comments не меняются; native dialects 1/2/3 `$n` не принимают.
+
+Extended использует прежние engine metadata и codecs без rewriting/нового API.
+Simple с типизированным `$1` — 0A000. OID hints не выводят тип: `SELECT $1`
+остаётся HY004 даже с OID=23; incompatible OID — 0A000, excess OIDs — 08P01.
+Значения Bind text/binary, NULL/empty/UTF8, named reuse, portals, CTE, MERGE,
+RETURNING и синтетическая форма 92 параметров проверены с native observer.
+Предел номера не гарантирует максимально большое engine message. Полный
+контракт — [1c/README](1c/README.md), evidence — [VALIDATION](VALIDATION.md).
+Оригинальная схема/типы 1С и открытие базы не проверены; Psycopg 3 отсутствует.
 
 ## Фиксированная клиентская диагностика PG4
 
@@ -135,7 +154,7 @@ Temporal text принимает строгий ISO `YYYY-MM-DD`, `HH:MM:SS[.fff
 | C libpq async без pipeline | PASS: 20 commands/20 results, 40 poll calls; PQsendPrepare/DescribePrepared/QueryParams/QueryPrepared с настоящим PQflush/PQconsumeInput/PQisBusy/poll loop; каждый поток PQgetResult полностью прочитан до NULL, ошибки Parse/Bind/Execute и дальнейшее recovery |
 | Psycopg 3, autocommit=True, SQL без параметров | PASS: Simple SELECT с P8 values и пустым результатом; отдельно forced `prepare=True`/`binary=True`, named reuse через COMMIT и protocol Close при eviction. AsyncCursor также проверен в Simple/Extended/binary и с native COMMIT |
 | Psycopg 3, native transaction controls | PASS: свежая connection с `autocommit=True, prepare_threshold=None`; SET TRANSACTION/COMMIT/ROLLBACK, savepoint, I/T/E, failed COMMIT и подтверждённые effects |
-| Psycopg 3, обычные `%s` параметры | Подтверждён 42601: драйвер формирует `$n`, который требует будущего engine grammar |
+| Psycopg 3, обычные `%s` параметры | Ограниченный последовательный `$n` с типами из SQL теперь поддержан; новый live Psycopg 3 пропущен (клиент отсутствует), полная параметризация не заявляется |
 | Psycopg 3, обычный transactional mode | Исторический P9 фиксировал 42601 на BEGIN; engine теперь поддерживает BEGIN без опций, сценарий обновлён, live-повтор Psycopg 3 в текущем окружении недоступен |
 | Psycopg 3, `sql.Literal(date)` | Подтверждён 42601: клиент генерирует PostgreSQL cast `::date` |
 
@@ -157,7 +176,7 @@ Simple Query поддерживает [последовательные скри
 
 EMPTY определяется ограниченным lexer только для нулевой строки, whitespace и полностью закрытых comments без SQL tokens. Даже такой текст передаётся в обычный engine prepare неизменённым. Только сочетание этого признака с engine syntax error 42601 после успешного cleanup преобразуется в EmptyQueryResponse; permission, cancellation, resource и другие ошибки не маскируются. Незаконченные строка/comment/statement и отдельный `;` остаются parser errors. Native parser diagnostics и `isql -autoterm` не меняются.
 
-$n и другие несовместимые формы остаются parser errors. SELECT без FROM, ограниченные SET и BEGIN реализованы движком; последовательный reader и разрешённая классификация не добавляют новые SQL-конструкции.
+Последовательные типизированные `$n` добавлены в PG4; остальные SQL-границы сохраняются. SELECT без FROM, ограниченные SET и BEGIN реализованы движком; последовательный reader и разрешённая классификация не добавляют новые SQL-конструкции.
 
 ## Возможности по этапам
 
@@ -176,7 +195,8 @@ $n и другие несовместимые формы остаются parser
 | Parse/Bind/Describe/Execute/Close/Flush/Sync | Явный отказ | Явный отказ | Да | Да |
 | Named/unnamed statements и portals | Нет | Нет | Да, с лимитами и проверенным lifetime | Да |
 | Bind с native `?` либо zero parameters | Нет | Нет | Да, по engine metadata | Да |
-| SQL `$n`, PostgreSQL casts `::` | Parser error | Parser error | Parser error | Parser error без отдельного engine расширения |
+| PostgreSQL casts `::` | Parser error | Parser error | Parser error | Parser error без отдельного engine расширения |
+| SQL `$n` | Исторически parser error | Исторически parser error | PG4: только последовательные уникальные inputs в SELECT/INSERT/UPDATE/DELETE/MERGE | Произвольная нумерация требует отдельного этапа |
 | I/T/E, native SET TRANSACTION/COMMIT/ROLLBACK | Implicit Query transaction | Да, plugin-local controls после engine prepare | Да, включая implicit cycle до Sync | Да |
 | Native SAVEPOINT/ROLLBACK TO/RELEASE и RETAIN | Не критерий smoke | Реальный effect и state policy | Тот же контракт | Тот же контракт |
 | SMALLINT/INTEGER/BIGINT, BOOLEAN, CHAR/VARCHAR, NUMERIC до INT64, NULL | Три integer-типа, scale/subtype 0, NULL; text results | Text results | Text/binary input/output | Да |
@@ -201,14 +221,14 @@ $n и другие несовместимые формы остаются parser
 | Прямой libpq, native SET TRANSACTION затем совместимый SQL/COMMIT/ROLLBACK | Explicit transaction tests M1 |
 | `PQexecParams` с `CAST(? AS INTEGER)` в совместимом Firebird statement | Native binding M2 |
 | `PQprepare`/`PQexecPrepared` с native `?` либо без parameters | Statement/portal lifecycle M2 |
-| `PQexecParams`/обычный драйвер с SQL `$1` | Parser error до будущего engine parameter syntax |
+| `PQexecParams`/`PQprepare`/`PQexecPrepared` с SQL `$n` | PASS ограниченного PG4 контракта: последовательные уникальные номера, типы из SQL, прежние metadata/codecs |
 | Драйвер/ORM, отправляющий PostgreSQL SET, catalog queries или функции | Успех только если конкретный SQL уже совместим; иначе настоящая ошибка |
 
 В Simple Query `%s` — placeholder клиентской библиотеки, сервер его не заменяет. Адаптер может добавить PostgreSQL cast, BEGIN или catalog query. Поэтому даже обычный SELECT приложения не доказывает совместимость всего поведения драйвера.
 
 В M2 количество, порядок и типы входных native slots берутся из engine metadata. OID hints из Parse и значения Bind проверяются и преобразуются без изменений SQL. Одинаковое значение для нескольких native `?` передаётся несколькими protocol parameters. Будущие повторные `$1` и перестановка индексов должны описываться engine binding metadata после расширения parser; plugin не ищет их в SQL.
 
-Наличие DATE codec не включает cast `::date`, а поддержка Bind не означает поддержку `$n`. Если Firebird не может вывести тип параметра, например в нетипизированном выражении, возвращается ошибка; SQL не оборачивается в CAST автоматически. Тесты отдельно различают syntax, inference и codec limitations.
+Наличие DATE codec не включает cast `::date`, а поддержка Bind не означает произвольную PG-нумерацию `$n`. Если Firebird не может вывести тип параметра, например в нетипизированном выражении, возвращается ошибка; SQL не оборачивается в CAST автоматически. Тесты отдельно различают syntax, inference и codec limitations.
 
 Ограниченный профиль Psycopg 3 проверен в разделе P9 выше; pgjdbc, Npgsql, pgx и другие клиенты не объявляются поддержанными по факту Extended Query. Их startup, автоматически генерируемый SQL и metadata discovery проверяются на выбранных версиях. Для минимального M2 acceptance достаточно прямого libpq с native SQL и обязательных raw-wire последовательностей.
 
@@ -245,7 +265,7 @@ EMPTY определяется ограниченным lexer только дл�
 
 Приложение и трасса — обязательная зависимость M3; серверный профиль M1 от выбора приложения не зависит. В `IMPLEMENTATION_NOTES.md` фиксируются версии приложения/драйвера/libpq, ОС, connection settings без секретов, wire operations, автоматически генерируемый SQL, типы, isolation/autocommit, reset/reuse и cancellation. Трасса определяет зависимости от будущих grammar/catalog изменений заранее.
 
-Критерий M3 — воспроизводимый сценарий конкретного приложения через PostgreSQL-драйвер по TCP с другого узла, с TLS и заявленным cancellation/session поведением. Допустимы endpoint/database/credentials и совместимый набор SQL. Изменения кода приложения или специальный режим драйвера записываются как ограничения. Если неизменённый клиент требует `$n` или другие неподдержанные формы, M3 такого профиля не принимается до engine расширения; нельзя подменить его тестом autocommit/native `?` и объявить прозрачную совместимость.
+Критерий M3 — воспроизводимый сценарий конкретного приложения через PostgreSQL-драйвер по TCP с другого узла, с TLS и заявленным cancellation/session поведением. Допустимы endpoint/database/credentials и совместимый набор SQL. Изменения кода приложения или специальный режим драйвера записываются как ограничения. Если неизменённый клиент требует произвольные `$n` или другие неподдержанные формы, M3 такого профиля не принимается до engine расширения; нельзя подменить его тестом autocommit/native `?` и объявить прозрачную совместимость.
 
 `server_version` в ParameterStatus — проверяемое обещание для ветвления клиента, не версия движка и не общее обещание SQL совместимости. Значение из исторического probe проверяется на каждом заявленном клиентском профиле.
 

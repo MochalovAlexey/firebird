@@ -37,8 +37,8 @@ context keys, счётчиков и реестров нет. Добавлена 
 
 PgWire выбирает dialect 4 при Simple Query, Extended Parse и повторной подготовке
 portal. Этот режим включает PG-дополнения грамматики; типы и арифметика сохраняют семантику dialect 3. Обычные одинарные строки учитывают новую настройку; native Q-строки и двойные кавычки сохраняются. Поддержаны `SELECT` без `FROM` и описанный ниже
-фиксированный профиль `lc_messages`/`client_encoding`, а также изменяемый `standard_conforming_strings`. Это ещё не полный PostgreSQL SQL dialect: `$n`, `::`,
-LIMIT пока отвергаются; формы PG BEGIN без опций поддержаны отдельно ниже.
+фиксированный профиль `lc_messages`/`client_encoding`, а также изменяемый `standard_conforming_strings`. Последовательные типизированные `$1` … `$n` поддержаны в ограниченном контракте ниже;
+`::` и LIMIT пока отвергаются; формы PG BEGIN без опций поддержаны отдельно ниже.
 
 Ключ штатного statement cache содержит исходный клиентский dialect и эффективный режим строк: PG и
 native планы не смешиваются. Обычные native dialects 1/2/3 по-прежнему требуют
@@ -51,6 +51,56 @@ FROM. Базу не нужно создавать или переводить в
 срез не входит. Установочная функция написана на native PSQL. Имена колонок и
 идентификаторы пока следуют Firebird: результат исходного запроса называется
 `PG_BACKEND_PID`, тогда как эталон возвращает `pg_backend_pid`.
+
+## Последовательные numbered parameters: первый срез
+
+Только клиентский PG dialect 4 распознаёт отдельный `$` + ASCII digits. В корневых
+SELECT/INSERT/UPDATE/DELETE/MERGE, включая CTE/subqueries, каждый номер должен
+встретиться ровно один раз: `$1`, затем `$2`, … . Тип выводится обычным DSQL из
+колонки, DML или `CAST($n AS native_type)`. Значения передаются отдельно через
+Extended Bind; Simple с типизированным `$1` возвращает 0A000, без исполнения с NULL.
+
+```sql
+SELECT CAST($1 AS INTEGER), CAST($2 AS VARCHAR(40));
+SELECT ID FROM PARAM_ROWS WHERE NAME = $1;
+INSERT INTO PARAM_ROWS(ID, NAME) VALUES($1, $2);
+UPDATE PARAM_ROWS SET NAME = $1 WHERE ID = $2;
+```
+
+| Форма | Результат |
+|---|---|
+| Повтор, пропуск, первый `$2`, перестановка, смесь `?`/`$n` | 0A000 до успешной подготовки |
+| `$0` / `$000` | 42P02 |
+| Номер >32767, включая переполнение при чтении | 54000 до narrowing/allocation |
+| `$01` / `$0002` | Номера 1 / 2 |
+| `$1foo`, `$1_foo`, `$1$foo` | 42601, не неявный alias |
+| Bare `$`, `$-1`, `$ 1`, dollar quotes | Прежние parser errors |
+| Синтаксически распознанные CALL/EXECUTE PROCEDURE/BLOCK, USING, DDL/stored PSQL, UPDATE OR INSERT с `$n` | 0A000 до DSQL transformations; неправильная грамматика остаётся syntax error |
+
+`$n` внутри ordinary/Q strings, comments и quoted identifiers — обычный текст;
+A$1 и RDB$DATABASE сохраняются. Native dialects 1/2/3 не принимают `$n`, прежний
+`?` и идентификаторы с `$` работают. Cache разделён по dialect и string mode;
+line/column относятся к исходному SQL. 32767 ограничивает номер и не обещает
+исполнения сообщения такого размера: ограничения engine/message/codecs остаются.
+
+Parse OID hints проверяются существующим InputCodec **после** engine inference:
+0/omitted используют выведенный тип, совместимые OID принимаются, несовместимые
+дают 0A000, избыточный список — 08P01. `SELECT $1` без контекста даёт HY004
+как `SELECT ?`, в том числе с supplied OID=23. Новых API/flags/type fallback нет.
+MAKE_parameter/GEN_port, Extended и codecs не изменены; номера проверяются в
+подтверждённых semantic actions (`!yytrial`), допустимый корень — по AST.
+
+Это ограничение строже PostgreSQL, где номер определяет позицию независимо от
+повторов и порядка: [positional parameters](https://www.postgresql.org/docs/18/sql-expressions.html#SQL-EXPRESSIONS-PARAMETERS),
+[PREPARE](https://www.postgresql.org/docs/18/sql-prepare.html),
+[Parse/Bind messages](https://www.postgresql.org/docs/18/protocol-message-formats.html).
+Произвольная нумерация, OID-driven inference, `::`, новые codecs и полная
+параметризация Psycopg 3 остаются отдельными этапами.
+
+`pgwire_1c_smoke.py --parameters` проверяет реальный libpq Bind, metadata,
+92 разных значения с native readback, поиск по FILENAME, CTE/MERGE/RETURNING,
+I/T/E/recovery и запреты. Это синтетическая форма selected 06/19, **не** исходная
+схема, BinaryData/bytea или открытие базы 1С. Результаты — в [VALIDATION](../VALIDATION.md).
 
 ## Установка на отдельной тестовой базе
 
@@ -83,7 +133,13 @@ USAGE schema и EXECUTE function выдаются PUBLIC. Он не создаё
 [Синтаксический приём трёх startup SET](IGNORED_STARTUP_SETTINGS_TASK.md)
 без эффекта реализован по явному решению пользователя; контракт описан ниже.
 [PG BEGIN](BEGIN_TASK.md) реализован отдельным этапом через существующий
-SetTransactionNode и общий executor; результат оставлен на review.
+SetTransactionNode и общий executor. Оба этапа в `1f9af20db4`/`97e44d0188`
+прошли архитектурный review и повторную целевую проверку; результаты — в VALIDATION.
+
+Срез [последовательных $1 … $n](NUMBERED_PARAMETERS_TASK.md) реализован через
+штатные Parser/ParameterNode и Bind; изменения и результаты оставлены на review.
+Разрешены уникальные номера по порядку в SELECT/INSERT/UPDATE/DELETE/MERGE
+с типами из SQL-контекста. Точный контракт приведён ниже.
 
 Срез [фиксированной диагностики](FIXED_DIAGNOSTICS_TASK.md) реализован через
 существующий SetPgSessionNode: только `escape_string_warning=off` и

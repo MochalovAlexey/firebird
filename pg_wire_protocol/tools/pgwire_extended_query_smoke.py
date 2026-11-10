@@ -140,7 +140,7 @@ class ExtendedHarness(QueryHarness):
     def __init__(self, source, work, timeout, args):
         super().__init__(source, work, timeout, args)
         self.summary['stage'] = 'P7 Extended Query, prepared statements and portals'
-        self.summary['sql_scope'] = 'Native ? parameters and optionless PG BEGIN; PostgreSQL $n remains unsupported'
+        self.summary['sql_scope'] = 'Native ? and consecutive typed $1..$n inputs; optionless PG BEGIN'
         self.summary['driver_scope'] = 'Real C libpq and raw TCP; Psycopg3 runs only with --psycopg3-python'
         if getattr(args, 'psycopg3_python', None):
             self.summary['stage'] = 'P9 client acceptance: libpq, raw protocol and actual Psycopg3 profile'
@@ -339,7 +339,7 @@ QUIT;
         c = ExtendedClient(self).login()
         guard = self.scalar_native('SELECT GEN_ID(P7_GUARD,0) AS OBSERVED FROM RDB$DATABASE')
         ignored = parse('ignored', 'SELECT GEN_ID(P7_GUARD,1) FROM RDB$DATABASE') + bind('ignored', 'ignored') + execute('ignored')
-        for sql in ('SELECT $1 FROM RDB$DATABASE', 'BEGIN READ ONLY', 'SELECT', ';',
+        for sql in ('SELECT $1foo FROM RDB$DATABASE', 'BEGIN READ ONLY', 'SELECT', ';',
                     'SELECT GEN_ID(P7_GUARD,1) FROM RDB$DATABASE; SELECT 42 FROM RDB$DATABASE'):
             c.exchange(parse('invalid', sql) + ignored + packet(b'H') + packet(b'S'), b'EZ', error='42601')
             c.run(ANSWER, rows=[['42']], tag='SELECT 1')

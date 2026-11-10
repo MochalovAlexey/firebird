@@ -742,6 +742,7 @@ using namespace Firebird;
 %token <metaNamePtr> ENABLE_MERGEJOIN
 %token <metaNamePtr> CPU_OPERATOR_COST
 %token <metaNamePtr> LOCK_TIMEOUT
+%token <uintVal> NUMBERED_PARAMETER
 
 // precedence declarations for expression evaluation
 
@@ -934,7 +935,10 @@ top
 %type <dsqlStatement> statement
 statement
 	: dml_statement
-		{ $$ = FB_NEW_POOL(*statementPool) DsqlDmlStatement(*statementPool, scratch->getAttachment(), $1); }
+		{
+			parsedDmlNode = $1;
+			$$ = FB_NEW_POOL(*statementPool) DsqlDmlStatement(*statementPool, scratch->getAttachment(), $1);
+		}
 	| ddl_statement
 		{ $$ = FB_NEW_POOL(*statementPool) DsqlDdlStatement(*statementPool, scratch->getAttachment(), $1); }
 	| tra_statement
@@ -8903,7 +8907,22 @@ boolean_literal
 
 %type <valueExprNode> parameter
 parameter
-	: '?'	{ $$ = make_parameter(); }
+	: '?'
+		{
+			if (numberedParameters)
+				yyabandon(YYPOSNARG(1), -104, Arg::Gds(isc_wish_list) <<
+					Arg::Gds(isc_random) << "Cannot mix anonymous and numbered parameters");
+			anonymousParameters = true;
+			$$ = make_parameter();
+		}
+	| NUMBERED_PARAMETER
+		{
+			if (anonymousParameters || $1 != lex.param_number)
+				yyabandon(YYPOSNARG(1), -104, Arg::Gds(isc_wish_list) <<
+					Arg::Gds(isc_random) << "Numbered parameters must occur once in order: $1, $2, ...");
+			numberedParameters = true;
+			$$ = make_parameter();
+		}
 	;
 
 %type <valueExprNode> current_user

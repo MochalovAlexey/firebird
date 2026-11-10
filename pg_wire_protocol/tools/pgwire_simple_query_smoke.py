@@ -298,7 +298,7 @@ FROM RDB$DATABASE""", "SELECT 1", [("1.20", "-12345.60", "-92233720368547758.08"
         for sql, state in [("INSERT INTO P4_ROWS(ID,V) VALUES(1,1)", "23505"),
                            ("INSERT INTO P4_ROWS(ID,V) VALUES(NULL,1)", "23000"),
                            ("UPDATE P4_ROWS SET V=-1 WHERE ID=1", "23514"),
-                           ("BEGIN READ ONLY", "42601"), ("SELECT $1 FROM RDB$DATABASE", "42601")]:
+                           ("BEGIN READ ONLY", "42601"), ("SELECT CAST($1 AS INTEGER) FROM RDB$DATABASE", "0A000")]:
             result = client.query_error(sql.encode(), state)
             require(result["command"] is None, "failed SQL produced CommandComplete")
             self.no_transactions()

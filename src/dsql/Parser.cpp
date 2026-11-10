@@ -129,6 +129,15 @@ DsqlStatement* Parser::parse()
 		return NULL;
 	}
 
+	// Check the original root node, before DSQL can rewrite or compact parameters.
+	if (numberedParameters && !(nodeIs<SelectNode>(parsedDmlNode) ||
+		nodeIs<StoreNode>(parsedDmlNode) || nodeIs<ModifyNode>(parsedDmlNode) ||
+		nodeIs<EraseNode>(parsedDmlNode) || nodeIs<MergeNode>(parsedDmlNode)))
+	{
+		ERRD_post(Arg::Gds(isc_wish_list) << Arg::Gds(isc_random) <<
+			"Numbered parameters require SELECT, INSERT, UPDATE, DELETE or MERGE");
+	}
+
 	transformString(lex.start, lex.end - lex.start, transformedString);
 
 	return parsedStatement;
@@ -571,6 +580,36 @@ int Parser::yylexAux()
 	// Depending on tok_class of token, parse token
 
 	lex.last_token = lex.ptr - 1;
+
+	if (pgDialect && c == '$' && lex.ptr < lex.end && *lex.ptr >= '0' && *lex.ptr <= '9')
+	{
+		unsigned number = 0;
+		do
+		{
+			const unsigned digit = *lex.ptr - '0';
+			if (number > (32767 - digit) / 10)
+			{
+				yyabandon(yyposn, -104, Arg::Gds(isc_random) <<
+					"Numbered parameter exceeds 32767" << Arg::SqlState("54000"));
+			}
+			number = number * 10 + digit;
+			++lex.ptr;
+		} while (lex.ptr < lex.end && *lex.ptr >= '0' && *lex.ptr <= '9');
+
+		if (lex.ptr < lex.end && (classes(*lex.ptr) & CHR_IDENT) && !(classes(*lex.ptr) & CHR_BRACE))
+			exceptionNumericLiterals(Firebird::string(lex.last_token, lex.ptr - lex.last_token + 1));
+		if (!number)
+		{
+			yyabandon(yyposn, -104, Arg::Gds(isc_random) <<
+				"Numbered parameters start at 1" << Arg::SqlState("42P02"));
+		}
+
+		yylval.uintVal = number;
+		lex.last_token_bk = lex.last_token;
+		lex.line_start_bk = lex.line_start;
+		lex.lines_bk = lex.lines;
+		return TOK_NUMBERED_PARAMETER;
+	}
 
 	if (tok_class & CHR_INTRODUCER)
 	{

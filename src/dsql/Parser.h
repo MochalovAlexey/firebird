@@ -403,6 +403,9 @@ private:
 	Firebird::GenericMap<Firebird::NonPooled<IntlString*, StrMark> > strMarks;
 	bool stmt_ambiguous;
 	DsqlStatement* parsedStatement = nullptr;
+	StmtNode* parsedDmlNode = nullptr;
+	bool anonymousParameters = false;
+	bool numberedParameters = false;
 
 	// Parser feedback for lexer
 	QualifiedName* introducerCharSetName = nullptr;

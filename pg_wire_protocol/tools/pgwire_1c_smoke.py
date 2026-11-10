@@ -6,6 +6,7 @@ not acceptance. Extended examples are prepared/described without execution or
 guessed Bind values. No captured SQL, parameter DETAIL or result data is saved.
 --settings checks the fixed profiles and syntax-only startup SET compatibility.
 --begin checks PG transaction start and promotion through the existing executor.
+--parameters checks consecutive numbered inputs through the existing codecs.
 The external subprocess watchdog configures no server timeout.
 """
 import argparse
@@ -54,6 +55,10 @@ class Libpq(Connection):
             ('PQsendQuery', C.c_int, [C.c_void_p, C.c_char_p]),
             ('PQgetResult', C.c_void_p, [C.c_void_p]),
             ('PQprepare', C.c_void_p, [C.c_void_p,C.c_char_p,C.c_char_p,C.c_int,C.c_void_p]),
+            ('PQexecParams', C.c_void_p, [C.c_void_p,C.c_char_p,C.c_int,C.c_void_p,
+                                         C.c_void_p,C.c_void_p,C.c_void_p,C.c_int]),
+            ('PQexecPrepared', C.c_void_p, [C.c_void_p,C.c_char_p,C.c_int,
+                                           C.c_void_p,C.c_void_p,C.c_void_p,C.c_int]),
             ('PQdescribePrepared', C.c_void_p, [C.c_void_p,C.c_char_p]),
             ('PQnparams', C.c_int, [C.c_void_p]),
             ('PQparamtype', C.c_uint, [C.c_void_p,C.c_int]),
@@ -99,6 +104,22 @@ class Libpq(Connection):
         result = self.query(RECOVERY, True)
         require(result[-1].get('rows') == [['42']] and not result[-1]['sqlstate'] and
                 self.pq.PQtransactionStatus(self.connection) == 0, 'session did not recover to SELECT 42 / I')
+
+    def params(self, sql, values=(), oids=(), formats=(), prepared=False):
+        """Real libpq Bind; keep binary bytes alive, including embedded NULs."""
+        values = [value.encode() if isinstance(value, str) else value for value in values]
+        pointers = (C.c_char_p * len(values))(*values)
+        lengths = (C.c_int * len(values))(*(len(value) if value is not None else 0 for value in values))
+        codes = (C.c_int * len(values))(*(formats or [0] * len(values)))
+        tail = (len(values), pointers, lengths, codes, 0)
+        if prepared:
+            handle = self.pq.PQexecPrepared(self.connection, sql.encode(), *tail)
+        else:
+            require(not oids or len(oids) == len(values), 'PQexecParams OID/value count differs')
+            types = (C.c_uint * len(oids))(*oids) if oids else None
+            handle = self.pq.PQexecParams(self.connection, sql.encode(), len(values), types,
+                                        pointers, lengths, codes, 0)
+        return self.result(handle, True)
 
 
 def backend_identity(first, config):
@@ -326,7 +347,10 @@ def client_child():
     try:
         connection = Libpq(config)
         output = {'libpq_version': connection.pq.PQlibVersion(), 'cases': []}
-        if config.get('begin'):
+        if config.get('parameters'):
+            from pgwire_parameters_checks import parameters_client
+            output['parameters'] = parameters_client(config, connection)
+        elif config.get('begin'):
             from pgwire_begin_checks import begin_client
             output['begin'] = begin_client(config, connection)
         elif config.get('strings'):
@@ -556,7 +580,7 @@ class OneCHarness(StartupHarness):
             ready.close()
         self.native_probe('native_before')
         config = {'port':pg,'password':self.password,'baseline':args.baseline,'settings':args.settings,'strings':args.strings,
-                  'begin':args.begin,
+                  'begin':args.begin, 'parameters':args.parameters,
                   'capture_dir':str(args.capture_dir),'libpq':args.libpq, 'native_port':native,
                   'runtime':str(self.runtime),'work':str(self.work),'timeout':self.timeout}
         client_env = {key:value for key,value in self.env.items() if not key.startswith('PG')}
@@ -567,7 +591,10 @@ class OneCHarness(StartupHarness):
         child = json.loads(result.stdout)
         self.summary['client'] = child
         require(result.returncode == 0, 'libpq child failed; see libpq.log')
-        if args.begin:
+        if args.parameters:
+            from pgwire_parameters_checks import parameters_protocols
+            self.summary['parameters_protocols'] = parameters_protocols(self)
+        elif args.begin:
             from pgwire_begin_checks import begin_protocols
             self.summary['begin_protocols'] = begin_protocols(self)
         elif args.strings:
@@ -611,6 +638,7 @@ def main():
     mode.add_argument('--baseline',action='store_true')
     mode.add_argument('--settings',action='store_true',help='test fixed profiles and syntax-only startup settings')
     mode.add_argument('--begin',action='store_true',help='test PG BEGIN and implicit transaction promotion')
+    mode.add_argument('--parameters',action='store_true',help='test consecutive numbered parameters')
     parser.add_argument('--libpq')
     parser.add_argument('--timeout',type=float,default=60)
     args = parser.parse_args()
@@ -629,8 +657,8 @@ def main():
     work.mkdir(mode=0o700)
     harness = OneCHarness(source,work.resolve(),args.timeout)
     harness.summary.pop('passed')
-    harness.summary.update(completed=False, mode='begin' if args.begin else 'strings' if args.strings else 'settings' if args.settings else 'baseline' if args.baseline else 'select_without_from',
-        stage='PG BEGIN / native transactions' if args.begin else 'standard_conforming_strings / revision 2' if args.strings else
+    harness.summary.update(completed=False, mode='parameters' if args.parameters else 'begin' if args.begin else 'strings' if args.strings else 'settings' if args.settings else 'baseline' if args.baseline else 'select_without_from',
+        stage='Consecutive numbered parameters' if args.parameters else 'PG BEGIN / native transactions' if args.begin else 'standard_conforming_strings / revision 2' if args.strings else
             'Fixed profiles and syntax-only startup settings' if args.settings else '1C observations / first engine slice',
         capture_dir=str(args.capture_dir), workers=6,
         module_sha256=hashlib.sha256((source/'plugins/libPgWire.so').read_bytes()).hexdigest(),
@@ -642,7 +670,10 @@ def main():
         ['git','diff','HEAD','--','src'],cwd=repo)).hexdigest()
     try:
         harness.prepare()
-        if args.begin:
+        if args.parameters:
+            from pgwire_parameters_checks import parameters_fixture
+            parameters_fixture(harness)
+        elif args.begin:
             harness.isql('begin_fixture', f"CONNECT '{harness.database}';\n"
                 'CREATE TABLE BEGIN_ROWS(ID INTEGER NOT NULL PRIMARY KEY, V INTEGER);\n'
                 'GRANT SELECT, INSERT, UPDATE, DELETE ON BEGIN_ROWS TO USER WIRE_HOST_TEST;\n'
@@ -658,7 +689,9 @@ def main():
             harness.summary['compat_script_sha256'] = hashlib.sha256(compat.read_bytes()).hexdigest()
         harness.run(args)
         harness.summary['completed'] = True
-        if args.begin:
+        if args.parameters:
+            harness.summary['parameters_passed'] = True
+        elif args.begin:
             harness.summary['begin_passed'] = True
         elif args.strings:
             harness.summary['strings_passed'] = True

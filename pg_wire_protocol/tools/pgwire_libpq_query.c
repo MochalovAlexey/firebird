@@ -126,7 +126,7 @@ int main(void)
         strcmp(PQcmdStatus(result), "ROLLBACK") == 0 && PQtransactionStatus(connection) == PQTRANS_IDLE,
         "ROLLBACK did not finish the explicit block");
     PQclear(result);
-    error(connection, "SELECT $1 FROM RDB$DATABASE", "42601");
+    error(connection, "SELECT CAST($1 AS INTEGER) FROM RDB$DATABASE", "0A000");
     error(connection, "SELECT CAST('x' AS VARCHAR(1)) FROM RDB$DATABASE", "0A000");
     PQfinish(connection);
     printf("{\"libpq_version\":%d,\"compile_header_version\":%d,\"protocol\":3,"
