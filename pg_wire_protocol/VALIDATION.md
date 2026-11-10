@@ -1,5 +1,108 @@
 # Проверки реализации
 
+## 10 ноября 2026: временный синтаксический приём трёх startup SET
+
+Выполнено [IGNORED_STARTUP_SETTINGS_TASK.md](1c/IGNORED_STARTUP_SETTINGS_TASK.md)
+на базе `4abc5af9194068cffe04bffd3bd358b142e8964a`. Исходные изменения документации
+и задания пользователя сохранены; git add/commit/amend не выполнялись.
+
+В PG4 принимаются enable_mergejoin/cpu_operator_cost/lock_timeout: `=`/`TO`,
+строка, identifier/on/off или штатный numeric literal со знаком. Значения
+игнорируются без PG-проверки типа, диапазона или единиц. Это явное исключение
+пользователя только для трёх имён. Lock timeout в 20 секунд не устанавливается;
+optimizer, costs, timeouts, TPB, данные и настройки attachment не меняются.
+Успех полного startup batch не означает реализацию всех его эффектов или запуск 1С.
+
+Production diff: шесть файлов, 34 additions / 1 deletion. ParserTokens/Parser.cpp
+добавляют три non-reserved имени и прежний PG-only gate; parse.y выделяет группу
+с существующими pg_setting_value/u_numeric_constant и отдельными знаками,
+не расширяя RHS прежних SET. Один Type SetPgSessionNode получает пустое value;
+Execute явно ничего не делает. SqlInfo добавляет только Session/SET prefixes;
+исходный SQL передаётся engine без rewriting. Нет новых состояния, истории,
+cache invalidation, API/ABI, ParameterStatus, конфигурации или зависимостей.
+
+### Команды и результаты
+
+Использована прежняя Linux x86-64 developer/Debug сборка в
+`/tmp/firebird-pgwire-1c-build`, с builtin tommath/tomcrypt.
+
+```sh
+cd /tmp/firebird-pgwire-1c-build
+make -j2 > ignored-startup-build-01.log 2>&1
+make -C gen -j2 TARGET=Debug pgwire_tests > ignored-startup-unit-build-01.log 2>&1
+LD_LIBRARY_PATH=gen/Debug/firebird/lib gen/Debug/firebird/tests/pgwire_sql_test
+LD_LIBRARY_PATH=gen/Debug/firebird/lib gen/Debug/firebird/tests/pgwire_session_test
+LD_LIBRARY_PATH=gen/Debug/firebird/lib gen/Debug/firebird/tests/isql_test --log_level=message
+
+cd /home/aleksey/dev/my_firebird/firebird
+python3 -B pg_wire_protocol/tools/pgwire_1c_smoke.py --settings \
+  --firebird-dir /tmp/firebird-pgwire-1c-build/gen/Debug/firebird \
+  --work-dir /tmp/firebird-pgwire-ignored-startup-01 \
+  --capture-dir /home/aleksey/dev/1c/captures/20261109T105635Z \
+  --libpq /lib/x86_64-linux-gnu/libpq.so.5
+git diff --check
+```
+
+| Проверка | Фактический результат |
+|---|---|
+| Full make / pgwire_tests build | PASS; parser **154 shift/reduce, 11 reduce/reduce**, без новых конфликтов |
+| Classifier / SessionTest / isql | **554 checks / 5 scenarios / 13 cases PASS**; `ignored-startup-units.json` в build-dir |
+| --settings | **PASS**, 190 libpq queries через helper, обычный WIRE_HOST_TEST, libpq 14.24 |
+| Capture | Три исходных SET отдельно успешны; полный неизменённый 03-session-batch.sql — **семь SET tags, I, standard_conforming_strings=off** |
+| Scalar grammar | `=`/TO, comments/case, строки, identifiers/on/off, дробные/целые/exponent/NUM128 и знаки успешны; альтернативные значения игнорируются. Пустой RHS, выражения, DEFAULT/LOCAL/SESSION/SHOW и неизвестное имя — 42601 |
+| Прежние настройки | Числовые client_encoding/standard_conforming_strings — 42601; неподдержанные fixed values — 22023. Сохранены English/UTF8, stop/rollback writes и восстановление строкового режима при ошибке |
+| Native transaction | CURRENT_TRANSACTION совпадает до/после каждого нового SET в четырёх циклах: COMMIT/ROLLBACK × on/off. В E каждый SET даёт 25P02; ROLLBACK восстанавливает исполнение |
+| Extended / raw frames | Named Parse/Bind/Execute и повторное исполнение: 12CZ / 2CZ, SET, Z/I, без S/N. Simple отдельные SET — CZ, три вместе — CCCZ. При off SELECT '\n' после новых SET по-прежнему возвращает newline |
+| Native1/2/3 / PSQL | Все семь проверяемых fixed/ignored SET отвергнуты с 42000; AUTOTERM продолжает SQL, имена допустимы без кавычек, SET BIND сохранён. PG SET в PSQL — 0A000 |
+| Статические проверки | Python AST и git diff --check PASS; DT_NEEDED Engine14/PgWire совпадает с fixed-diagnostics-02 |
+
+Harness использовал отдельные runtime/security DB/test databases в /tmp;
+рабочий сервер и базы пользователя не изменялись. Сервер завершился **exit 0**
+за 0.164 s, **forced_kill=false**. Полный отчёт:
+`/tmp/firebird-pgwire-ignored-startup-01/summary.json`.
+Новый клиент, framework или режим тестирования не добавлены.
+
+SHA256 для воспроизведения:
+
+- `git diff HEAD -- src`: `164ed916858b25aa9a3039cbfaae7cff0765b6beb6da4f7c2370e6e45d6ebc45`.
+- `libEngine14.so`: `0645af3f26fb38601086b443685405a079fee772f03d56bfd054ec4439a22dfa`.
+- `libPgWire.so`: `3144c44569a8bc11b6a67e7c8d9bc5c0d079da4ea39d5d368298718af3c061e0`.
+- `pgwire_1c_smoke.py`: `01b0f58171b802e08b18771fbe7d734733792a4abc980816423baef3be38cfaf`.
+- Исходный пакет 03: `b6477b5952ffc849b022725fe9f60ee45ff15fb3fb36e6d325d40a88e260d576`.
+
+Модули и сравнение зависимостей: `ignored-startup-modules.json` в build-dir.
+Исторические FAIL/PASS, включая прежний ожидаемый 42601 полного пакета,
+сохранены ниже. Широкий --strings, lock waits/optimizer benchmarks, известные
+crash repro, Windows/CMake и 1С/Гилёв не запускались. Реальные эффекты трёх
+настроек отложены. BEGIN и другие GUC не реализовывались; этап завершён на review.
+
+## 10 ноября 2026: архитектурный review фиксированной диагностики
+
+Проверена чистая ревизия `4abc5af9194068cffe04bffd3bd358b142e8964a` по
+[FIXED_DIAGNOSTICS_TASK.md](1c/FIXED_DIAGNOSTICS_TASK.md). Замечаний не обнаружено:
+production diff ограничен PG-only grammar/token gate, существующим
+SetPgSessionNode и классификацией SET. Значения проверяются полностью при Execute;
+состояние, история, API/ABI, metadata и зависимости не добавлены. Документация
+явно ограничивает контракт off/error и не заявляет успешный полный startup.
+
+Независимо повторены classifier (**527 checks**), SessionTest (**5 scenarios**),
+isql (**13 cases**) и `pgwire_1c_smoke.py --settings` — **PASS**.
+В runtime проверены **72 libpq queries**, исходные фрагменты capture,
+named Extended statements, raw diagnostic frames без NoticeResponse,
+I/T/E и восстановление строкового режима, native dialects 1/2/3/AUTOTERM,
+идентификаторы и native observer. Сервер завершился exit 0, без forced kill.
+Отчёт: `/tmp/firebird-pgwire-fixed-diagnostics-review-01/summary.json`.
+Использованы отдельные runtime/security DB/test databases; рабочий сервер не менялся.
+
+Повторная сборка не выполнялась. SHA256 текущих Engine14/PgWire совпали с
+указанными ниже бинарниками приёмки; `git diff a31c890e1b HEAD -- src` имеет
+тот же SHA256 `53b93221dd98fd192fcd25fd69db3a6c826970305a30629d855d3fafd8855b66`.
+Предыдущий успешный --strings отчёт проверен, но этот suite повторно не запускался.
+Широкие suites и native crash repro не запускались; исходники реализации не менялись.
+
+Подготовлено отдельное [задание PG BEGIN](1c/BEGIN_TASK.md). Оно ещё не реализовано;
+оставшиеся optimizer SET и lock_timeout автоматически в его scope не включаются.
+
 ## 10 ноября 2026: фиксированный профиль клиентской диагностики
 
 Выполнено [FIXED_DIAGNOSTICS_TASK.md](1c/FIXED_DIAGNOSTICS_TASK.md) на базе

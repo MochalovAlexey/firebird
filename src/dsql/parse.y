@@ -739,6 +739,9 @@ using namespace Firebird;
 %token <metaNamePtr> STANDARD_CONFORMING_STRINGS
 %token <metaNamePtr> ESCAPE_STRING_WARNING
 %token <metaNamePtr> CLIENT_MIN_MESSAGES
+%token <metaNamePtr> ENABLE_MERGEJOIN
+%token <metaNamePtr> CPU_OPERATOR_COST
+%token <metaNamePtr> LOCK_TIMEOUT
 
 // precedence declarations for expression evaluation
 
@@ -6410,6 +6413,21 @@ set_pg_session
 		{ $$ = newNode<SetPgSessionNode>(SetPgSessionNode::TYPE_ESCAPE_STRING_WARNING, *$4); }
 	| SET CLIENT_MIN_MESSAGES pg_setting_assignment pg_setting_value
 		{ $$ = newNode<SetPgSessionNode>(SetPgSessionNode::TYPE_CLIENT_MIN_MESSAGES, *$4); }
+	| SET pg_ignored_setting pg_setting_assignment pg_ignored_setting_value
+		{ $$ = newNode<SetPgSessionNode>(SetPgSessionNode::TYPE_IGNORED, string()); }
+	;
+
+pg_ignored_setting
+	: ENABLE_MERGEJOIN
+	| CPU_OPERATOR_COST
+	| LOCK_TIMEOUT
+	;
+
+pg_ignored_setting_value
+	: pg_setting_value
+	| u_numeric_constant
+	| '+' u_numeric_constant
+	| '-' u_numeric_constant
 	;
 
 pg_setting_assignment
@@ -10672,6 +10690,9 @@ non_reserved_word
 	| STANDARD_CONFORMING_STRINGS
 	| ESCAPE_STRING_WARNING
 	| CLIENT_MIN_MESSAGES
+	| ENABLE_MERGEJOIN
+	| CPU_OPERATOR_COST
+	| LOCK_TIMEOUT
 	;
 
 %%

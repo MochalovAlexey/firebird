@@ -80,13 +80,19 @@ USAGE schema и EXECUTE function выдаются PUBLIC. Он не создаё
 
 ## Следующие небольшие этапы
 
+[Синтаксический приём трёх startup SET](IGNORED_STARTUP_SETTINGS_TASK.md)
+без эффекта реализован по явному решению пользователя; контракт описан ниже.
+Следующий отдельный этап — [PG BEGIN](BEGIN_TASK.md) через существующий
+SetTransactionNode и общий executor. BEGIN ещё не реализован.
+
 Срез [фиксированной диагностики](FIXED_DIAGNOSTICS_TASK.md) реализован через
 существующий SetPgSessionNode: только `escape_string_warning=off` и
-`client_min_messages=error`. Результат оставлен пользователю на review.
+`client_min_messages=error`. Ревизия `4abc5af919` прошла архитектурный review
+и повторную целевую проверку; результаты — в VALIDATION.
 
 | Группа исходного задания | Текущее состояние / что требуется |
 |---|---|
-| 1. Начало сессии | SELECT без FROM, ограниченная identity-функция, последовательные скрипты и фиксированный English/UTF8 профиль, настоящий standard_conforming_strings и фиксированная клиентская диагностика; остаются enable_mergejoin, cpu_operator_cost и lock_timeout |
+| 1. Начало сессии | SELECT без FROM, ограниченная identity-функция, последовательные скрипты и все семь startup SET принимаются; реальные эффекты enable_mergejoin, cpu_operator_cost и lock_timeout отложены |
 | 2. SQL и параметры | Simple Query выполняет скрипты совместимого SQL; `$n`, `::`, BEGIN TRANSACTION и LIMIT ещё не реализованы; использовать ParameterNode, CastNode, SetTransactionNode и RowsClause |
 | 3. Открытие базы | pg_class/pg_database/visibility и служебные таблицы 1С ещё не реализованы; нужны настоящие metadata и данные |
 | 4. Типы и функции | bytea, mchar/mvarchar и BINROWVER ещё не реализованы; сначала измерить форматы/семантику, затем использовать BLOB API, intl/collations и SQL/PSQL |
@@ -129,8 +135,8 @@ Execute подтверждает единственный уже действу�
 Новые SET внутри PSQL отвергаются с 0A000: штатный wrapper переподготавливает
 текст в native dialect, а наследование PG dialect во вложенном SQL — отдельная работа.
 
-Исходный пакет семи SET целиком ещё не выполняется: первый `enable_mergejoin`
-остаётся parser error. Реализованный отдельный срез `standard_conforming_strings` описан ниже; это не успех полного пакета.
+Исходный пакет семи SET теперь принимается с исключением для трёх игнорируемых
+настроек, описанным ниже. Это не реализация всех запрошенных эффектов.
 Результаты и воспроизводимые команды — в [VALIDATION.md](../VALIDATION.md).
 
 ## Фиксированный профиль клиентской диагностики
@@ -171,12 +177,48 @@ transaction в E и восстанавливает прежний standard_confo
 сохраняют имена как unquoted identifiers, отвергают эти SET и продолжают
 AUTOTERM после ошибки; PG SET внутри PSQL по-прежнему запрещён.
 
-Эти две команды проверены как отдельные фрагменты `03-session-batch.sql`,
-не как успешный startup batch. `enable_mergejoin`, `cpu_operator_cost` и
-`lock_timeout` остаются неподдержанными: весь исходный пакет останавливается
-на первом enable_mergejoin. Другие значения, SET LOCAL/SESSION/DEFAULT, SHOW,
+Эти две команды проверены отдельно и в полном `03-session-batch.sql` с описанным
+ниже исключением для трёх настроек. Другие значения fixed SET, SET LOCAL/SESSION/DEFAULT, SHOW,
 startup GUC, BEGIN/$n и следующие этапы не добавлены. Whole-query preparse
 по-прежнему отложен; ранний явный COMMIT сохраняется при поздней ошибке.
+
+## Временный приём трёх startup SET без эффекта
+
+По явному решению пользователя от 10 ноября 2026 года PG dialect 4 принимает:
+
+```sql
+SET enable_mergejoin = off;
+SET cpu_operator_cost = 0.001;
+SET lock_timeout = 20000;
+```
+
+Это узкое исключение только для трёх имён: их значения **игнорируются**, не
+сохраняются и не применяются. Допустимы `=`/`TO` и один scalar: строка,
+идентификатор/on/off или штатный числовой литерал, включая знак. Числа разбирает
+существующий `u_numeric_constant`; его native ограничения сохраняются. PG-типы,
+диапазоны и единицы настройки не проверяются: например, `lock_timeout TO '5s'`
+или `cpu_operator_cost = -0.001` тоже успешны и ничего не меняют. Пустой RHS,
+выражения и неизвестные имена настроек дают ошибку. Прежний `pg_setting_value`
+не расширен: числовой RHS у client_encoding остаётся 42601, неверные fixed values — 22023.
+
+Единственный новый Type существующего SetPgSessionNode получает пустое value
+и ничего не делает при Execute. Плагин классифицирует SET и передаёт исходный
+SQL движку. В I/T возвращается SET, в E — прежний 25P02; native transaction
+сохраняется. Нет новых полей attachment, истории, cache invalidation, API/ABI,
+ParameterStatus, SHOW или предупреждений. Native1/2/3 отвергают SET, имена
+остаются non-reserved identifiers; прежний PSQL guard даёт 0A000.
+
+Optimizer, оценки стоимости, timeouts, TPB, данные и настройки attachment
+не меняются. **lock_timeout=20000 не устанавливает таймаут в 20 секунд**:
+действуют обычные правила Firebird. В отличие от fixed off/error, эти SET
+не подтверждают запрошенное поведение. Реальные эффекты требуют отдельной работы;
+SET OPTIMIZE и statement timeout не используются как приблизительные замены.
+
+Полный неизменённый `03-session-batch.sql` даёт семь SET tags, итог I и
+standard_conforming_strings=off. Это подтверждает приём startup batch,
+но не семантику всех настроек, открытие базы 1С или тест Гилёва. Результаты
+целевого `--settings` и сборки — в [VALIDATION.md](../VALIDATION.md).
+SET LOCAL/SESSION/DEFAULT и другие GUC этим исключением не разрешены.
 
 ## standard_conforming_strings: редакция 2, 10 ноября 2026
 
@@ -332,8 +374,8 @@ runtime-зависимости не добавлены. `SET BAIL`/`SET TERM`/`I
 Прочие native session setters меняют attachment напрямую: поздний rollback не отменяет
 их изменения. Сохраняется native семантика также для sequences, autonomous
 transactions и внешних эффектов; общей отмены таких эффектов не обещаем.
-Это ещё не поддержка семи PostgreSQL SET из трассы. Их реальные эффекты и
-transaction/savepoint undo добавляются отдельными этапами. Для уже реализованного
+Сам по себе скриптовый executor не реализует эффекты PostgreSQL SET из трассы.
+Контракты принятых настроек и три временных исключения описаны выше. Для уже реализованного
 `standard_conforming_strings` lexer, engine и statement cache используют
 согласованный режим; snapshot Query и история отката описаны выше.
 
@@ -354,7 +396,12 @@ psql 'postgres://USER@127.0.0.1:15432/pgwire_test' \
 `standard_conforming_strings=off` действительно декодирует backslash escapes.
 `lock_timeout` нельзя заменить statement timeout: область действия различна.
 `SET OPTIMIZE` не эквивалентен `enable_mergejoin` или `cpu_operator_cost`.
-Для этих параметров контракт ещё не реализован; фиктивный SET success запрещён.
+По решению пользователя для этих трёх имён реализовано узкое исключение:
+успешный SET без изменения поведения. Реализация и границы — в
+[IGNORED_STARTUP_SETTINGS_TASK.md](IGNORED_STARTUP_SETTINGS_TASK.md).
+Значения не сохраняются; join/cost и ожидание блокировок остаются штатными Firebird.
+В частности, `lock_timeout=20000` не устанавливает ограничение в 20 секунд.
+Реальная семантика отложена; успешный разбор пакета не доказывает её поддержку.
 Успешный SHOW на эталоне не доказывает эффект настройки планировщика/блокировок.
 
 Открытие существующей базы 1С и тест Гилёва на Firebird ещё не выполнены.

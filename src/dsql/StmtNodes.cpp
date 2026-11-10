@@ -11812,6 +11812,10 @@ void SetPgSessionNode::execute(thread_db* tdbb, DsqlRequest* /*request*/, jrd_tr
 				Arg::SqlState("22023"));
 		}
 		break;
+
+	case TYPE_IGNORED:
+		// Temporary startup compatibility: accept syntax without applying or storing the value.
+		break;
 	}
 }
 

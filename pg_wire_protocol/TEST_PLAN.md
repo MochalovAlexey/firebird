@@ -43,7 +43,7 @@ assertion в exe.cpp:1351, подтверждённый review также на �
 не подтверждает этот сценарий.
 
 
-## Подэтап 1С: фиксированные English/UTF8 и клиентская диагностика
+## Подэтап 1С: фиксированные профили и временные startup SET
 
 `pgwire_1c_smoke.py --settings` проверяет английский/UTF8 профиль, исходный запрос
 02 от обычного пользователя без административной роли, неподдержанные
@@ -52,7 +52,21 @@ Native dialects 1/2/3 с AUTOTERM должны отвергать новые SET
 SQL; оба имени остаются допустимыми идентификаторами. Отдельный OO probe проверяет
 не-UTF8 attachment, same-attachment dialect cache и запрет вложенного PSQL.
 Целевой PASS и точные ограничения зафиксированы в [VALIDATION.md](VALIDATION.md).
-Исходный пакет 03 остаётся отрицательной проверкой: после фиксированной диагностики остаются enable_mergejoin, cpu_operator_cost и lock_timeout.
+Исходный неизменённый пакет 03 теперь проверяется положительно: семь SET tags,
+I и standard_conforming_strings=off. [Исключение пользователя](1c/IGNORED_STARTUP_SETTINGS_TASK.md)
+принимает enable_mergejoin/cpu_operator_cost/lock_timeout без эффекта.
+Каждая исходная команда проверяется отдельно; `=`/TO, comments/case,
+строки/идентификаторы/on/off, штатные числа со знаком и альтернативные значения
+успешны. Пустой RHS, выражение, DEFAULT/LOCAL/SESSION/SHOW и неизвестное имя — 42601.
+Прежний client_encoding с числовым RHS также остаётся 42601, fixed values — 22023.
+Native1/2/3/AUTOTERM, non-reserved identifiers и PSQL guard включают все три имени.
+Named Extended Parse/Bind/Execute и reuse проверяются с чтением всех frames:
+нет новых ParameterStatus/NoticeResponse, строковый режим не меняется.
+CURRENT_TRANSACTION до/после каждого SET совпадает в SET TRANSACTION → SET →
+COMMIT/ROLLBACK, при on/off; E даёт 25P02, после ROLLBACK команды снова успешны.
+Это приёмка синтаксиса, не optimizer/lock effects или запуска 1С.
+Целевые проверки этапа: полный make (parser baseline 154/11), classifier,
+SessionTest, isql и --settings; широкий --strings, lock waits и benchmarks не требуются.
 Проверка прав на `lc_messages` отложена; 42501 для этой настройки сейчас не ожидается.
 
 Тот же --settings проверяет escape_string_warning=off/client_min_messages=error:
@@ -64,7 +78,8 @@ Raw-проверка читает каждый frame через message(), бе�
 newline и неизвестный escape успешны без N, malformed Unicode даёт E/22025,
 division by zero — E/22012, затем Z/I. Проверяются native1/2/3 AUTOTERM,
 unquoted identifiers, прежний SET BIND и запрет PG SET внутри PSQL.
-Регрессии этого среза: --strings, classifier, SessionTest и полный isql suite.
+В исходной приёмке fixed diagnostics также прошли --strings, classifier,
+SessionTest и полный isql suite; исторические результаты сохранены в VALIDATION.
 
 
 ## Подэтап 1С: последовательные скрипты — проверен 10 ноября 2026 года

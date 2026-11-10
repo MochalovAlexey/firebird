@@ -1368,7 +1368,10 @@ int Parser::yylexAux()
 			(pgDialect || (keyVer->keyword != TOK_LC_MESSAGES &&
 				keyVer->keyword != TOK_CLIENT_ENCODING &&
 				keyVer->keyword != TOK_CLIENT_MIN_MESSAGES &&
+				keyVer->keyword != TOK_CPU_OPERATOR_COST &&
+				keyVer->keyword != TOK_ENABLE_MERGEJOIN &&
 				keyVer->keyword != TOK_ESCAPE_STRING_WARNING &&
+				keyVer->keyword != TOK_LOCK_TIMEOUT &&
 				keyVer->keyword != TOK_STANDARD_CONFORMING_STRINGS)))
 		{
 			yylval.metaNamePtr = keyVer->str;

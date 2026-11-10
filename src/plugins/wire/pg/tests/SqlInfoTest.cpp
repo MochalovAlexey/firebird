@@ -281,7 +281,10 @@ void testSessionControl()
 		"set/*x*/CLIENT_ENCODING--x\nTO UTF8",
 		"SET escape_string_warning = off", "SET client_min_messages=error",
 		"set/*x*/ESCAPE_STRING_WARNING--x\nTO 'OfF'", "SET client_min_messages TO 'ERROR'",
-		"SET escape_string_warning = on", "SET client_min_messages = notice"
+		"SET escape_string_warning = on", "SET client_min_messages = notice",
+		"SET enable_mergejoin = off", "SET cpu_operator_cost = 0.001", "SET lock_timeout = 20000",
+		"set/*x*/ENABLE_MERGEJOIN--x\nTO on", "SET cpu_operator_cost TO -0.001", "SET lock_timeout TO '+5s'",
+		"SET enable_mergejoin =", "SET cpu_operator_cost = 1+2", "SET lock_timeout = DEFAULT"
 	};
 	for (const auto sql : sessions)
 		expect(sql, "SET", CountKind::None, ControlKind::Session);
@@ -297,7 +300,8 @@ void testSessionControl()
 		"ALTER SESSION", "ALTER SESSION RESETS", "ALTER SESSION \"RESET\"", "ALTER SESSION /* open",
 		"SET NAMES UTF8", "SET search_path = PUBLIC", "SET application_name TO 'app'",
 		"SET \"LC_MESSAGES\" TO 'en_US.UTF-8'", "SET \"CLIENT_ENCODING\" TO UTF8",
-		"SET \"ESCAPE_STRING_WARNING\" = off", "SET \"CLIENT_MIN_MESSAGES\" TO error"
+		"SET \"ESCAPE_STRING_WARNING\" = off", "SET \"CLIENT_MIN_MESSAGES\" TO error",
+		"SET \"ENABLE_MERGEJOIN\" = off", "SET \"CPU_OPERATOR_COST\" = 0.001", "SET \"LOCK_TIMEOUT\" = 20000"
 	};
 	for (const auto sql : invalid)
 		unknown(sql);
@@ -319,6 +323,7 @@ void testBoundaries()
 		"SET DECFLOAT TRAPS TO", "SET BIND OF", "SET SEARCH_PATH TO", "SET DEBUG OPTION", "SET OPTIMIZE",
 		"SET LC_MESSAGES", "SET CLIENT_ENCODING",
 		"SET ESCAPE_STRING_WARNING", "SET CLIENT_MIN_MESSAGES",
+		"SET ENABLE_MERGEJOIN", "SET CPU_OPERATOR_COST", "SET LOCK_TIMEOUT",
 		"ALTER SESSION RESET", "COMMIT RETAIN", "ROLLBACK WORK", "ROLLBACK TO"};
 	for (const auto prefix : prefixes)
 	{
