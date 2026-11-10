@@ -8905,6 +8905,13 @@ error_context
 %type <intlStringPtr> sql_string
 sql_string
 	: STRING					// string in current charset
+		{
+			$$ = $1;
+			// A committed reduction supplies the context; trial parsing must not
+			// mark a STRING from an alternative that may later be rejected.
+			if (auto mark = strMarks.get($1))	// hex strings have no mark
+				mark->introducerAllowed = true;
+		}
 	| INTRODUCER schema_opt_qualified_name
 			[
 				// feedback for lexer

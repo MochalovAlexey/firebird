@@ -172,10 +172,22 @@ BLOCK через AUTOTERM; SET влияет на следующее сообще
 режим prepared statement; повторный prepare при Bind использует его же, даже
 после SET. Portals сохраняют независимые cursors; Bind values не являются SQL
 и повторно не декодируются. PgWire передаёт исходные SQL bytes без rewriting.
-Engine StrMark/transformString сохраняет декодированные литералы в native
-`_UTF8 X'...'` при сохранении DDL/PSQL source, чтобы внутренняя переподготовка
-не меняла значение. Исходные позиции lexer остаются позициями входного SQL.
+Engine StrMark/transformString сохраняет декодированные литералы в native hex
+notation при сохранении DDL/PSQL source, чтобы внутренняя переподготовка
+не меняла значение. Для обычного `sql_string` используется `_UTF8 X'...'`;
+для bare STRING (DATE/TIME/TIMESTAMP, WHEN SQLSTATE) — `X'...'` без introducer.
+Явный `_charset` сохраняется прежним механизмом. Исходные позиции lexer
+остаются позициями входного SQL.
 PG SET внутри PSQL по-прежнему отвергается существующим guard (0A000).
+
+**Review 9e5b7bd07a выявил ошибку прежней сериализации:** bare STRING получал
+недопустимый `_UTF8`, что приводило к 42601 при CTAS или повторном native prepare.
+[Исправление формы сохраняемого литерала](STRINGS_SOURCE_FIX_TASK.md) ограничено
+приватным StrMark и действием `sql_string: STRING`: контекст отмечается только
+в выбранной ветке разбора, до сохранения source. Grammar и публичный API
+не расширены. Исправление относится к новой сериализации; ранее ошибочно
+сохранённый source автоматически не переписывается. Пересоздавать такие объекты
+нужно из исходного SQL. Исторический review и новая приёмка приведены в VALIDATION.md.
 
 История одной настройки принадлежит QueryExecutor: baseline логического блока
 и имена/snapshots пользовательских savepoints (не более 1024 активных имён).
@@ -209,6 +221,10 @@ undo-полей/hooks в jrd_tra/Savepoint нет. Сочетания новой
 AUTO COMMIT и RESET внутри PSQL исключены из подтверждённого профиля: скрытые
 границы не описываются одним interface pointer. Native возможности сохранены;
 наблюдения и отдельный отказ nested RESET приведены в VALIDATION.
+Внутренний SAVEPOINT через EXECUTE STATEMENT также вызывает исходный Debug
+assertion на текущей и предыдущей сборках; проверка вложенного SELECT
+не подтверждает этот отдельный сценарий. Дефект вынесен за пределы исправления
+сериализации и описан в архитектурном review в VALIDATION.
 
 Не реализованы E-literals, dollar quoting, SET LOCAL/SESSION, DEFAULT, SHOW,
 RESET parameter, новые startup options, BEGIN/$n/::/LIMIT. Whole-query preparse

@@ -143,10 +143,113 @@ def strings_client(config, client):
         other.close()
     check('ALTER SESSION RESET')
     check('DROP PROCEDURE STRING_SOURCE')
-    return {'passed':True,'queries':checks,
+    sources = strings_sources(config, check)
+    return {'passed':True,'queries':checks,'stored_sources':sources,
             'excluded_native_combinations':['TPB AUTO COMMIT with setting history',
                 'ALTER SESSION RESET inside PSQL with setting history'],
             'length_overflow_sqlstate':too_long[0]['sqlstate']}
+
+
+def strings_sources(config, check):
+    """Exercise native reprepare of both bare STRING and sql_string contexts."""
+    temporal = ["2026-01-01", "12:34:56.1234", "2026-01-01 12:34:56.1234"]
+    temporal_oids = [1082, 1083, 1114]
+    expressions = "DATE '2026-01-01' AS D, TIME '12:34:56.1234' AS T, " \
+                  "TIMESTAMP '2026-01-01 12:34:56.1234' AS TS"
+    for mode in ('on', 'off'):
+        check(SETTING+mode, mode)
+        table = 'STRINGS_CTAS_'+mode.upper()
+        check('CREATE TABLE '+table+' AS SELECT '+expressions+' FROM RDB$DATABASE WITH DATA', mode)
+        result = check('SELECT * FROM '+table, mode, rows=[[temporal]])[0]
+        require([c['oid'] for c in result['columns']] == temporal_oids, 'CTAS temporal types changed')
+        check('DROP TABLE '+table, mode)
+
+    # Native EDS has no PG mode: compare to already decoded typed literals.
+    check("EXECUTE BLOCK RETURNS (D DATE, T TIME, TS TIMESTAMP) AS BEGIN "
+          "EXECUTE STATEMENT q'{SELECT DATE '2026-01-01', TIME '12:34:56.1234', "
+          "TIMESTAMP '2026-01-01 12:34:56.1234' FROM RDB$DATABASE}' INTO :D, :T, :TS; "
+          "SUSPEND; END", 'off', rows=[[temporal]])
+
+    escaped_temporal = r"DATE '2026-\x30\x31-01' AS D, TIME '\x31\x32:34:56.1234' AS T, " \
+                       r"TIMESTAMP '\x32\x30\x32\x36-01-01 12:34:56.1234' AS TS"
+    text_expressions = r"'\n' AS S, '\u044F\U0001F642' AS U, 'a\';\\b' AS ESC, " \
+                       r"_UTF8 '\u044F' AS INTRO, q'{\n}' AS Q, " \
+                       "CAST(X'41' AS VARCHAR(1) CHARACTER SET UTF8) AS H"
+    mixed = temporal + ['\n', 'я🙂', "a';\\b", 'я', '\\n', 'A']
+    mixed_oids = temporal_oids + [1042]*5 + [1043]
+    # Parenthesized CTAS, CASE and nested SELECT exercise btyacc conflict replay.
+    check('CREATE TABLE STRINGS_CTAS_MIX AS (SELECT '+escaped_temporal+', '+text_expressions+
+          ", CASE WHEN 1=1 THEN (SELECT '\\u044F' FROM RDB$DATABASE) ELSE 'x' END AS C "
+          'FROM RDB$DATABASE) WITH DATA', 'off')
+    result = check('SELECT * FROM STRINGS_CTAS_MIX', 'off', rows=[[mixed+['я']]])[0]
+    require([c['oid'] for c in result['columns']] == mixed_oids+[1042],
+            'Mixed CTAS metadata changed: '+repr(result['columns']))
+    # Inferred charset catches a bare X literal silently turning text into BINARY.
+    charsets = check("SELECT TRIM(RF.RDB$FIELD_NAME), F.RDB$CHARACTER_SET_ID "
+          "FROM RDB$RELATION_FIELDS RF JOIN RDB$FIELDS F "
+          "ON F.RDB$SCHEMA_NAME=RF.RDB$FIELD_SOURCE_SCHEMA_NAME AND F.RDB$FIELD_NAME=RF.RDB$FIELD_SOURCE "
+          "WHERE RF.RDB$RELATION_NAME='STRINGS_CTAS_MIX' AND F.RDB$CHARACTER_SET_ID IS NOT NULL "
+          "ORDER BY RF.RDB$FIELD_POSITION", 'off')[0]['rows']
+    require(charsets == [[name,'4'] for name in ('S','U','ESC','INTRO','Q','H','C')],
+            'Stored expression lost UTF8 charset: '+repr(charsets))
+    check('DROP TABLE STRINGS_CTAS_MIX', 'off')
+
+    definitions = [
+        ('STRINGS_TEMPORAL_SOURCE',
+         'RETURNS (D DATE, T TIME, TS TIMESTAMP, S VARCHAR(8) CHARACTER SET UTF8, '
+         'U VARCHAR(8) CHARACTER SET UTF8, ESC VARCHAR(8) CHARACTER SET UTF8, '
+         'INTRO VARCHAR(8) CHARACTER SET UTF8, Q VARCHAR(8) CHARACTER SET UTF8, '
+         'H VARCHAR(8) CHARACTER SET UTF8)',
+         r"BEGIN D=DATE '2026-\x30\x31-01'; T=TIME '\x31\x32:34:56.1234'; "
+         r"TS=TIMESTAMP '\x32\x30\x32\x36-01-01 12:34:56.1234'; "
+         r"S='\n'; U='\u044F\U0001F642'; ESC='a\';\\b'; INTRO=_UTF8 '\u044F'; "
+         r"Q=q'{\n}'; H=CAST(X'41' AS VARCHAR(8) CHARACTER SET UTF8); SUSPEND; END",
+         mixed, temporal_oids+[1043]*6),
+        ('STRINGS_STATE_SOURCE', 'RETURNS (V INTEGER, S VARCHAR(8) CHARACTER SET UTF8)',
+         r"BEGIN BEGIN V=1/0; WHEN SQLSTATE '\x32\x32\x30\x31\x32' "
+         r"DO BEGIN V=42; S='\u044F'; END END SUSPEND; END", ['42','я'], [23,1043]),
+    ]
+    sources = {}
+    for name, declaration, body, values, oids in definitions:
+        check('CREATE PROCEDURE '+name+' '+declaration+' AS '+body, 'off')
+        result = check('SELECT * FROM '+name, 'off', rows=[[values]])[0]
+        require([c['oid'] for c in result['columns']] == oids, 'Procedure metadata changed')
+        source = check("SELECT CAST(RDB$PROCEDURE_SOURCE AS VARCHAR(8191)) "
+                       "FROM RDB$PROCEDURES WHERE RDB$PROCEDURE_NAME='"+name+"'", 'off')[0]['rows'][0][0]
+        sources[name] = source
+        require(not re.search(r'(?:DATE|TIME|TIMESTAMP|SQLSTATE)\s+_UTF8', source),
+                'Bare STRING received an introducer: '+source)
+        if name == 'STRINGS_TEMPORAL_SOURCE':
+            require("DATE X'323032362D30312D3031'" in source and "_UTF8 X'0A'" in source and
+                    "_UTF8 X'D18FF09F9982'" in source and "Q=q'{\\n}'" in source,
+                    'Mixed source did not preserve literal contexts: '+source)
+        else:
+            require("SQLSTATE X'3232303132'" in source and "_UTF8 X'D18F'" in source,
+                    'SQLSTATE/text source did not preserve literal contexts: '+source)
+
+        # Read the real BLOB and feed it directly to the existing native EDS prepare.
+        # Repeating this also checks that native serialization remains stable.
+        for _ in range(2):
+            check("EXECUTE BLOCK AS DECLARE SRC BLOB SUB_TYPE TEXT; BEGIN "
+                  "SELECT RDB$PROCEDURE_SOURCE FROM RDB$PROCEDURES WHERE RDB$PROCEDURE_NAME='"+name+
+                  "' INTO :SRC; EXECUTE STATEMENT 'ALTER PROCEDURE "+name+' '+declaration+
+                  " AS ' || SRC; END", 'off')
+            check('SELECT * FROM '+name, 'off', rows=[[values]])
+
+    from pgwire_1c_smoke import Libpq
+    peer = Libpq(config)
+    try:
+        for name, _, _, values, oids in definitions:
+            result = peer.query('SELECT * FROM '+name, True)
+            require(len(result)==1 and not result[0]['sqlstate'] and result[0]['rows']==[values] and
+                    [c['oid'] for c in result[0]['columns']]==oids, 'Reconnected procedure changed')
+    finally:
+        peer.close()
+    for name, _, _, _, _ in definitions:
+        check('DROP PROCEDURE '+name, 'off')
+    check(SETTING+'on')
+    return {'passed':True, 'ctas_modes':['on','off'], 'mixed_charsets':charsets,
+            'procedure_sources':sources, 'native_alters_per_procedure':2, 'reconnect':True}
 
 
 

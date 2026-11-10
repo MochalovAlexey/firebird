@@ -11,6 +11,17 @@ runtime/security DB/loopback и реальный libpq; checks находятс�
 [pgwire_strings_checks.py](tools/pgwire_strings_checks.py). OO helper
 [pgwire_strings_api.cpp](tools/pgwire_strings_api.cpp) собирается тем же harness.
 
+Приёмка исправления сериализации расширяет тот же `--strings`: CTAS WITH DATA
+для DATE/TIME/TIMESTAMP при on/off, off с числовыми escapes, сравнение с native
+EDS typed literals, смешанный CTAS с проверкой inferred charset через metadata.
+Процедуры с temporal и WHEN SQLSTATE сохраняют обычный UTF8, Unicode, quote/backslash,
+явный `_UTF8`, Q-strings и hex strings. Проверяются source, исполнение до и после
+двух ALTER из настоящего RDB$PROCEDURE_SOURCE через native EDS, результаты/типы
+после reconnect. Parenthesized CTAS, CASE и nested SELECT дополняют проверку
+редукций parser; generated action должен быть защищён `if (!yytrial)` и
+сохранять `$$ = $1`. OO API проверяет исходные line/column после escapes
+при обоих режимах и сохраняет запреты на другие charset.
+
 | Группа | Проверяемый контракт |
 |---|---|
 | Значения и диагностики | Escape bytes, Unicode/surrogates, malformed UTF8/NUL, длины и metadata; общий набор с эталоном 18.6 |
@@ -18,7 +29,7 @@ runtime/security DB/loopback и реальный libpq; checks находятс�
 | Simple | Один snapshot всего Query, escaped quote/semicolon, PSQL continuation, stop/error, data rollback, сегмент после COMMIT |
 | Extended/raw | Parse snapshot в обе стороны, независимые portals, Bind bytes, несколько Execute/Flush до Sync, точный ParameterStatus order |
 | История | Implicit без handle, T/E, runtime/syntax/invalid SET, Parse/Bind/duplicate name failures, повторный E, commit-in-E |
-| Native controls | Quoted/doubled/UTF8/trailing-space names, replacement/ONLY, failed controls, retaining/NO AUTO UNDO, внешние точки после EXECUTE STATEMENT |
+| Native controls | Quoted/doubled/UTF8/trailing-space names, replacement/ONLY, failed controls, retaining/NO AUTO UNDO, внешние точки после EXECUTE STATEMENT с вложенным SELECT |
 | Сохранённый SQL/reset | Stored procedure после reconnect и native source reprepare, два attachments, RESET в I/T |
 | Служебное восстановление | SessionTest: success, prepare failure, execute failure, неверный readback, отсутствующий info item; без transaction/results/leaks, original error/FATAL |
 | Регрессии | Все pgwire unit executables, полный isql suite, fixed settings, scripts, Simple/Extended, transactions и native baseline |
@@ -26,6 +37,10 @@ runtime/security DB/loopback и реальный libpq; checks находятс�
 Native TPB AUTO COMMIT и вложенный RESET совместно с историей исключены из
 подтверждённого профиля. Их исключение не превращает отдельное наблюдение сбоя
 в PASS. Команды, результаты, эталон и ограничения — в [VALIDATION.md](VALIDATION.md).
+Внутренний SAVEPOINT через EXECUTE STATEMENT имеет отдельный исходный Debug
+assertion в exe.cpp:1351, подтверждённый review также на прежних бинарниках.
+Он не исправляется и не включается в обычный acceptance; вложенный SELECT
+не подтверждает этот сценарий.
 
 
 ## Подэтап 1С: фиксированные lc_messages/client_encoding

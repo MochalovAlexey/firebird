@@ -1,5 +1,145 @@
 # Проверки реализации
 
+## 10 ноября 2026: исправление сериализации bare STRING после review
+
+Выполнено [STRINGS_SOURCE_FIX_TASK.md](1c/STRINGS_SOURCE_FIX_TASK.md) на базе
+`9e5b7bd07a95d0d20caf390689bca0cc6995dbc0`. Исходные изменения документации
+архитектурного review сохранены ниже. Исправление оставлено без staging/commit.
+
+Production diff ограничен `Parser.h`, `Parser.cpp`, `parse.y`: приватный
+`StrMark::introducerAllowed` изначально false; редукция `sql_string: STRING`
+устанавливает его и явно сохраняет `$$ = $1`. transformString добавляет
+неявный `_UTF8` только для escaped sql_string без явного introducer.
+Остальные escaped STRING сериализуются в штатный bare `X'hex'`.
+Native grammar, SQL positions, API/metadata, session history и undo не расширены.
+
+Проверен сгенерированный `temp/Debug/dsql/parse.cpp`: новое действие находится
+в `case 1989` под **`if (!yytrial)`**. Оно не исполняется в отвергнутой пробной
+ветке btyacc. Редукции дочерних sql_string завершаются до makeParseStr в CTAS и
+psql_procedure_clause; обработчик позиций остаётся штатным. Live CTAS с
+parentheses/CASE/nested SELECT и смешанный PSQL подтвердили выбор формы на момент
+сохранения source; повторный native ALTER не меняет значения. Реальные фрагменты:
+
+```sql
+D=DATE X'323032362D30312D3031';
+S= _UTF8 X'0A';
+WHEN SQLSTATE X'3232303132' DO BEGIN V=42; S= _UTF8 X'D18F'; END
+```
+
+### Сборка и целевые проверки
+
+Linux x86-64, developer/Debug Firebird `LI-T6.0.0.2199-dev`, GCC 13.4.0,
+GNU Make 4.3, Python 3.10.12, libpq 14.24. Использован существующий configure
+с `--enable-developer --with-builtin-tommath --with-builtin-tomcrypt`.
+
+```sh
+cd /tmp/firebird-pgwire-1c-build
+make -j2
+make -C gen -j2 TARGET=Debug pgwire_tests
+LD_LIBRARY_PATH=gen/Debug/firebird/lib gen/Debug/firebird/tests/pgwire_sql_test
+LD_LIBRARY_PATH=gen/Debug/firebird/lib gen/Debug/firebird/tests/pgwire_session_test
+LD_LIBRARY_PATH=gen/Debug/firebird/lib gen/Debug/firebird/tests/isql_test --log_level=message
+
+cd /home/aleksey/dev/my_firebird/firebird
+python3 -B pg_wire_protocol/tools/pgwire_1c_smoke.py --strings \
+  --firebird-dir /tmp/firebird-pgwire-1c-build/gen/Debug/firebird \
+  --work-dir /tmp/firebird-pgwire-strings-source-fix-02 \
+  --libpq /lib/x86_64-linux-gnu/libpq.so.5
+```
+
+| Проверка | Фактический результат |
+|---|---|
+| Расширенный тест на исходных бинарниках | Ожидаемый FAIL: CTAS on проходит, CTAS off даёт 42601; `/tmp/firebird-pgwire-strings-source-baseline-01/summary.json`, server exit 0 |
+| Полный make | PASS, `strings-source-fix-build-01.log`; parser **154 shift/reduce, 11 reduce/reduce**, новых конфликтов нет |
+| Classifier / SessionTest / isql | **509 checks / 5 scenarios / 13 cases PASS**; `strings-source-fix-units.json` в build-dir |
+| Итоговый --strings | **PASS**, 156 учтённых libpq queries, raw-wire cases, native dialects 1/2/3 и **350 OO API checks** |
+| CTAS WITH DATA | DATE/TIME/TIMESTAMP при on/off: правильные строки и OID 1082/1083/1114; off с реальными escapes совпадает с native EDS decoded literals |
+| Смешанный CTAS | Unicode, quote/backslash, newline, explicit UTF8, Q и hex: bytes/OID сохранены; все семь текстовых полей имеют inferred charset 4 (UTF8), включая CASE |
+| Сохранённые процедуры | Temporal и WHEN SQLSTATE: исходное исполнение, два ALTER из реального RDB$PROCEDURE_SOURCE через native EDS, повторное исполнение и reconnect с проверкой значений/типов — PASS |
+| Диагностики | OO проверяет line/column исходного SQL после escapes при on/off, отсутствие ложного command_end_err2; прежние invalid UTF8/Unicode/charset guards сохранены |
+
+Первый прогон исправленной сборки остановился на неверном ожидании теста:
+CASE над CHAR-литералами даёт native CHAR/OID 1042, не VARCHAR/1043.
+Тип и charset подтверждены native metadata; ожидание исправлено, production
+код после первой сборки не менялся. Этот предварительный прогон не считается PASS.
+Итоговый сервер завершился exit 0, forced kill не применялся. Проверки использовали
+частные runtime/security DB/test databases; рабочие базы и сервер не менялись.
+
+Engine14 SHA256: `d4bc1bc5adf3a593232eecfc83db4b9c1e4b653273dbb34f9f570d61553cfcb5`.
+PgWire SHA256 остался `30ae096fead56aba0651911ac15572babcc4a39b0d4f3f6d9ece6275f97b2a17`.
+`readelf -d` подтвердил прежний DT_NEEDED **обоих** модулей относительно baseline;
+новых build/test/runtime dependencies нет. Отчёт:
+`/tmp/firebird-pgwire-1c-build/strings-source-fix-dependencies.json`.
+
+### Границы результата
+
+Исправлена новая сериализация; ошибочно сохранённые старые исходники автоматически
+не переписываются. Их пересоздание требует исходного SQL. Положительный EDS SELECT
+не доказывает внутренние SAVEPOINT: отдельный исходный assertion exe.cpp:1351
+из review не исправлялся и не включался в обычный suite. Nested RESET,
+ON CONNECT shutdown, READ CONSISTENCY + AUTO COMMIT и сочетание новой истории
+с AUTO COMMIT также не перепроверялись и не исправлялись.
+
+После успешной целевой приёмки широкие прежние suites, Windows/CMake и полный
+запуск 1С/Гилёва не повторялись. Новые SET, BEGIN/$n и whole-query preparse
+не добавлены. Следующий кандидат escape_string_warning/client_min_messages
+остаётся отдельным этапом после принятия этого diff пользователем.
+
+## 10 ноября 2026: архитектурный review ревизии 9e5b7bd07a
+
+Проверен закоммиченный результат standard_conforming_strings. Перед review
+рабочее дерево было чистым; production code в этом review не изменялся.
+Engine/parser/cache и PgWire/session history просмотрены отдельно.
+Согласованное разделение ответственности выполнено: журнал находится в плагине,
+native transaction undo не расширен, getInfo/prepare сохранили сигнатуры.
+
+Повторены существующие проверки на бинарниках с теми же SHA256 Engine14/PgWire,
+что указаны в предыдущем отчёте:
+
+- --strings: **PASS**, 126 libpq-запросов, raw wire и **292 OO API checks**.
+  Evidence: /tmp/firebird-pgwire-strings-review-01/summary.json;
+  source_revision = 9e5b7bd07a, исходный src diff пуст; server exit 0.
+- SessionTest: **5 scenarios PASS**, classifier: **509 checks PASS**,
+  isql suite: **13 cases PASS**.
+
+Однако дополнительный целевой repro выявил **P2: неверную сериализацию
+голого STRING в typed literals и SQLSTATE**.
+При off Parser::transformString добавляет _UTF8 также к STRING, который
+не допускает introducer по native grammar. Результат:
+
+| Проверка через libpq | Фактический результат |
+| --- | --- |
+| SELECT DATE '2026-01-01' при on/off | Оба возвращают 2026-01-01 |
+| CTAS WITH DATA с таким DATE при on | Успех |
+| Такой же CTAS при off | **42601** при внутреннем prepare |
+| Процедура с DATE при off | Создаётся и исполняется; source содержит DATE _UTF8 X'...' |
+| ALTER из этого сохранённого source через native EDS | **42601**; контрольный source, созданный при on, работает |
+| Процедура с WHEN SQLSTATE '22012' при off | Первое исполнение возвращает 42, но сохранённый WHEN SQLSTATE _UTF8 X'...' не проходит повторный ALTER |
+
+Evidence: /tmp/firebird-pgwire-strings-literals-review-01/review.json,
+22 запроса, server exit 0. Reproducer: /tmp/pgwire_strings_arch_review_v2.py
+с режимом literals. Исправление ещё не выполнено.
+Архитектура и следующий отдельный этап —
+[STRINGS_SOURCE_FIX_TASK.md](1c/STRINGS_SOURCE_FIX_TASK.md).
+Предыдущая положительная проверка stored source использовала обычную строку
+и не покрывала эти контексты; её PASS не отменяет найденный дефект.
+
+Дополнительно проверен настоящий внутренний SAVEPOINT через EXECUTE STATEMENT:
+EXECUTE BLOCK AS BEGIN EXECUTE STATEMENT 'SAVEPOINT inner_point'; END
+внутри SET TRANSACTION; SAVEPOINT outer_point.
+Он вызывает Debug assertion в exe.cpp:1351 и SIGABRT как на текущей сборке,
+так и на точных предыдущих бинарниках Engine14/PgWire из settings-04.
+Baseline запуск использовал свежую security DB и отдельные тестовые данные;
+хеши исполняемых модулей сверены с предыдущим runtime.
+Evidence: /tmp/firebird-pgwire-eds-baseline-review-02/review.json (exit -6),
+его runtime/firebird.log и
+/tmp/firebird-pgwire-strings-arch-review-01/runtime/firebird.log.
+Первый baseline setup с копией готовых data не состоялся из-за уже существующего
+файла базы; этот setup не считается результатом проверки.
+Это исходный engine defect, отдельный от найденной регрессии сериализации.
+Тест с вложенным SELECT не доказывает корректность внутреннего SAVEPOINT.
+Рабочие серверы и базы пользователя не менялись.
+
 ## 10 ноября 2026: standard_conforming_strings, редакция 2
 
 База — `da23d2d60cf011fec192696e9c4e5abd6b797365`. Реализовано согласованное

@@ -125,6 +125,7 @@ private:
 
 		bool introduced;
 		bool escaped = false;
+		bool introducerAllowed = false;
 		unsigned pos;
 		unsigned length;
 		IntlString* str;

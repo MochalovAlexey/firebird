@@ -167,9 +167,10 @@ void Parser::transformString(const char* start, unsigned length, string& dest)
 		if (s > pos && !fb_utils::isspace(s[-1]))
 			buffer.add(' ');	// fix _charset'' becoming invalid syntax _charsetX''
 
-		// Preserve decoded ordinary literals in stored DDL/PSQL and internal prepares.
+		// sql_string accepts an introducer; bare STRING contexts (DATE, SQLSTATE,
+		// etc.) need just X'...' so their native grammar remains valid.
 		// An actual introducer is already present in the original SQL prefix.
-		if (mark.escaped && !mark.introduced)
+		if (mark.escaped && mark.introducerAllowed && !mark.introduced)
 			buffer.add("_UTF8 ", 6);
 
 		const FB_SIZE_T count = buffer.getCount();

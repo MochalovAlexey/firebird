@@ -452,7 +452,8 @@ def main():
     try:
         harness.prepare()
         if args.strings:
-            harness.isql('strings_grants', f"CONNECT '{harness.database}';\nGRANT CREATE PROCEDURE TO USER WIRE_HOST_TEST;\nCOMMIT;\nQUIT;\n", embedded=True)
+            harness.isql('strings_grants', f"CONNECT '{harness.database}';\nGRANT CREATE PROCEDURE TO USER WIRE_HOST_TEST;\n"
+                         "GRANT CREATE TABLE TO USER WIRE_HOST_TEST;\nCOMMIT;\nQUIT;\n", embedded=True)
         elif not args.settings and not args.baseline:
             compat = Path(__file__).resolve().parents[1] / '1c/compat.sql'
             harness.isql('install_compat', f"CONNECT '{harness.database}';\n" +

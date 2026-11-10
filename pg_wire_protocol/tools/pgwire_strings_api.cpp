@@ -87,7 +87,8 @@ int main(int argc, char** argv)
 			transaction->rollback(&status); transaction = nullptr;
 			return length;
 		};
-		const auto reject = [&](const std::string& sql, unsigned dialect, unsigned flags, const char* code)
+		const auto reject = [&](const std::string& sql, unsigned dialect, unsigned flags, const char* code,
+			unsigned line = 0, unsigned column = 0)
 		{
 			expected.init();
 			statement = attachment->prepare(&expected, nullptr, sql.size(), sql.data(), dialect, flags);
@@ -96,12 +97,20 @@ int main(int argc, char** argv)
 			require(!statement && (expected.getState() & IStatus::STATE_ERRORS), "Prepare unexpectedly accepted SQL");
 			char actual[6]; fb_sqlstate(actual, expected.getErrors());
 			require(!std::strcmp(actual, code), "Unexpected prepare SQLSTATE");
+			bool positionFound = false;
 			for (const ISC_STATUS* p = expected.getErrors(); *p != isc_arg_end; )
 			{
 				const auto tag = *p++;
 				require(tag != isc_arg_gds || *p != isc_command_end_err2, "Definitive error became incomplete SQL");
+				if (line && tag == isc_arg_gds && *p == isc_dsql_token_unk_err)
+				{
+					require(p[1] == isc_arg_number && p[2] == line &&
+						p[3] == isc_arg_number && p[4] == column, "Error position is not the original SQL position");
+					positionFound = true;
+				}
 				p += tag == isc_arg_cstring ? 2 : 1;
 			}
+			require(!line || positionFound, "Missing error position");
 		};
 		constexpr auto ON = IStatement::PREPARE_STANDARD_CONFORMING_STRINGS_ON;
 		constexpr auto OFF = IStatement::PREPARE_STANDARD_CONFORMING_STRINGS_OFF;
@@ -137,6 +146,12 @@ int main(int argc, char** argv)
 		query(4, OFF, "SELECT _WIN1251 q'{\\n}' FROM RDB$DATABASE", "\\n");
 		reject("SELECT _WIN1251 '\\n'", 4, OFF, "0A000");
 		reject("EXECUTE BLOCK AS BEGIN SET standard_conforming_strings=off; END", 4, 0, "0A000");
+		for (const auto flags : {ON, OFF})
+		{
+			const std::string invalid = "SELECT '\\u0041', @ FROM RDB$DATABASE";
+			reject(invalid, 4, flags, "42000", 1, invalid.find('@') + 1);
+			reject("SELECT '\\n',\n  @ FROM RDB$DATABASE", 4, flags, "42000", 2, 3);
+		}
 		// Preparing a SET does nothing; reuse of the same handle applies it each time.
 		statement = attachment->prepare(&status, nullptr, 0, "SET standard_conforming_strings=off", 4, 0);
 		require(mode(), "SET applied at prepare");
