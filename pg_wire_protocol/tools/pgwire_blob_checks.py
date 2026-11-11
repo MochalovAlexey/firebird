@@ -39,16 +39,17 @@ def encoded(identifier, binary=False):
 
 def blobs_fixture(h):
     h.isql('blobs_schema', f"CONNECT '{h.database}';\n"
-        'CREATE TABLE BLOB_ROWS(ID INTEGER NOT NULL PRIMARY KEY, B BLOB SUB_TYPE BINARY, BT BLOB SUB_TYPE TEXT, BX BLOB SUB_TYPE 2);\n'
-        'CREATE TABLE BLOB_COPY(ID INTEGER NOT NULL PRIMARY KEY, B BLOB SUB_TYPE BINARY);\n'
-        'CREATE TABLE PUBLIC.PARAMS(CREATION INTEGER, MODIFIED INTEGER, ATTRIBUTES INTEGER, DATASIZE BIGINT, '
-        'BINARYDATA BLOB SUB_TYPE BINARY, FILENAME VARCHAR(40) CHARACTER SET UTF8, PARTNO INTEGER);\n'
-        'SET TERM ^;\nCREATE PROCEDURE BLOB_PROC(N INTEGER) RETURNS(PAYLOAD BLOB SUB_TYPE BINARY) AS '
-        'BEGIN SELECT B FROM BLOB_ROWS WHERE ID=:N INTO :PAYLOAD; END^\nSET TERM ;^\n'
-        'GRANT SELECT ON BLOB_ROWS TO USER WIRE_HOST_TEST;\n'
-        'GRANT SELECT ON PUBLIC.PARAMS TO USER WIRE_HOST_TEST;\n'
-        'GRANT SELECT, INSERT, UPDATE, DELETE ON BLOB_COPY TO USER WIRE_HOST_TEST;\n'
-        'GRANT EXECUTE ON PROCEDURE BLOB_PROC TO USER WIRE_HOST_TEST;\nCOMMIT;\nQUIT;\n', embedded=True)
+        'CREATE SCHEMA "public"; GRANT USAGE ON SCHEMA "public" TO "PUBLIC";\n'
+        'CREATE TABLE "PUBLIC"."BLOB_ROWS"("ID" INTEGER NOT NULL PRIMARY KEY, "B" BLOB SUB_TYPE BINARY, "BT" BLOB SUB_TYPE TEXT, "BX" BLOB SUB_TYPE 2);\n'
+        'CREATE TABLE "PUBLIC"."BLOB_COPY"("ID" INTEGER NOT NULL PRIMARY KEY, "B" BLOB SUB_TYPE BINARY);\n'
+        'CREATE TABLE "public"."params"("creation" INTEGER, "modified" INTEGER, "attributes" INTEGER, "datasize" BIGINT, '
+        '"binarydata" BLOB SUB_TYPE BINARY, "filename" VARCHAR(40) CHARACTER SET UTF8, "partno" INTEGER);\n'
+        'SET TERM ^;\nCREATE PROCEDURE "PUBLIC"."BLOB_PROC"("N" INTEGER) RETURNS("PAYLOAD" BLOB SUB_TYPE BINARY) AS '
+        'BEGIN SELECT "B" FROM "PUBLIC"."BLOB_ROWS" WHERE "ID"=:"N" INTO :"PAYLOAD"; END^\nSET TERM ;^\n'
+        'GRANT SELECT ON "PUBLIC"."BLOB_ROWS" TO USER WIRE_HOST_TEST;\n'
+        'GRANT SELECT ON "public"."params" TO USER WIRE_HOST_TEST;\n'
+        'GRANT SELECT, INSERT, UPDATE, DELETE ON "PUBLIC"."BLOB_COPY" TO USER WIRE_HOST_TEST;\n'
+        'GRANT EXECUTE ON PROCEDURE "PUBLIC"."BLOB_PROC" TO USER WIRE_HOST_TEST;\nCOMMIT;\nQUIT;\n', embedded=True)
     source = Path(__file__).with_name('pgwire_blob_fixture.cpp')
     binary = h.work/'blob_fixture'
     built = subprocess.run(['g++','-std=c++17','-g','-O0',str(source),'-I'+str(h.runtime/'include'),
@@ -63,8 +64,8 @@ def blobs_fixture(h):
     h.summary['blob_fixture'] = json.loads(run.stdout)
     h.summary['blob_fixture']['source_sha256'] = hashlib.sha256(source.read_bytes()).hexdigest()
     h.isql('blobs_params', f"CONNECT '{h.database}';\n"
-        "INSERT INTO PUBLIC.PARAMS SELECT 1,2,3,OCTET_LENGTH(B),B,'config',ID FROM BLOB_ROWS WHERE ID BETWEEN 1 AND 3;\n"
-        "UPDATE BLOB_ROWS SET BT='text' WHERE ID=2;\nCOMMIT;\nQUIT;\n", embedded=True)
+        'INSERT INTO "public"."params" SELECT 1,2,3,OCTET_LENGTH("B"),"B",\'config\',"ID" FROM "PUBLIC"."BLOB_ROWS" WHERE "ID" BETWEEN 1 AND 3;\n'
+        'UPDATE "PUBLIC"."BLOB_ROWS" SET "BT"=\'text\' WHERE "ID"=2;\nCOMMIT;\nQUIT;\n', embedded=True)
 
 
 def blobs_client(config, client):
@@ -131,13 +132,13 @@ def blobs_client(config, client):
     def seen(ids):
         report['native_observations'] += 1
         output=Harness.isql(observer,'blobs_observer_'+str(report['native_observations']),
-            'SET ROLE PGWIRE_OBSERVER;\nSET LIST ON;\nSELECT ID FROM BLOB_COPY ORDER BY ID;\nROLLBACK;\nQUIT;\n')
+            'SET ROLE PGWIRE_OBSERVER;\nSET LIST ON;\nSELECT "ID" FROM "PUBLIC"."BLOB_COPY" ORDER BY "ID";\nROLLBACK;\nQUIT;\n')
         require(re.findall(r'^ID[ \t]+(\d+)[ \t]*$',output,re.M)==[str(i) for i in ids], 'Native BLOB DML readback differs: '+output)
 
-    sql='SELECT B FROM BLOB_ROWS WHERE ID=$1'
+    sql='SELECT "B" FROM "PUBLIC"."BLOB_ROWS" WHERE "ID"=$1'
     prepare('blob',sql,[23],[17])
     for identifier in range(7):
-        query(f'SELECT B FROM BLOB_ROWS WHERE ID={identifier}',rows=[[encoded(identifier)]],oids=[17],tag='SELECT 1')
+        query(f'SELECT "B" FROM "PUBLIC"."BLOB_ROWS" WHERE "ID"={identifier}',rows=[[encoded(identifier)]],oids=[17],tag='SELECT 1')
         params(sql,[str(identifier)],rows=[[encoded(identifier)]],oids=[17])
         params('blob',[str(identifier)],prepared=True,binary=True,rows=[[encoded(identifier,True)]],oids=[17])
     params('blob',[None],prepared=True,rows=[],tag='SELECT 0')
@@ -156,49 +157,49 @@ def blobs_client(config, client):
         params('blob',['3'],prepared=True,rows=[[encoded(3)]])
 
     for identifier in (0,1,3,5):
-        query(f'EXECUTE PROCEDURE BLOB_PROC({identifier})',rows=[[encoded(identifier)]],oids=[17])
-        params('EXECUTE PROCEDURE BLOB_PROC(?)',[str(identifier)],binary=True,rows=[[encoded(identifier,True)]],oids=[17])
-    prepare('procedure','EXECUTE PROCEDURE BLOB_PROC(?)',[23],[17])
+        query(f'EXECUTE PROCEDURE "PUBLIC"."BLOB_PROC"({identifier})',rows=[[encoded(identifier)]],oids=[17])
+        params('EXECUTE PROCEDURE "PUBLIC"."BLOB_PROC"(?)',[str(identifier)],binary=True,rows=[[encoded(identifier,True)]],oids=[17])
+    prepare('procedure','EXECUTE PROCEDURE "PUBLIC"."BLOB_PROC"(?)',[23],[17])
     for identifier in (1,2,3):
         params('procedure',[str(identifier)],prepared=True,binary=True,rows=[[encoded(identifier,True)]])
-    block='EXECUTE BLOCK RETURNS(V BLOB SUB_TYPE BINARY) AS BEGIN SELECT B FROM BLOB_ROWS WHERE ID=3 INTO :V; SUSPEND; END'
+    block='EXECUTE BLOCK RETURNS("V" BLOB SUB_TYPE BINARY) AS BEGIN SELECT "B" FROM "PUBLIC"."BLOB_ROWS" WHERE "ID"=3 INTO :"V"; SUSPEND; END'
     query(block,rows=[[encoded(3)]],oids=[17])
     params(block,binary=True,rows=[[encoded(3,True)]],oids=[17])
     query("SELECT CAST(x'005c27ffc080' AS BLOB SUB_TYPE BINARY)",rows=[['\\x005c27ffc080']],oids=[17])
     query('SELECT 1::BLOB',rows=[['\\x31']],oids=[17])
-    query('INSERT INTO BLOB_COPY SELECT 100,B FROM BLOB_ROWS WHERE ID=2 RETURNING B',rows=[[encoded(2)]],oids=[17]);seen([100])
-    params('UPDATE BLOB_COPY SET B=(SELECT B FROM BLOB_ROWS WHERE ID=$1) WHERE ID=100 RETURNING B',['3'],
+    query('INSERT INTO "PUBLIC"."BLOB_COPY" SELECT 100,"B" FROM "PUBLIC"."BLOB_ROWS" WHERE "ID"=2 RETURNING "B"',rows=[[encoded(2)]],oids=[17]);seen([100])
+    params('UPDATE "PUBLIC"."BLOB_COPY" SET "B"=(SELECT "B" FROM "PUBLIC"."BLOB_ROWS" WHERE "ID"=$1) WHERE "ID"=100 RETURNING "B"',['3'],
            binary=True,rows=[[encoded(3,True)]],oids=[17]);seen([100])
-    params('DELETE FROM BLOB_COPY WHERE ID=$1 RETURNING B',['100'],binary=True,rows=[[encoded(3,True)]]);seen([])
+    params('DELETE FROM "PUBLIC"."BLOB_COPY" WHERE "ID"=$1 RETURNING "B"',['100'],binary=True,rows=[[encoded(3,True)]]);seen([])
 
-    query('SELECT B FROM BLOB_ROWS WHERE ID=9',rows=[[encoded(9)]],oids=[17])
+    query('SELECT "B" FROM "PUBLIC"."BLOB_ROWS" WHERE "ID"=9',rows=[[encoded(9)]],oids=[17])
     params('blob',['7'],prepared=True,binary=True,rows=[[encoded(7,True)]])
     for identifier in (10,11):
-        query(f'SELECT B FROM BLOB_ROWS WHERE ID={identifier}',error='0A000')
+        query(f'SELECT "B" FROM "PUBLIC"."BLOB_ROWS" WHERE "ID"={identifier}',error='0A000')
         query('SELECT 42',rows=[['42']])
     for identifier in (8,11):
         params('blob',[str(identifier)],prepared=True,binary=True,error='0A000')
         params('blob',['2'],prepared=True,binary=True,rows=[[encoded(2,True)]])
     # A BLOB fitting by itself may exceed the shared budget with another column.
-    query('SELECT B, 42 FROM BLOB_ROWS WHERE ID=9',error='0A000')
-    query('INSERT INTO BLOB_COPY SELECT 200,B FROM BLOB_ROWS WHERE ID=11 RETURNING B',error='0A000');seen([])
-    params('INSERT INTO BLOB_COPY SELECT 201,B FROM BLOB_ROWS WHERE ID=$1 RETURNING B',['11'],binary=True,error='0A000');seen([])
+    query('SELECT "B", 42 FROM "PUBLIC"."BLOB_ROWS" WHERE "ID"=9',error='0A000')
+    query('INSERT INTO "PUBLIC"."BLOB_COPY" SELECT 200,"B" FROM "PUBLIC"."BLOB_ROWS" WHERE "ID"=11 RETURNING "B"',error='0A000');seen([])
+    params('INSERT INTO "PUBLIC"."BLOB_COPY" SELECT 201,"B" FROM "PUBLIC"."BLOB_ROWS" WHERE "ID"=$1 RETURNING "B"',['11'],binary=True,error='0A000');seen([])
     query('BEGIN',state=2)
-    query('INSERT INTO BLOB_COPY SELECT 202,B FROM BLOB_ROWS WHERE ID=2',state=2)
-    query('INSERT INTO BLOB_COPY SELECT 203,B FROM BLOB_ROWS WHERE ID=11 RETURNING B',error='0A000',state=3)
+    query('INSERT INTO "PUBLIC"."BLOB_COPY" SELECT 202,"B" FROM "PUBLIC"."BLOB_ROWS" WHERE "ID"=2',state=2)
+    query('INSERT INTO "PUBLIC"."BLOB_COPY" SELECT 203,"B" FROM "PUBLIC"."BLOB_ROWS" WHERE "ID"=11 RETURNING "B"',error='0A000',state=3)
     query('SELECT 42',error='25P02',state=3)
     query('ROLLBACK');seen([])
     query('BEGIN',state=2)
-    params('INSERT INTO BLOB_COPY SELECT 206,B FROM BLOB_ROWS WHERE ID=$1 RETURNING B',['11'],
+    params('INSERT INTO "PUBLIC"."BLOB_COPY" SELECT 206,"B" FROM "PUBLIC"."BLOB_ROWS" WHERE "ID"=$1 RETURNING "B"',['11'],
            binary=True,error='0A000',state=3)
     params('blob',['2'],prepared=True,binary=True,error='25P02',state=3)
     query('ROLLBACK');seen([])
-    results=client.query('INSERT INTO BLOB_COPY SELECT 204,B FROM BLOB_ROWS WHERE ID=2; '
-                         'SELECT B FROM BLOB_ROWS WHERE ID=11; INSERT INTO BLOB_COPY SELECT 205,B FROM BLOB_ROWS WHERE ID=2',True)
+    results=client.query('INSERT INTO "PUBLIC"."BLOB_COPY" SELECT 204,"B" FROM "PUBLIC"."BLOB_ROWS" WHERE "ID"=2; '
+                         'SELECT "B" FROM "PUBLIC"."BLOB_ROWS" WHERE "ID"=11; INSERT INTO "PUBLIC"."BLOB_COPY" SELECT 205,"B" FROM "PUBLIC"."BLOB_ROWS" WHERE "ID"=2',True)
     require([r['sqlstate'] for r in results]==['','0A000'], 'Simple continued after BLOB output failure')
     seen([]);query('SELECT 42',rows=[['42']])
-    for statement in ('SELECT BT FROM BLOB_ROWS','SELECT BX FROM BLOB_ROWS',
-                      "INSERT INTO BLOB_COPY VALUES(300,CAST('x' AS BLOB)) RETURNING CAST('x' AS BLOB SUB_TYPE TEXT)"):
+    for statement in ('SELECT "BT" FROM "PUBLIC"."BLOB_ROWS"','SELECT "BX" FROM "PUBLIC"."BLOB_ROWS"',
+                      'INSERT INTO "PUBLIC"."BLOB_COPY" VALUES(300,CAST(\'x\' AS BLOB)) RETURNING CAST(\'x\' AS BLOB SUB_TYPE TEXT)'):
         query(statement,error='0A000')
     params('SELECT CAST($1 AS BLOB SUB_TYPE BINARY)',['data'],rows=[['\\x64617461']],oids=[17])
     params('SELECT CAST($1 AS BLOB SUB_TYPE BINARY)',[None],rows=[[None]],oids=[17])
@@ -214,21 +215,21 @@ def blobs_client(config, client):
 def blobs_protocols(h):
     raw=ExtendedClient(h).login(); checks=[]
     try:
-        events=raw.exchange(parse('blob','SELECT B FROM BLOB_ROWS WHERE ID=$1')+
+        events=raw.exchange(parse('blob','SELECT "B" FROM "PUBLIC"."BLOB_ROWS" WHERE "ID"=$1')+
                             describe(b'S','blob')+packet(b'S'),b'1tTZ')
         require(events[1][1]==struct.pack('!HI',1,23) and columns(events[2][1])[0]==
                 {'name':'B','table':0,'attribute':0,'oid':17,'size':-1,'modifier':-1,'format':0}, 'Raw BLOB Describe differs')
         raw.exchange(bind('waiting','blob',['2'])+describe(b'P','waiting')+packet(b'H'),b'2T',end=b'T')
         output=h.isql('blobs_no_early_transaction','SET ROLE PGWIRE_OBSERVER;\nSET LIST ON;\n'
-            'SELECT COUNT(*) AS N FROM MON$TRANSACTIONS T JOIN MON$ATTACHMENTS A ON A.MON$ATTACHMENT_ID=T.MON$ATTACHMENT_ID '
+            'SELECT COUNT(*) AS "N" FROM MON$TRANSACTIONS T JOIN MON$ATTACHMENTS A ON A.MON$ATTACHMENT_ID=T.MON$ATTACHMENT_ID '
             "WHERE A.MON$REMOTE_VERSION='PgWire' AND A.MON$SYSTEM_FLAG=0;\nROLLBACK;\nQUIT;\n")
         require(re.findall(r'^N\s+(\d+)\s*$',output,re.M)==['0'], 'Parse/Bind started an application transaction')
         raw.exchange(execute('waiting')+packet(b'S'),b'DCZ',rows=[[encoded(2)]],tag='SELECT 1')
         checks.append('describe_bind_no_transaction_then_execute')
-        sql='SELECT B,B,B FROM BLOB_ROWS WHERE ID<=2 ORDER BY ID'
+        sql='SELECT "B","B","B" FROM "PUBLIC"."BLOB_ROWS" WHERE "ID"<=2 ORDER BY "ID"'
         raw.run(sql,results=[0,1,0],rows=[[encoded(i),payload(i),encoded(i)] for i in range(3)],tag='SELECT 3')
         checks.append('mixed_formats_null_empty_all_bytes')
-        raw.exchange(parse('paged','SELECT B FROM BLOB_ROWS WHERE ID BETWEEN $1 AND 3 ORDER BY ID')+
+        raw.exchange(parse('paged','SELECT "B" FROM "PUBLIC"."BLOB_ROWS" WHERE "ID" BETWEEN $1 AND 3 ORDER BY "ID"')+
                      bind('a','paged',['1'],results=[1])+bind('b','paged',['2'],results=[0])+
                      execute('a',1)+packet(b'H'),b'122Ds',end=b's',rows=[[b'']])
         raw.exchange(execute('b',1)+packet(b'H'),b'Ds',end=b's',rows=[[encoded(2)]])
@@ -238,37 +239,37 @@ def blobs_protocols(h):
         raw.exchange(close(b'P','c')+packet(b'S'),b'3Z')
         checks.append('independent_portals_resume_close_and_rebind_after_commit')
         # Two BLOB values, one scalar and a NULL: all share the 1 MiB budget.
-        sql=('SELECT A.B,42,B.B,CAST(NULL AS INTEGER) FROM BLOB_ROWS A CROSS JOIN BLOB_ROWS B '
-             'WHERE A.ID=12 AND B.ID=13')
+        sql=('SELECT A."B",42,"B"."B",CAST(NULL AS INTEGER) FROM "PUBLIC"."BLOB_ROWS" A CROSS JOIN "PUBLIC"."BLOB_ROWS" "B" '
+             'WHERE A."ID"=12 AND "B"."ID"=13')
         raw.run(sql,results=[0,0,1,0],rows=[[encoded(12),'42',payload(13),None]],tag='SELECT 1')
         raw.exchange(parse('',sql.replace(',42,',',420,'))+bind(results=[0,0,1,0])+describe(b'P')+execute()+packet(b'S'),
                      b'12TEZ',error='0A000')
         raw.run('SELECT 42',rows=[['42']])
         checks.append('aggregate_mixed_row_exact_and_one_byte_over')
         # Single text BLOB with a neighbouring scalar, exact frame and +1 byte.
-        text_sql='SELECT SUBSTRING(B FROM 1 FOR 524279),42 FROM BLOB_ROWS WHERE ID=9'
+        text_sql='SELECT SUBSTRING("B" FROM 1 FOR 524279),42 FROM "PUBLIC"."BLOB_ROWS" WHERE "ID"=9'
         raw.run(text_sql,rows=[['\\x'+payload(9)[:524279].hex(),'42']],tag='SELECT 1')
         raw.exchange(parse('',text_sql.replace(',42 ', ',420 '))+bind()+describe(b'P')+execute()+packet(b'S'),b'12TEZ',error='0A000')
         raw.run('SELECT 42',rows=[['42']])
         checks.append('text_row_exact_and_one_wire_byte_over')
         for results in ([0],[1]):
-            raw.exchange(parse('','SELECT B FROM BLOB_ROWS WHERE ID IN (2,11) ORDER BY ID')+
+            raw.exchange(parse('','SELECT "B" FROM "PUBLIC"."BLOB_ROWS" WHERE "ID" IN (2,11) ORDER BY "ID"')+
                          bind(results=results)+describe(b'P')+execute()+packet(b'S'),b'12TDEZ',error='0A000',
                          rows=[[payload(2) if results==[1] else encoded(2)]])
             raw.run('SELECT 42',rows=[['42']])
-        raw.exchange(packet(b'Q',b'SELECT B FROM BLOB_ROWS WHERE ID IN (2,11) ORDER BY ID\0'),b'TDEZ',error='0A000',rows=[[encoded(2)]])
+        raw.exchange(packet(b'Q',b'SELECT "B" FROM "PUBLIC"."BLOB_ROWS" WHERE "ID" IN (2,11) ORDER BY "ID"\x00'),b'TDEZ',error='0A000',rows=[[encoded(2)]])
         raw.run('SELECT 42',rows=[['42']])
         checks.append('later_row_failure_sends_no_partial_datarow_simple_and_extended')
-        for sql in ('SELECT BT FROM BLOB_ROWS','SELECT BX FROM BLOB_ROWS','SELECT CAST($1 AS BLOB SUB_TYPE TEXT)','SELECT 1::bytea'):
+        for sql in ('SELECT "BT" FROM "PUBLIC"."BLOB_ROWS"','SELECT "BX" FROM "PUBLIC"."BLOB_ROWS"','SELECT CAST($1 AS BLOB SUB_TYPE TEXT)','SELECT 1::bytea'):
             error='42601' if sql.endswith('::bytea') else '0A000'
-            raw.exchange(parse('bad',sql)+parse('discarded','INSERT INTO BLOB_COPY VALUES(900,NULL)')+
+            raw.exchange(parse('bad',sql)+parse('discarded','INSERT INTO "PUBLIC"."BLOB_COPY" VALUES(900,NULL)')+
                          bind('discarded','discarded')+execute('discarded')+packet(b'S'),b'EZ',error=error)
             raw.exchange(bind('missing','discarded')+packet(b'S'),b'EZ',error='26000')
-            raw.run('SELECT B FROM BLOB_ROWS WHERE ID=2',results=[1],rows=[[payload(2)]])
+            raw.run('SELECT "B" FROM "PUBLIC"."BLOB_ROWS" WHERE "ID"=2',results=[1],rows=[[payload(2)]])
         checks.append('unsupported_metadata_input_and_grammar_discard_until_sync')
     finally:
         raw.close()
-    output=h.isql('blobs_final_native','SET LIST ON;\nSELECT COUNT(*) AS N FROM BLOB_COPY;\n'
-        'SELECT OCTET_LENGTH(B) AS N FROM BLOB_ROWS WHERE ID IN (2,5) ORDER BY ID;\nROLLBACK;\nQUIT;\n')
+    output=h.isql('blobs_final_native','SET LIST ON;\nSELECT COUNT(*) AS "N" FROM "PUBLIC"."BLOB_COPY";\n'
+        'SELECT OCTET_LENGTH("B") AS "N" FROM "PUBLIC"."BLOB_ROWS" WHERE "ID" IN (2,5) ORDER BY "ID";\nROLLBACK;\nQUIT;\n')
     require(re.findall(r'^N\s+(\d+)\s*$',output,re.M)==['0','256','10000'],'BLOB errors left DML effects or altered native data')
     return {'checks':checks,'source_sha256':hashlib.sha256(Path(__file__).read_bytes()).hexdigest()}

@@ -22,7 +22,7 @@ from pgwire_startup_smoke import Client, StartupHarness, packet
 from wire_host_smoke import field, require, reserve_ports
 
 
-ANSWER = b'SELECT CAST(6 * 7 AS INTEGER) AS "answer" FROM RDB$DATABASE'
+ANSWER = b'SELECT CAST(6 * 7 AS INTEGER) AS "answer" FROM "SYSTEM"."RDB$DATABASE"'
 
 
 def psycopg2_child():
@@ -42,19 +42,19 @@ def psycopg2_child():
             require(cursor.fetchone() == (42,), "psycopg2 computed answer differs")
             require(cursor.description[0].name == "answer" and cursor.description[0].type_code == 23,
                     "psycopg2 alias/OID differs")
-            cursor.execute("SELECT CAST(7 * 7 AS INTEGER) FROM RDB$DATABASE")
+            cursor.execute("SELECT CAST(7 * 7 AS INTEGER) FROM \"SYSTEM\".\"RDB$DATABASE\"")
             require(cursor.fetchone() == (49,), "psycopg2 second expression differs")
             cursor.execute("SELECT CAST(-32768 AS SMALLINT), CAST('9223372036854775807' AS BIGINT), "
-                           "CAST(NULL AS INTEGER) FROM RDB$DATABASE")
+                           "CAST(NULL AS INTEGER) FROM \"SYSTEM\".\"RDB$DATABASE\"")
             require(cursor.fetchone() == (-32768, 9223372036854775807, None), "psycopg2 integer/NULL conversion differs")
             require([column.type_code for column in cursor.description] == [21, 20, 23], "psycopg2 type OIDs differ")
-            cursor.execute("SELECT ID, PAYLOAD FROM PGWIRE_ROWS ORDER BY ID")
+            cursor.execute('SELECT "ID", "PAYLOAD" FROM "PUBLIC"."PGWIRE_ROWS" ORDER BY "ID"')
             require(cursor.fetchall() == [(1, 31), (2, 47), (3, -9)], "psycopg2 table rows differ")
-            cursor.execute("SELECT ID FROM PGWIRE_ROWS WHERE ID < 0")
+            cursor.execute('SELECT "ID" FROM "PUBLIC"."PGWIRE_ROWS" WHERE "ID" < 0')
             require(cursor.fetchall() == [] and cursor.rowcount == 0, "psycopg2 empty result differs")
             for sql, expected in (("not SQL", "42601"), ("BEGIN READ ONLY", "42601"),
-                                  ("SELECT CAST($1 AS INTEGER) FROM RDB$DATABASE", "0A000"),
-                                  ("SELECT CAST('x' AS VARCHAR(1)) FROM RDB$DATABASE", "0A000")):
+                                  ("SELECT CAST($1 AS INTEGER) FROM \"SYSTEM\".\"RDB$DATABASE\"", "0A000"),
+                                  ("SELECT CAST('x' AS VARCHAR(1)) FROM \"SYSTEM\".\"RDB$DATABASE\"", "0A000")):
                 try:
                     cursor.execute(sql)
                 except psycopg2.Error as error:
@@ -87,73 +87,73 @@ class QueryHarness(StartupHarness):
     def prepare(self):
         super().prepare()
         self.isql("query_fixtures", f"""CONNECT '{self.database}';
-CREATE TABLE PGWIRE_ROWS (ID INTEGER NOT NULL PRIMARY KEY, PAYLOAD INTEGER);
-INSERT INTO PGWIRE_ROWS VALUES (1, 31);
-INSERT INTO PGWIRE_ROWS VALUES (2, 47);
-INSERT INTO PGWIRE_ROWS VALUES (3, -9);
-CREATE TABLE PGWIRE_EFFECTS (ID INTEGER NOT NULL PRIMARY KEY);
-CREATE TABLE PGWIRE_MANY (ID INTEGER NOT NULL PRIMARY KEY);
-CREATE SEQUENCE PGWIRE_GUARD;
-CREATE SEQUENCE PGWIRE_STREAM_GUARD;
-CREATE SEQUENCE PGWIRE_LONG_GUARD;
-GRANT SELECT, INSERT, UPDATE, DELETE ON PGWIRE_ROWS TO USER WIRE_HOST_TEST;
-GRANT SELECT, INSERT, UPDATE, DELETE ON PGWIRE_EFFECTS TO USER WIRE_HOST_TEST;
-GRANT SELECT ON PGWIRE_MANY TO USER WIRE_HOST_TEST;
-GRANT USAGE ON SEQUENCE PGWIRE_GUARD TO USER WIRE_HOST_TEST;
-GRANT USAGE ON SEQUENCE PGWIRE_STREAM_GUARD TO USER WIRE_HOST_TEST;
-GRANT USAGE ON SEQUENCE PGWIRE_LONG_GUARD TO USER WIRE_HOST_TEST;
+CREATE TABLE "PUBLIC"."PGWIRE_ROWS" ("ID" INTEGER NOT NULL PRIMARY KEY, "PAYLOAD" INTEGER);
+INSERT INTO "PUBLIC"."PGWIRE_ROWS" VALUES (1, 31);
+INSERT INTO "PUBLIC"."PGWIRE_ROWS" VALUES (2, 47);
+INSERT INTO "PUBLIC"."PGWIRE_ROWS" VALUES (3, -9);
+CREATE TABLE "PUBLIC"."PGWIRE_EFFECTS" ("ID" INTEGER NOT NULL PRIMARY KEY);
+CREATE TABLE "PUBLIC"."PGWIRE_MANY" ("ID" INTEGER NOT NULL PRIMARY KEY);
+CREATE SEQUENCE "PUBLIC"."PGWIRE_GUARD";
+CREATE SEQUENCE "PUBLIC"."PGWIRE_STREAM_GUARD";
+CREATE SEQUENCE "PUBLIC"."PGWIRE_LONG_GUARD";
+GRANT SELECT, INSERT, UPDATE, DELETE ON "PUBLIC"."PGWIRE_ROWS" TO USER WIRE_HOST_TEST;
+GRANT SELECT, INSERT, UPDATE, DELETE ON "PUBLIC"."PGWIRE_EFFECTS" TO USER WIRE_HOST_TEST;
+GRANT SELECT ON "PUBLIC"."PGWIRE_MANY" TO USER WIRE_HOST_TEST;
+GRANT USAGE ON SEQUENCE "PUBLIC"."PGWIRE_GUARD" TO USER WIRE_HOST_TEST;
+GRANT USAGE ON SEQUENCE "PUBLIC"."PGWIRE_STREAM_GUARD" TO USER WIRE_HOST_TEST;
+GRANT USAGE ON SEQUENCE "PUBLIC"."PGWIRE_LONG_GUARD" TO USER WIRE_HOST_TEST;
 SET TERM ^ ;
-CREATE PROCEDURE PGWIRE_EFFECT (P_ID INTEGER) RETURNS (V INTEGER) AS
+CREATE PROCEDURE "PUBLIC"."PGWIRE_EFFECT" ("P_ID" INTEGER) RETURNS ("V" INTEGER) AS
 BEGIN
-  INSERT INTO PGWIRE_EFFECTS VALUES (:P_ID);
-  V = P_ID;
+  INSERT INTO "PUBLIC"."PGWIRE_EFFECTS" VALUES (:"P_ID");
+  "V" = "P_ID";
   SUSPEND;
 END^
-CREATE PROCEDURE PGWIRE_FETCH_ERROR (P_ID INTEGER) RETURNS (V INTEGER) AS
+CREATE PROCEDURE "PUBLIC"."PGWIRE_FETCH_ERROR" ("P_ID" INTEGER) RETURNS ("V" INTEGER) AS
 BEGIN
-  INSERT INTO PGWIRE_EFFECTS VALUES (:P_ID);
-  V = 1;
+  INSERT INTO "PUBLIC"."PGWIRE_EFFECTS" VALUES (:"P_ID");
+  "V" = 1;
   SUSPEND;
-  V = 0;
+  "V" = 0;
   SUSPEND;
 END^
-CREATE PROCEDURE PGWIRE_STREAM (P_ID INTEGER) RETURNS (V INTEGER) AS
+CREATE PROCEDURE "PUBLIC"."PGWIRE_STREAM" ("P_ID" INTEGER) RETURNS ("V" INTEGER) AS
 BEGIN
-  INSERT INTO PGWIRE_EFFECTS VALUES (:P_ID);
-  V = GEN_ID(PGWIRE_STREAM_GUARD, 1);
+  INSERT INTO "PUBLIC"."PGWIRE_EFFECTS" VALUES (:"P_ID");
+  "V" = GEN_ID("PUBLIC"."PGWIRE_STREAM_GUARD", 1);
   SUSPEND;
-  FOR SELECT A.ID FROM PGWIRE_MANY A CROSS JOIN PGWIRE_MANY B CROSS JOIN PGWIRE_MANY C INTO :V DO
+  FOR SELECT "A"."ID" FROM "PUBLIC"."PGWIRE_MANY" "A" CROSS JOIN "PUBLIC"."PGWIRE_MANY" "B" CROSS JOIN "PUBLIC"."PGWIRE_MANY" "C" INTO :"V" DO
     SUSPEND;
 END^
-CREATE PROCEDURE PGWIRE_LONG (P_ID INTEGER) RETURNS (V BIGINT) AS
+CREATE PROCEDURE "PUBLIC"."PGWIRE_LONG" ("P_ID" INTEGER) RETURNS ("V" BIGINT) AS
 BEGIN
-  INSERT INTO PGWIRE_EFFECTS VALUES (:P_ID);
-  V = GEN_ID(PGWIRE_LONG_GUARD, 1);
-  SELECT COUNT(*) FROM PGWIRE_MANY A CROSS JOIN PGWIRE_MANY B CROSS JOIN PGWIRE_MANY C
-    CROSS JOIN PGWIRE_MANY D CROSS JOIN PGWIRE_MANY E INTO :V;
+  INSERT INTO "PUBLIC"."PGWIRE_EFFECTS" VALUES (:"P_ID");
+  "V" = GEN_ID("PUBLIC"."PGWIRE_LONG_GUARD", 1);
+  SELECT COUNT(*) FROM "PUBLIC"."PGWIRE_MANY" "A" CROSS JOIN "PUBLIC"."PGWIRE_MANY" "B" CROSS JOIN "PUBLIC"."PGWIRE_MANY" "C"
+    CROSS JOIN "PUBLIC"."PGWIRE_MANY" "D" CROSS JOIN "PUBLIC"."PGWIRE_MANY" E INTO :"V";
   SUSPEND;
 END^
-EXECUTE BLOCK AS DECLARE VARIABLE I INTEGER = 0;
+EXECUTE BLOCK AS DECLARE VARIABLE "I" INTEGER = 0;
 BEGIN
-  WHILE (I < 257) DO
+  WHILE ("I" < 257) DO
   BEGIN
-    INSERT INTO PGWIRE_MANY VALUES (:I);
-    I = I + 1;
+    INSERT INTO "PUBLIC"."PGWIRE_MANY" VALUES (:"I");
+    "I" = "I" + 1;
   END
 END^
 SET TERM ; ^
-GRANT EXECUTE ON PROCEDURE PGWIRE_EFFECT TO USER WIRE_HOST_TEST;
-GRANT EXECUTE ON PROCEDURE PGWIRE_FETCH_ERROR TO USER WIRE_HOST_TEST;
-GRANT EXECUTE ON PROCEDURE PGWIRE_STREAM TO USER WIRE_HOST_TEST;
-GRANT EXECUTE ON PROCEDURE PGWIRE_LONG TO USER WIRE_HOST_TEST;
-GRANT INSERT ON PGWIRE_EFFECTS TO PROCEDURE PGWIRE_EFFECT;
-GRANT INSERT ON PGWIRE_EFFECTS TO PROCEDURE PGWIRE_FETCH_ERROR;
-GRANT INSERT ON PGWIRE_EFFECTS TO PROCEDURE PGWIRE_STREAM;
-GRANT INSERT ON PGWIRE_EFFECTS TO PROCEDURE PGWIRE_LONG;
-GRANT SELECT ON PGWIRE_MANY TO PROCEDURE PGWIRE_STREAM;
-GRANT SELECT ON PGWIRE_MANY TO PROCEDURE PGWIRE_LONG;
-GRANT USAGE ON SEQUENCE PGWIRE_STREAM_GUARD TO PROCEDURE PGWIRE_STREAM;
-GRANT USAGE ON SEQUENCE PGWIRE_LONG_GUARD TO PROCEDURE PGWIRE_LONG;
+GRANT EXECUTE ON PROCEDURE "PUBLIC"."PGWIRE_EFFECT" TO USER WIRE_HOST_TEST;
+GRANT EXECUTE ON PROCEDURE "PUBLIC"."PGWIRE_FETCH_ERROR" TO USER WIRE_HOST_TEST;
+GRANT EXECUTE ON PROCEDURE "PUBLIC"."PGWIRE_STREAM" TO USER WIRE_HOST_TEST;
+GRANT EXECUTE ON PROCEDURE "PUBLIC"."PGWIRE_LONG" TO USER WIRE_HOST_TEST;
+GRANT INSERT ON "PUBLIC"."PGWIRE_EFFECTS" TO PROCEDURE "PUBLIC"."PGWIRE_EFFECT";
+GRANT INSERT ON "PUBLIC"."PGWIRE_EFFECTS" TO PROCEDURE "PUBLIC"."PGWIRE_FETCH_ERROR";
+GRANT INSERT ON "PUBLIC"."PGWIRE_EFFECTS" TO PROCEDURE "PUBLIC"."PGWIRE_STREAM";
+GRANT INSERT ON "PUBLIC"."PGWIRE_EFFECTS" TO PROCEDURE "PUBLIC"."PGWIRE_LONG";
+GRANT SELECT ON "PUBLIC"."PGWIRE_MANY" TO PROCEDURE "PUBLIC"."PGWIRE_STREAM";
+GRANT SELECT ON "PUBLIC"."PGWIRE_MANY" TO PROCEDURE "PUBLIC"."PGWIRE_LONG";
+GRANT USAGE ON SEQUENCE "PUBLIC"."PGWIRE_STREAM_GUARD" TO PROCEDURE "PUBLIC"."PGWIRE_STREAM";
+GRANT USAGE ON SEQUENCE "PUBLIC"."PGWIRE_LONG_GUARD" TO PROCEDURE "PUBLIC"."PGWIRE_LONG";
 COMMIT;
 QUIT;
 """, embedded=True)
@@ -202,13 +202,7 @@ QUIT;
         self.summary["psycopg2"] = json.loads(result.stdout)
 
     def no_transactions(self):
-        output = self.isql("idle_query_transactions", """SET LIST ON;
-SELECT COUNT(*) AS PG_TRANSACTIONS FROM MON$TRANSACTIONS T
-JOIN MON$ATTACHMENTS A ON A.MON$ATTACHMENT_ID = T.MON$ATTACHMENT_ID
-WHERE A.MON$REMOTE_VERSION = 'PgWire' AND A.MON$SYSTEM_FLAG = 0;
-ROLLBACK;
-QUIT;
-""")
+        output = self.isql("idle_query_transactions", 'SET LIST ON;\nSELECT COUNT(*) AS PG_TRANSACTIONS FROM MON$TRANSACTIONS "T"\nJOIN MON$ATTACHMENTS "A" ON "A".MON$ATTACHMENT_ID = "T".MON$ATTACHMENT_ID\nWHERE "A".MON$REMOTE_VERSION = \'PgWire\' AND "A".MON$SYSTEM_FLAG = 0;\nROLLBACK;\nQUIT;\n')
         require(field(output, "PG_TRANSACTIONS") == "0", "session retained an implicit transaction")
 
     def scalar_native(self, sql, label="native_observer"):
@@ -230,27 +224,27 @@ QUIT;
         client = Client(self).login()
         client.query_integer()
         identity = (b'SELECT CAST(CASE WHEN CURRENT_USER = \'WIRE_HOST_TEST\' THEN 1 ELSE 0 END AS INTEGER) '
-                    b'AS "answer" FROM RDB$DATABASE')
+                    b'AS "answer" FROM "SYSTEM"."RDB$DATABASE"')
         client.query_integer(identity, 1)
         result = self.select(client,
             "SELECT CAST(-32768 AS SMALLINT) AS \"small\", CAST('-2147483648' AS INTEGER) AS \"integer\", "
-            "CAST('-9223372036854775808' AS BIGINT) AS \"big\", CAST(NULL AS INTEGER) AS \"nil\" FROM RDB$DATABASE",
+            "CAST('-9223372036854775808' AS BIGINT) AS \"big\", CAST(NULL AS INTEGER) AS \"nil\" FROM \"SYSTEM\".\"RDB$DATABASE\"",
             [(-32768, -2147483648, -9223372036854775808, None)], [21, 23, 20, 23])
         require([column["name"] for column in result["columns"]] == ["small", "integer", "big", "nil"],
                 "quoted aliases changed")
         require([column["size"] for column in result["columns"]] == [2, 4, 8, 4], "integer sizes differ")
         require(all(column["format"] == 0 and column["table"] == 0 and column["attribute"] == 0
                     and column["modifier"] == -1 for column in result["columns"]), "integer metadata differs")
-        result = self.select(client, 'SELECT CAST(49 AS INTEGER) AS "число" FROM RDB$DATABASE', [(49,)], [23])
+        result = self.select(client, 'SELECT CAST(49 AS INTEGER) AS "число" FROM "SYSTEM"."RDB$DATABASE"', [(49,)], [23])
         require(result["columns"][0]["name"] == "число", "UTF8 alias changed")
         self.select(client, "/* BEGIN $1 ; */ SELECT CAST(CASE WHEN 'BEGIN;$1' = 'BEGIN;$1' "
-                    "THEN 42 ELSE 0 END AS INTEGER) FROM RDB$DATABASE -- ; BEGIN\n", [(42,)], [23])
-        self.select(client, "SELECT ID, PAYLOAD FROM PGWIRE_ROWS ORDER BY ID", [(1, 31), (2, 47), (3, -9)], [23, 23])
-        self.select(client, "SELECT ID FROM PGWIRE_ROWS WHERE ID < 0", [], [23])
-        self.select(client, "SELECT ID FROM PGWIRE_MANY ORDER BY ID", [(number,) for number in range(257)], [23])
-        self.isql("native_change_visible_to_pg", "UPDATE PGWIRE_ROWS SET PAYLOAD = 99 WHERE ID = 1;\nCOMMIT;\nQUIT;\n")
-        self.select(client, "SELECT PAYLOAD FROM PGWIRE_ROWS WHERE ID = 1", [(99,)], [23])
-        self.isql("native_restore_fixture", "UPDATE PGWIRE_ROWS SET PAYLOAD = 31 WHERE ID = 1;\nCOMMIT;\nQUIT;\n")
+                    "THEN 42 ELSE 0 END AS INTEGER) FROM \"SYSTEM\".\"RDB$DATABASE\" -- ; BEGIN\n", [(42,)], [23])
+        self.select(client, 'SELECT "ID", "PAYLOAD" FROM "PUBLIC"."PGWIRE_ROWS" ORDER BY "ID"', [(1, 31), (2, 47), (3, -9)], [23, 23])
+        self.select(client, 'SELECT "ID" FROM "PUBLIC"."PGWIRE_ROWS" WHERE "ID" < 0', [], [23])
+        self.select(client, 'SELECT "ID" FROM "PUBLIC"."PGWIRE_MANY" ORDER BY "ID"', [(number,) for number in range(257)], [23])
+        self.isql("native_change_visible_to_pg", 'UPDATE "PUBLIC"."PGWIRE_ROWS" SET "PAYLOAD" = 99 WHERE "ID" = 1;\nCOMMIT;\nQUIT;\n')
+        self.select(client, 'SELECT "PAYLOAD" FROM "PUBLIC"."PGWIRE_ROWS" WHERE "ID" = 1', [(99,)], [23])
+        self.isql("native_restore_fixture", 'UPDATE "PUBLIC"."PGWIRE_ROWS" SET "PAYLOAD" = 31 WHERE "ID" = 1;\nCOMMIT;\nQUIT;\n')
         # Fragmentation and two complete Query messages in one write exercise
         # message boundaries without changing the SQL delivered to the parser.
         result = client.query(ANSWER, fragmented=True)
@@ -263,10 +257,10 @@ QUIT;
 
     def second_identity_permissions(self):
         client = Client(self).login(user=b"WIRE_PG_OTHER", password=self.other_password)
-        client.query_error(b"SELECT ID FROM PGWIRE_ROWS", "42501")
+        client.query_error(b'SELECT "ID" FROM "PUBLIC"."PGWIRE_ROWS"', "42501")
         self.no_transactions()
         identity = (b'SELECT CAST(CASE WHEN CURRENT_USER = \'WIRE_PG_OTHER\' THEN 1 ELSE 0 END AS INTEGER) '
-                    b'AS "answer" FROM RDB$DATABASE')
+                    b'AS "answer" FROM "SYSTEM"."RDB$DATABASE"')
         client.query_integer(identity, 1)
         self.no_transactions()
         client.close()
@@ -275,36 +269,35 @@ QUIT;
     def errors_and_guards(self):
         client = Client(self).login()
         for sql, state in (("not SQL", "42601"), ("BEGIN READ ONLY", "42601"),
-                           ("SELECT CAST($1 AS INTEGER) FROM RDB$DATABASE", "0A000"),
-                           ("SELECT ID FROM PGWIRE_MISSING", "42P01"),
-                           ("SELECT CAST(? AS INTEGER) FROM RDB$DATABASE", "0A000"),
-                           ("SELECT CAST(1.25 AS NUMERIC(9,2)) FROM RDB$DATABASE", "0A000"),
-                           ("SELECT CAST(1 AS NUMERIC(9,0)) FROM RDB$DATABASE", "0A000"),
-                           ("SELECT CAST('x' AS VARCHAR(1)) FROM RDB$DATABASE", "0A000")):
+                           ("SELECT CAST($1 AS INTEGER) FROM \"SYSTEM\".\"RDB$DATABASE\"", "0A000"),
+                           ('SELECT "ID" FROM "PUBLIC"."PGWIRE_MISSING"', "42P01"),
+                           ("SELECT CAST(? AS INTEGER) FROM \"SYSTEM\".\"RDB$DATABASE\"", "0A000"),
+                           ("SELECT CAST(1.25 AS NUMERIC(9,2)) FROM \"SYSTEM\".\"RDB$DATABASE\"", "0A000"),
+                           ("SELECT CAST(1 AS NUMERIC(9,0)) FROM \"SYSTEM\".\"RDB$DATABASE\"", "0A000"),
+                           ("SELECT CAST('x' AS VARCHAR(1)) FROM \"SYSTEM\".\"RDB$DATABASE\"", "0A000")):
             client.query_error(sql.encode(), state)
             self.no_transactions()
             client.query_integer()
         guarded = [
-            "INSERT INTO PGWIRE_ROWS VALUES (901, 17) RETURNING GEN_ID(PGWIRE_GUARD, 1)",
-            "INSERT INTO PGWIRE_ROWS SELECT 902, 18 FROM RDB$DATABASE RETURNING GEN_ID(PGWIRE_GUARD, 1)",
-            "UPDATE PGWIRE_ROWS SET PAYLOAD = 888 WHERE ID = 1 RETURNING GEN_ID(PGWIRE_GUARD, 1)",
-            "EXECUTE BLOCK RETURNS (ANSWER INTEGER) AS BEGIN "
-            "ANSWER = GEN_ID(PGWIRE_GUARD, 1); INSERT INTO PGWIRE_EFFECTS VALUES (701); SUSPEND; END",
-            "INSERT INTO PGWIRE_EFFECTS VALUES (702)",
-            "SELECT CAST(V AS VARCHAR(20)) FROM PGWIRE_STREAM(703)",
+            'INSERT INTO "PUBLIC"."PGWIRE_ROWS" VALUES (901, 17) RETURNING GEN_ID("PUBLIC"."PGWIRE_GUARD", 1)',
+            'INSERT INTO "PUBLIC"."PGWIRE_ROWS" SELECT 902, 18 FROM "SYSTEM"."RDB$DATABASE" RETURNING GEN_ID("PUBLIC"."PGWIRE_GUARD", 1)',
+            'UPDATE "PUBLIC"."PGWIRE_ROWS" SET "PAYLOAD" = 888 WHERE "ID" = 1 RETURNING GEN_ID("PUBLIC"."PGWIRE_GUARD", 1)',
+            'EXECUTE BLOCK RETURNS ("ANSWER" INTEGER) AS BEGIN "ANSWER" = GEN_ID("PUBLIC"."PGWIRE_GUARD", 1); INSERT INTO "PUBLIC"."PGWIRE_EFFECTS" VALUES (701); SUSPEND; END',
+            'INSERT INTO "PUBLIC"."PGWIRE_EFFECTS" VALUES (702)',
+            'SELECT CAST("V" AS VARCHAR(20)) FROM "PUBLIC"."PGWIRE_STREAM"(703)',
         ]
         for sql in guarded:
             result = client.query_error(sql.encode(), "0A000")
             require(result["columns"] is None and not result["rows"], "capability refusal started producing results")
-            require(self.scalar_native("SELECT GEN_ID(PGWIRE_GUARD, 0) AS OBSERVED FROM RDB$DATABASE") == 0,
+            require(self.scalar_native('SELECT GEN_ID("PUBLIC"."PGWIRE_GUARD", 0) AS OBSERVED FROM "SYSTEM"."RDB$DATABASE"') == 0,
                     "rejected statement advanced a nontransactional sequence")
-            require(self.scalar_native("SELECT GEN_ID(PGWIRE_STREAM_GUARD, 0) AS OBSERVED FROM RDB$DATABASE") == 0,
+            require(self.scalar_native('SELECT GEN_ID("PUBLIC"."PGWIRE_STREAM_GUARD", 0) AS OBSERVED FROM "SYSTEM"."RDB$DATABASE"') == 0,
                     "unsupported result type executed the selectable procedure")
-            require(self.scalar_native("SELECT COUNT(*) AS OBSERVED FROM PGWIRE_ROWS WHERE ID IN (901, 902)") == 0,
+            require(self.scalar_native('SELECT COUNT(*) AS OBSERVED FROM "PUBLIC"."PGWIRE_ROWS" WHERE "ID" IN (901, 902)') == 0,
                     "rejected DML changed a row")
-            require(self.scalar_native("SELECT PAYLOAD AS OBSERVED FROM PGWIRE_ROWS WHERE ID = 1") == 31,
+            require(self.scalar_native('SELECT "PAYLOAD" AS OBSERVED FROM "PUBLIC"."PGWIRE_ROWS" WHERE "ID" = 1') == 31,
                     "rejected UPDATE changed a row")
-            require(self.scalar_native("SELECT COUNT(*) AS OBSERVED FROM PGWIRE_EFFECTS") == 0,
+            require(self.scalar_native('SELECT COUNT(*) AS OBSERVED FROM "PUBLIC"."PGWIRE_EFFECTS"') == 0,
                     "rejected statement executed side effects")
             self.no_transactions()
             client.query_integer()
@@ -313,13 +306,13 @@ QUIT;
 
     def implicit_transactions(self):
         client = Client(self).login()
-        self.select(client, "SELECT V FROM PGWIRE_EFFECT(801)", [(801,)], [23])
-        require(self.scalar_native("SELECT COUNT(*) AS OBSERVED FROM PGWIRE_EFFECTS WHERE ID = 801") == 1,
+        self.select(client, 'SELECT "V" FROM "PUBLIC"."PGWIRE_EFFECT"(801)', [(801,)], [23])
+        require(self.scalar_native('SELECT COUNT(*) AS OBSERVED FROM "PUBLIC"."PGWIRE_EFFECTS" WHERE "ID" = 801') == 1,
                 "successful implicit SELECT did not commit procedure changes")
-        failed = client.query_error(b"SELECT CAST(1 / V AS INTEGER) FROM PGWIRE_FETCH_ERROR(802)", "22012")
+        failed = client.query_error(b'SELECT CAST(1 / "V" AS INTEGER) FROM "PUBLIC"."PGWIRE_FETCH_ERROR"(802)', "22012")
         require(failed["rows"] == [["1"]], "fetch error did not occur after the first successful DataRow")
         require(failed["command"] is None, "fetch failure emitted a successful CommandComplete")
-        require(self.scalar_native("SELECT COUNT(*) AS OBSERVED FROM PGWIRE_EFFECTS WHERE ID = 802") == 0,
+        require(self.scalar_native('SELECT COUNT(*) AS OBSERVED FROM "PUBLIC"."PGWIRE_EFFECTS" WHERE "ID" = 802') == 0,
                 "failed implicit SELECT did not roll back procedure changes")
         self.no_transactions()
         client.query_integer()
@@ -328,15 +321,15 @@ QUIT;
 
     def disconnects(self):
         client = Client(self).login()
-        client.send(packet(b"Q", b"SELECT V FROM PGWIRE_STREAM(803)\0"))
+        client.send(packet(b"Q", b'SELECT "V" FROM "PUBLIC"."PGWIRE_STREAM"(803)\x00'))
         require(client.message()[0] == b"T", "streaming SELECT did not start with metadata")
         require(client.message()[0] == b"D", "streaming procedure did not produce its first row")
         client.close(terminate=False)
         self.no_attachments()
         self.no_transactions()
-        require(self.scalar_native("SELECT GEN_ID(PGWIRE_STREAM_GUARD, 0) AS OBSERVED FROM RDB$DATABASE") == 1,
+        require(self.scalar_native('SELECT GEN_ID("PUBLIC"."PGWIRE_STREAM_GUARD", 0) AS OBSERVED FROM "SYSTEM"."RDB$DATABASE"') == 1,
                 "streaming procedure was not executed before disconnect")
-        require(self.scalar_native("SELECT COUNT(*) AS OBSERVED FROM PGWIRE_EFFECTS WHERE ID = 803") == 0,
+        require(self.scalar_native('SELECT COUNT(*) AS OBSERVED FROM "PUBLIC"."PGWIRE_EFFECTS" WHERE "ID" = 803') == 0,
                 "disconnect did not roll back the streaming procedure's changes")
         healthy = Client(self).login()
         healthy.query_integer()
@@ -377,13 +370,11 @@ QUIT;
 
     def shutdown_active_query(self):
         client = Client(self).login()
-        client.send(packet(b"Q", b"SELECT V FROM PGWIRE_LONG(804)\0"))
+        client.send(packet(b"Q", b'SELECT "V" FROM "PUBLIC"."PGWIRE_LONG"(804)\x00'))
         deadline = time.monotonic() + 5
         while True:
-            active = self.scalar_native("""SELECT COUNT(*) AS OBSERVED FROM MON$STATEMENTS S
-JOIN MON$ATTACHMENTS A ON A.MON$ATTACHMENT_ID = S.MON$ATTACHMENT_ID
-WHERE A.MON$REMOTE_VERSION = 'PgWire' AND S.MON$STATE = 1""", "active_engine_query")
-            entered = self.scalar_native("SELECT GEN_ID(PGWIRE_LONG_GUARD, 0) AS OBSERVED FROM RDB$DATABASE",
+            active = self.scalar_native('SELECT COUNT(*) AS OBSERVED FROM MON$STATEMENTS "S"\nJOIN MON$ATTACHMENTS "A" ON "A".MON$ATTACHMENT_ID = "S".MON$ATTACHMENT_ID\nWHERE "A".MON$REMOTE_VERSION = \'PgWire\' AND "S".MON$STATE = 1', "active_engine_query")
+            entered = self.scalar_native('SELECT GEN_ID("PUBLIC"."PGWIRE_LONG_GUARD", 0) AS OBSERVED FROM "SYSTEM"."RDB$DATABASE"',
                                          "long_procedure_entered")
             if active and entered == 1:
                 break
@@ -396,12 +387,7 @@ WHERE A.MON$REMOTE_VERSION = 'PgWire' AND S.MON$STATE = 1""", "active_engine_que
                 pass
         except ConnectionResetError:
             pass
-        output = self.isql("shutdown_rolls_back_query", f"""CONNECT '{self.database}';
-SET LIST ON;
-SELECT COUNT(*) AS OBSERVED FROM PGWIRE_EFFECTS WHERE ID = 804;
-ROLLBACK;
-QUIT;
-""", embedded=True)
+        output = self.isql("shutdown_rolls_back_query", f"CONNECT '{self.database}';\nSET LIST ON;\nSELECT COUNT(*) AS OBSERVED FROM \"PUBLIC\".\"PGWIRE_EFFECTS\" WHERE \"ID\" = 804;\nROLLBACK;\nQUIT;\n", embedded=True)
         require(field(output, "OBSERVED") == "0", "server shutdown committed an unfinished SELECT")
 
     def run_queries(self):

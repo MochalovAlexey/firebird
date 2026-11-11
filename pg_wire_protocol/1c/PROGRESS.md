@@ -1,8 +1,8 @@
 # Путь до запуска 1С и теста Гилёва
 
-Срез на 11 ноября 2026 года: ревизия `a3e3c80123`, APP-10/11 прошли review
-и независимую приёмку. APP-12 реализован поверх неё и оставлен на review;
-целевые native/libpq проверки прошли, без git add/commit.
+Срез на 11 ноября 2026 года: ревизия `13f64d0e00`, APP-10/11/12 прошли review
+и независимую приёмку. APP-13 реализован в рабочем diff и оставлен на review: PG4 lowercase identifiers,
+сохранённый native-safe SQL, lowercase bootstrap, initial/RESET search path.
 Этот файл показывает готовность прикладного сценария; конкретные незавершённые
 работы и ограничения ведутся в [BACKLOG](../BACKLOG.md), доказательства — в
 [VALIDATION](../VALIDATION.md). Обновлять после следующих прикладных этапов.
@@ -23,7 +23,8 @@
 | Binary data | Native BLOB output как bytea; text/binary input через OCTETS и native MOVE | Вход ≤65533 bytes на значение; выход ограничен общим DataRow budget. Это не SQL bytea type/index semantics |
 | Native namespace identity | APP-10 принят: устанавливаемый PGWIRE_COMPAT registry, стабильные IDs, native/libpq, права/concurrency/restart | Native DDL под user savepoint запрещён; PG names/types/visibility и selected04 ещё не реализованы |
 | Публичные namespace IDs | APP-11 принят: PG_CATALOG.PG_NAMESPACE над APP-10, atomic installer, точные имена/IDs, read-only, text/binary/native/libpq и transaction visibility PASS | BIGINT/VARCHAR, wire20/1043, uppercase labels; нет PG oid/name/regnamespace, nspowner/nspacl, visibility/temp namespace |
-| Постоянные relations | APP-12 на review: PG_CLASS из RDB$RELATIONS + PG_NAMESPACE, native ID+1, атомарная установка, 228 libpq results и native oracle/права/lifecycle PASS | Только schema-level persistent tables/views, native wire20/1043/20/1043. Reuse ID допустим, restore не проверен; полный catalog/visibility/temp и selected04/10/11 открыты |
+| Постоянные relations | APP-12 принят: PG_CLASS из RDB$RELATIONS + PG_NAMESPACE, native ID+1, атомарная установка, 228 libpq results и native oracle/права/lifecycle PASS | Только schema-level persistent tables/views, native wire20/1043/20/1043. Reuse ID допустим, restore не проверен; полный catalog/visibility/temp и selected04/10/11 открыты |
+| Имена PG4 / APP-13 | ASCII lowercase unquoted, точные quoted names, native-safe source, lowercase bootstrap и public-first path | Native1/2/3 прежние; полный PG path/USAGE/regnamespace/visibility/temp ещё не реализован |
 | Прикладные формы | Чтение конфигурации selected06 и запись selected23 неизменённым SQL; форма 92 parameters, включая 68 BLOB | Синтетические таблицы/данные; реальная схема, конфигурация и исходный Bind 1С не приняты |
 
 ## Где находимся относительно конечной цели
@@ -67,9 +68,11 @@
 1. **Каталоги для открытия базы (APP-01).** [APP-10: namespace registry](NAMESPACE_REGISTRY_TASK.md)
    принят: SQL-only основа устойчивых native IDs.
    [APP-11: публичный namespace view](NAMESPACE_CATALOG_TASK.md) принят с native
-   именами и BIGINT/VARCHAR metadata. [APP-12](CLASS_CATALOG_TASK.md) реализован
-   и оставлен на review: pg_class для постоянных таблиц/views через native IDs, без нового registry.
-   Далее согласовать PG/native имена, regnamespace/oid/name, search-path visibility и temp namespace,
+   именами и BIGINT/VARCHAR metadata. [APP-12](CLASS_CATALOG_TASK.md) принят:
+   pg_class для постоянных таблиц/views через native IDs, без нового registry.
+   Реализованный для review [APP-13](PG_IDENTIFIER_NAMES_TASK.md) реализует выбранные
+   пользователем PG-правила имён вместе с source/bootstrap/session integration.
+   Затем нужны regnamespace/oid/name, search-path visibility и temp namespace,
    чтобы выполнить selected04 с реальными объектами. Для selected05 отдельно
    определить честный current_database/collation contract; имя native collation
    нельзя просто выдать за PostgreSQL LC_COLLATE.

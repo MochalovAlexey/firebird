@@ -105,13 +105,14 @@ public:
 			}
 			if (stopping())
 				return;
+			QueryExecutor executor(owned.attachment);
+			executor.initializeSearchPath();
 			protocol.authenticationOk();
 			protocol.parameterStatus("server_version", "16.0 (Firebird pgwire prototype)");
 			protocol.parameterStatus("server_encoding", "UTF8");
 			protocol.parameterStatus("client_encoding", "UTF8");
 			protocol.parameterStatus("DateStyle", "ISO, MDY");
 			protocol.parameterStatus("integer_datetimes", "on");
-			QueryExecutor executor(owned.attachment);
 			executor.reportStrings(protocol);
 			protocol.parameterStatus("application_name", startup.applicationName);
 			protocol.ready('I');

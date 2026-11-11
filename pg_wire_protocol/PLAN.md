@@ -1,8 +1,26 @@
 # План реализации wire-плагинов и PgWire
 
+## APP-13 — реализация на review, 11.11.2026
+
+На базе `13f64d0e00` подготовлен единый diff: normalization identifiers → canonical
+native SQL source → отдельный lowercase bootstrap → initial/RESET path → libpq/native
+DDL/DML, source reprepare и регрессии. Git staging/commit выполняет пользователь.
+[Контракт](1c/README.md#app-13-имена-и-установка-lowercase-профиля),
+[приёмка](VALIDATION.md#app-13-11-ноября-2026-правила-имён-pg4).
+
+Следующие крупные этапы формировать вокруг законченного прикладного сценария.
+Regnamespace/oid/name, visibility/temp и полный search_path требуют отдельного
+решения; APP-01/03/04/06 и selected04/10/11 этим этапом не закрываются.
+
 Единый список незавершённых работ — [BACKLOG.md](BACKLOG.md). Перед каждым этапом
 сверять его с текущим кодом; в задании указывать затрагиваемые ID, после review
 обновлять статус и evidence. Частичная реализация не закрывает оставшиеся части.
+
+С 11 ноября 2026 по просьбе пользователя объём одной инструкции увеличивается:
+объединять связанные engine/plugin/SQL изменения вокруг законченного сценария,
+с внутренними проверяемыми частями и одним итоговым review. Не выделять каждый
+view/helper в самостоятельный этап и не выполнять весь roadmap сразу.
+Коммиты по-прежнему создаёт пользователь после проверки.
 
 База — `master` Firebird 6, ветка `pg_wire_protocol`: [BASELINE.md](BASELINE.md). Обязательные границы задают [ARCHITECTURE.md](ARCHITECTURE.md) и [CODEX_CONTEXT.md](CODEX_CONTEXT.md); возможности и проверки — [COMPATIBILITY.md](COMPATIBILITY.md), [TEST_PLAN.md](TEST_PLAN.md).
 
@@ -28,7 +46,9 @@
 
 Реализован [APP-11: публичный pg_namespace](1c/NAMESPACE_CATALOG_TASK.md): SQL-only read-only view над APP-10, отдельный atomic installer. Ревизия `a3e3c80123` прошла review без замечаний и независимую native/libpq приёмку: установка/rollback/collision, exact names/IDs, text/binary metadata, права, transaction visibility и штатный shutdown. Существующие PG_CATALOG/PG_BACKEND_PID сохранены. Metadata native BIGINT/VARCHAR (wire20/1043); PG oid/name/regnamespace и правила имён требуют отдельного решения. C++/API/codecs не изменены, APP-11 закрыт.
 
-Реализован и оставлен на review [APP-12: pg_class для постоянных таблиц/views](1c/CLASS_CATALOG_TASK.md). SQL-view читает RDB$RELATIONS и связывает его с PG_NAMESPACE; четыре поля OID/RELNAME/RELNAMESPACE/RELKIND, OID=native relation ID+1. Штатный engine allocator уже решает relation identity, новый registry/hook не нужен; native reuse и непроверенный restore записаны в ограничениях. Имена/metadata остаются native. PASS: atomic install/отказы, independent native oracle, 228 libpq results, права/READ ONLY, table/view lifecycle и исключение external/virtual/temporary objects; сервер завершён штатно. Production ограничен одним SQL installer, C++/parser/API/codecs прежние. Порядок уточнён: этот независимый catalog slice предшествует общему решению PG/native name resolution и regnamespace; далее visibility/temp namespace для selected04. Полная область pg_class и APP-01/02/03/04/06 остаются открытыми.
+Реализован [APP-12: pg_class для постоянных таблиц/views](1c/CLASS_CATALOG_TASK.md): четыре поля из RDB$RELATIONS с JOIN PG_NAMESPACE, OID=native relation ID+1, без нового registry/hook. Ревизия `13f64d0e00` прошла review без замечаний и независимую приёмку: 5 групп установки, 4 native/libpq группы, 228 results, права/lifecycle/exclusions и normal shutdown. APP-12 закрыт в native профиле; reuse допустим, restore не проверен. C++/API/codecs прежние.
+
+Реализованный для review [APP-13: PG-правила имён](1c/PG_IDENTIFIER_NAMES_TASK.md) согласован пользователем: unquoted identifiers в PG4 становятся lowercase, quoted сохраняют точное представимое имя, native1/2/3 прежние. Один этап объединяет parser/source canonicalization для native reprepare, реальные lowercase schemas/catalog wrappers, initial search path/RESET, savepoint history и DDL/DML/native readback. Старые native uppercase objects доступны PG4 с точными quoted именами; автоматической миграции/fallback нет. Свежая сборка и затронутые регрессии описаны в VALIDATION. Полные search_path/USAGE, regnamespace, visibility/temp namespace — следующий контракт, без заглушек; selected04 и APP-01/02/03/04/06 остаются открытыми.
 
 Путь до открытия реальной 1С и Гилёва, покрытие 24 примеров и оставшиеся блокеры описаны в [1c/PROGRESS](1c/PROGRESS.md). Wire/базовый SQL/Bind приняты в ограниченном профиле; сквозного открытия информационной базы и теста Гилёва ещё нет. Каталоги, реальные типы/данные, locks и temporary DDL — прикладной критический путь; их порядок уточняется фактическими отказами клиента.
 

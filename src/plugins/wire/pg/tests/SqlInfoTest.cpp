@@ -348,19 +348,23 @@ void testStringModeAndSavepoints()
 {
 	for (const auto sql : {"SET standard_conforming_strings=off", "set standard_conforming_strings TO 'ON'"})
 		expect(sql, "SET", CountKind::None, ControlKind::Session);
-	for (const auto sql : {"SAVEPOINT name", "SAVEPOINT \"NAME \"", "SAVEPOINT \"NA\"\"ME \""})
+	for (const auto sql : {"SAVEPOINT name", "SAVEPOINT NAME", "SAVEPOINT \"name\""})
 	{
 		const auto info = inspectSql(sql);
-		if (!info.supported || info.savepoint != (std::string_view(sql).find("NA\"\"ME") != std::string_view::npos ? "NA\"ME" : "NAME"))
+		if (!info.supported || info.savepoint != "name")
 			throw std::runtime_error("Savepoint identifier normalization differs");
 		++checks;
 	}
-	const auto only = inspectSql("RELEASE SAVEPOINT \"я🙂 \" ONLY");
+	if (inspectSql("SAVEPOINT \"NAME\"").savepoint != "NAME" ||
+		inspectSql("SAVEPOINT \"NA\"\"ME\"").savepoint != "NA\"ME")
+		throw std::runtime_error("Quoted savepoint case/escape differs");
+	++checks;
+	const auto only = inspectSql("RELEASE SAVEPOINT \"я🙂\" ONLY");
 	const auto all = inspectSql("RELEASE SAVEPOINT \"я🙂\"");
 	if (!only.only || all.only || only.savepoint != "я🙂" || all.savepoint != only.savepoint)
 		throw std::runtime_error("RELEASE ONLY or UTF8 normalization differs");
 	++checks;
-	const auto rollback = inspectSql("ROLLBACK WORK TO SAVEPOINT \"я🙂 \"", false);
+	const auto rollback = inspectSql("ROLLBACK WORK TO SAVEPOINT \"я🙂\"", false);
 	if (rollback.control != ControlKind::RollbackTo || rollback.savepoint != only.savepoint)
 		throw std::runtime_error("ROLLBACK savepoint descriptor differs");
 	++checks;

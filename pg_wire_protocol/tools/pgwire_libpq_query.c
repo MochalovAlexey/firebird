@@ -30,7 +30,7 @@ static PGresult* tuples(PGconn* connection, const char* sql, int rows, int colum
 static void integer(PGconn* connection, int value)
 {
     PGresult* result = tuples(connection,
-        "SELECT CAST(6 * 7 AS INTEGER) AS \"answer\" FROM RDB$DATABASE", 1, 1);
+        "SELECT CAST(6 * 7 AS INTEGER) AS \"answer\" FROM \"SYSTEM\".\"RDB$DATABASE\"", 1, 1);
     require(strcmp(PQfname(result, 0), "answer") == 0, "column alias differs");
     require(PQftype(result, 0) == 23 && PQfsize(result, 0) == 4, "INTEGER metadata differs");
     require(PQfformat(result, 0) == 0 && PQfmod(result, 0) == -1, "text format metadata differs");
@@ -84,14 +84,14 @@ int main(void)
     require(PQprotocolVersion(connection) == 3, "wire protocol is not version 3");
     integer(connection, 42);
     PGresult* result = tuples(connection,
-        "SELECT CAST(7 * 7 AS INTEGER) AS \"different\" FROM RDB$DATABASE", 1, 1);
+        "SELECT CAST(7 * 7 AS INTEGER) AS \"different\" FROM \"SYSTEM\".\"RDB$DATABASE\"", 1, 1);
     require(strcmp(PQgetvalue(result, 0, 0), "49") == 0, "second expression was not evaluated");
     PQclear(result);
     result = tuples(connection,
         "SELECT CAST(-32768 AS SMALLINT), CAST(32767 AS SMALLINT), "
         "CAST('-2147483648' AS INTEGER), CAST(2147483647 AS INTEGER), "
         "CAST('-9223372036854775808' AS BIGINT), CAST('9223372036854775807' AS BIGINT), "
-        "CAST(NULL AS INTEGER) FROM RDB$DATABASE", 1, 7);
+        "CAST(NULL AS INTEGER) FROM \"SYSTEM\".\"RDB$DATABASE\"", 1, 7);
     const Oid oids[] = {21, 21, 23, 23, 20, 20, 23};
     const int sizes[] = {2, 2, 4, 4, 8, 8, 4};
     const char* values[] = {"-32768", "32767", "-2147483648", "2147483647",
@@ -108,10 +108,10 @@ int main(void)
             require(PQgetisnull(result, 0, column) && PQgetlength(result, 0, column) == 0, "NULL encoding differs");
     }
     PQclear(result);
-    result = tuples(connection, "SELECT ID FROM PGWIRE_ROWS WHERE ID < 0", 0, 1);
+    result = tuples(connection, "SELECT \"ID\" FROM \"PUBLIC\".\"PGWIRE_ROWS\" WHERE \"ID\" < 0", 0, 1);
     require(strcmp(PQcmdStatus(result), "SELECT 0") == 0, "empty SELECT command tag differs");
     PQclear(result);
-    result = tuples(connection, "SELECT ID, PAYLOAD FROM PGWIRE_ROWS ORDER BY ID", 3, 2);
+    result = tuples(connection, "SELECT \"ID\", PAYLOAD FROM \"PUBLIC\".\"PGWIRE_ROWS\" ORDER BY \"ID\"", 3, 2);
     require(strcmp(PQgetvalue(result, 0, 1), "31") == 0 && strcmp(PQgetvalue(result, 2, 1), "-9") == 0,
         "table data was not fetched");
     PQclear(result);
@@ -126,8 +126,8 @@ int main(void)
         strcmp(PQcmdStatus(result), "ROLLBACK") == 0 && PQtransactionStatus(connection) == PQTRANS_IDLE,
         "ROLLBACK did not finish the explicit block");
     PQclear(result);
-    error(connection, "SELECT CAST($1 AS INTEGER) FROM RDB$DATABASE", "0A000");
-    error(connection, "SELECT CAST('x' AS VARCHAR(1)) FROM RDB$DATABASE", "0A000");
+    error(connection, "SELECT CAST($1 AS INTEGER) FROM \"SYSTEM\".\"RDB$DATABASE\"", "0A000");
+    error(connection, "SELECT CAST('x' AS VARCHAR(1)) FROM \"SYSTEM\".\"RDB$DATABASE\"", "0A000");
     PQfinish(connection);
     printf("{\"libpq_version\":%d,\"compile_header_version\":%d,\"protocol\":3,"
            "\"computed_answer\":42,\"answer_oid\":23,\"checks\":10}\n", PQlibVersion(), PG_VERSION_NUM);

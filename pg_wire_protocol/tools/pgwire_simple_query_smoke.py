@@ -54,32 +54,32 @@ def psycopg2_child():
         connection.autocommit = True
         cursor = connection.cursor()
         try:
-            cursor.execute("CREATE TABLE P4_PY_ROWS (ID INTEGER PRIMARY KEY, B BOOLEAN, N NUMERIC(18,2), T VARCHAR(20))")
+            cursor.execute('CREATE TABLE "PUBLIC"."P4_PY_ROWS" ("ID" INTEGER PRIMARY KEY, "B" BOOLEAN, "N" NUMERIC(18,2), "T" VARCHAR(20))')
             require(cursor.statusmessage == "CREATE TABLE", "psycopg2 CREATE tag differs")
-            cursor.execute("INSERT INTO P4_PY_ROWS VALUES (1, TRUE, -12.30, 'Я🙂 ') RETURNING ID, B, N, T")
+            cursor.execute('INSERT INTO "PUBLIC"."P4_PY_ROWS" VALUES (1, TRUE, -12.30, \'Я🙂 \') RETURNING "ID", "B", "N", "T"')
             require(cursor.statusmessage == "INSERT 0 1", "psycopg2 INSERT RETURNING tag differs")
             require(cursor.fetchone() == (1, True, Decimal("-12.30"), "Я🙂 "), "psycopg2 converted types differ")
             require([column.type_code for column in cursor.description] == [23, 16, 1700, 1043], "psycopg2 OIDs differ")
             cursor.execute("SELECT CAST('Я' AS CHAR(4)), CAST('A ' AS VARCHAR(4)), CAST('' AS VARCHAR(4)), "
-                           "CAST(NULL AS BOOLEAN), CAST(12 AS NUMERIC(9,0)) FROM RDB$DATABASE")
+                           "CAST(NULL AS BOOLEAN), CAST(12 AS NUMERIC(9,0)) FROM \"SYSTEM\".\"RDB$DATABASE\"")
             row = cursor.fetchone()
             require(row == ("Я   ", "A ", "", None, Decimal("12")), "psycopg2 CHAR/empty/NULL/numeric values differ")
             require([column.type_code for column in cursor.description] == [1042, 1043, 1043, 16, 1700],
                     "psycopg2 logical CHAR/numeric types were lost")
-            cursor.execute("UPDATE P4_PY_ROWS SET N = 10.25 RETURNING N")
+            cursor.execute('UPDATE "PUBLIC"."P4_PY_ROWS" SET "N" = 10.25 RETURNING "N"')
             require(cursor.statusmessage == "UPDATE 1" and cursor.fetchone() == (Decimal("10.25"),),
                     "psycopg2 UPDATE result/tag differs")
             try:
-                cursor.execute("INSERT INTO P4_PY_ROWS (ID) VALUES (1)")
+                cursor.execute('INSERT INTO "PUBLIC"."P4_PY_ROWS" ("ID") VALUES (1)')
             except psycopg2.Error as error:
                 require(error.pgcode == "23505", "psycopg2 duplicate SQLSTATE differs")
             else:
                 raise RuntimeError("duplicate INSERT unexpectedly succeeded")
             require(connection.get_transaction_status() == extensions.TRANSACTION_STATUS_IDLE,
                     "implicit DML error retained a transaction")
-            cursor.execute("DELETE FROM P4_PY_ROWS RETURNING ID")
+            cursor.execute('DELETE FROM "PUBLIC"."P4_PY_ROWS" RETURNING "ID"')
             require(cursor.statusmessage == "DELETE 1" and cursor.fetchall() == [(1,)], "psycopg2 DELETE differs")
-            cursor.execute("DROP TABLE P4_PY_ROWS")
+            cursor.execute('DROP TABLE "PUBLIC"."P4_PY_ROWS"')
             require(cursor.statusmessage == "DROP TABLE", "psycopg2 DROP tag differs")
         finally:
             cursor.close()
@@ -97,65 +97,65 @@ class SimpleHarness(QueryHarness):
     def prepare(self):
         StartupHarness.prepare(self)
         self.isql("simple_fixtures", f"""CONNECT '{self.database}';
-CREATE TABLE P4_ROWS (ID INTEGER NOT NULL PRIMARY KEY, V INTEGER CHECK (V >= 0),
-  TXT VARCHAR(40), B BOOLEAN, N NUMERIC(18,2));
-CREATE TABLE P4_AUDIT (ID INTEGER);
-CREATE TABLE P4_EFFECTS (ID INTEGER NOT NULL PRIMARY KEY);
-CREATE SEQUENCE P4_GUARD;
-CREATE EXCEPTION P4_COMMIT_DENIED 'P4 deliberately rejected commit';
-GRANT SELECT, INSERT, UPDATE, DELETE ON P4_ROWS TO USER WIRE_HOST_TEST;
-GRANT SELECT, INSERT, UPDATE, DELETE ON P4_EFFECTS TO USER WIRE_HOST_TEST;
-GRANT SELECT ON P4_AUDIT TO USER WIRE_HOST_TEST;
-GRANT USAGE ON SEQUENCE P4_GUARD TO USER WIRE_HOST_TEST;
-GRANT CREATE TABLE TO USER WIRE_HOST_TEST;
-GRANT CREATE DOMAIN TO USER WIRE_HOST_TEST;
-GRANT CREATE SEQUENCE TO USER WIRE_HOST_TEST;
-GRANT CREATE VIEW TO USER WIRE_HOST_TEST;
-GRANT CREATE PROCEDURE TO USER WIRE_HOST_TEST;
-GRANT CREATE EXCEPTION TO USER WIRE_HOST_TEST;
-GRANT CREATE PACKAGE TO USER WIRE_HOST_TEST;
+CREATE TABLE "PUBLIC"."P4_ROWS" ("ID" INTEGER NOT NULL PRIMARY KEY, "V" INTEGER CHECK ("V" >= 0),
+  "TXT" VARCHAR(40), "B" BOOLEAN, "N" NUMERIC(18,2));
+CREATE TABLE "PUBLIC"."P4_AUDIT" ("ID" INTEGER);
+CREATE TABLE "PUBLIC"."P4_EFFECTS" ("ID" INTEGER NOT NULL PRIMARY KEY);
+CREATE SEQUENCE "PUBLIC"."P4_GUARD";
+CREATE EXCEPTION "PUBLIC"."P4_COMMIT_DENIED" 'P4 deliberately rejected commit';
+GRANT SELECT, INSERT, UPDATE, DELETE ON "PUBLIC"."P4_ROWS" TO USER "WIRE_HOST_TEST";
+GRANT SELECT, INSERT, UPDATE, DELETE ON "PUBLIC"."P4_EFFECTS" TO USER "WIRE_HOST_TEST";
+GRANT SELECT ON "PUBLIC"."P4_AUDIT" TO USER "WIRE_HOST_TEST";
+GRANT USAGE ON SEQUENCE "PUBLIC"."P4_GUARD" TO USER "WIRE_HOST_TEST";
+GRANT CREATE TABLE TO USER "WIRE_HOST_TEST";
+GRANT CREATE DOMAIN TO USER "WIRE_HOST_TEST";
+GRANT CREATE SEQUENCE TO USER "WIRE_HOST_TEST";
+GRANT CREATE VIEW TO USER "WIRE_HOST_TEST";
+GRANT CREATE PROCEDURE TO USER "WIRE_HOST_TEST";
+GRANT CREATE EXCEPTION TO USER "WIRE_HOST_TEST";
+GRANT CREATE PACKAGE TO USER "WIRE_HOST_TEST";
 SET TERM ^ ;
-CREATE TRIGGER P4_ROWS_AI FOR P4_ROWS ACTIVE AFTER INSERT POSITION 0 AS
+CREATE TRIGGER "PUBLIC"."P4_ROWS_AI" FOR "PUBLIC"."P4_ROWS" ACTIVE AFTER INSERT POSITION 0 AS
 BEGIN
-  INSERT INTO P4_AUDIT VALUES (NEW.ID);
+  INSERT INTO "PUBLIC"."P4_AUDIT" VALUES (NEW."ID");
 END^
-CREATE PROCEDURE P4_UNSUPPORTED RETURNS (V DECFLOAT(16)) AS
+CREATE PROCEDURE "PUBLIC"."P4_UNSUPPORTED" RETURNS ("V" DECFLOAT(16)) AS
 BEGIN
-  V = GEN_ID(P4_GUARD, 1);
-  INSERT INTO P4_EFFECTS VALUES (703);
+  "V" = GEN_ID("PUBLIC"."P4_GUARD", 1);
+  INSERT INTO "PUBLIC"."P4_EFFECTS" VALUES (703);
   SUSPEND;
 END^
-CREATE PROCEDURE P4_FETCH_ERROR RETURNS (V INTEGER) AS
+CREATE PROCEDURE "PUBLIC"."P4_FETCH_ERROR" RETURNS ("V" INTEGER) AS
 BEGIN
-  INSERT INTO P4_EFFECTS VALUES (704);
-  V = 1;
+  INSERT INTO "PUBLIC"."P4_EFFECTS" VALUES (704);
+  "V" = 1;
   SUSPEND;
-  V = 0;
+  "V" = 0;
   SUSPEND;
 END^
-CREATE PROCEDURE P4_COMMIT_ERROR RETURNS (V INTEGER) AS
+CREATE PROCEDURE "PUBLIC"."P4_COMMIT_ERROR" RETURNS ("V" INTEGER) AS
 BEGIN
-  INSERT INTO P4_EFFECTS VALUES (705);
-  V = RDB$SET_CONTEXT('USER_TRANSACTION', 'P4_FAIL_COMMIT', '1');
-  V = 705;
+  INSERT INTO "PUBLIC"."P4_EFFECTS" VALUES (705);
+  "V" = RDB$SET_CONTEXT('USER_TRANSACTION', 'P4_FAIL_COMMIT', '1');
+  "V" = 705;
   SUSPEND;
 END^
-CREATE TRIGGER P4_REJECT_COMMIT ACTIVE ON TRANSACTION COMMIT POSITION 0 AS
+CREATE TRIGGER "PUBLIC"."P4_REJECT_COMMIT" ACTIVE ON TRANSACTION COMMIT POSITION 0 AS
 BEGIN
   IF (CURRENT_USER = 'WIRE_HOST_TEST' AND
       RDB$GET_CONTEXT('USER_TRANSACTION', 'P4_FAIL_COMMIT') = '1') THEN
-    EXCEPTION P4_COMMIT_DENIED;
+    EXCEPTION "PUBLIC"."P4_COMMIT_DENIED";
 END^
 SET TERM ; ^
-GRANT INSERT ON P4_AUDIT TO TRIGGER P4_ROWS_AI;
-GRANT INSERT ON P4_EFFECTS TO PROCEDURE P4_UNSUPPORTED;
-GRANT INSERT ON P4_EFFECTS TO PROCEDURE P4_FETCH_ERROR;
-GRANT INSERT ON P4_EFFECTS TO PROCEDURE P4_COMMIT_ERROR;
-GRANT USAGE ON EXCEPTION P4_COMMIT_DENIED TO TRIGGER P4_REJECT_COMMIT;
-GRANT USAGE ON SEQUENCE P4_GUARD TO PROCEDURE P4_UNSUPPORTED;
-GRANT EXECUTE ON PROCEDURE P4_UNSUPPORTED TO USER WIRE_HOST_TEST;
-GRANT EXECUTE ON PROCEDURE P4_FETCH_ERROR TO USER WIRE_HOST_TEST;
-GRANT EXECUTE ON PROCEDURE P4_COMMIT_ERROR TO USER WIRE_HOST_TEST;
+GRANT INSERT ON "PUBLIC"."P4_AUDIT" TO TRIGGER "PUBLIC"."P4_ROWS_AI";
+GRANT INSERT ON "PUBLIC"."P4_EFFECTS" TO PROCEDURE "PUBLIC"."P4_UNSUPPORTED";
+GRANT INSERT ON "PUBLIC"."P4_EFFECTS" TO PROCEDURE "PUBLIC"."P4_FETCH_ERROR";
+GRANT INSERT ON "PUBLIC"."P4_EFFECTS" TO PROCEDURE "PUBLIC"."P4_COMMIT_ERROR";
+GRANT USAGE ON EXCEPTION "PUBLIC"."P4_COMMIT_DENIED" TO TRIGGER "PUBLIC"."P4_REJECT_COMMIT";
+GRANT USAGE ON SEQUENCE "PUBLIC"."P4_GUARD" TO PROCEDURE "PUBLIC"."P4_UNSUPPORTED";
+GRANT EXECUTE ON PROCEDURE "PUBLIC"."P4_UNSUPPORTED" TO USER "WIRE_HOST_TEST";
+GRANT EXECUTE ON PROCEDURE "PUBLIC"."P4_FETCH_ERROR" TO USER "WIRE_HOST_TEST";
+GRANT EXECUTE ON PROCEDURE "PUBLIC"."P4_COMMIT_ERROR" TO USER "WIRE_HOST_TEST";
 COMMIT;
 QUIT;
 """, embedded=True)
@@ -184,7 +184,7 @@ CAST('A' AS CHAR(4)) AS "ascii", CAST('Я' AS CHAR(4)) AS "utf8",
 CAST('' AS CHAR(4)) AS "blank", CAST('A ' AS CHAR(4)) AS "trailing",
 CAST('A ' AS VARCHAR(4)) AS "varying", CAST('Я🙂 ' AS VARCHAR(10)) AS "unicode",
 CAST('' AS VARCHAR(4)) AS "empty", CAST(NULL AS VARCHAR(4)) AS "null"
-FROM RDB$DATABASE""", "SELECT 1",
+FROM \"SYSTEM\".\"RDB$DATABASE\"""", "SELECT 1",
             [("t", "f", None, "A   ", "Я   ", "    ", "A   ", "A ", "Я🙂 ", "", None)],
             [16, 16, 16, 1042, 1042, 1042, 1042, 1043, 1043, 1043, 1043])
         require([column["size"] for column in result["columns"]] == [1, 1, 1] + [-1] * 8,
@@ -194,144 +194,144 @@ FROM RDB$DATABASE""", "SELECT 1",
         self.sql(client, """SELECT CAST(1.20 AS NUMERIC(4,2)), CAST(-12345.60 AS DECIMAL(9,2)),
 CAST('-92233720368547758.08' AS NUMERIC(18,2)), CAST('92233720368547758.07' AS NUMERIC(18,2)),
 CAST(-0.0123 AS DECIMAL(18,4)), CAST(12 AS NUMERIC(9,0)), CAST(NULL AS NUMERIC(18,2))
-FROM RDB$DATABASE""", "SELECT 1", [("1.20", "-12345.60", "-92233720368547758.08",
+FROM \"SYSTEM\".\"RDB$DATABASE\"""", "SELECT 1", [("1.20", "-12345.60", "-92233720368547758.08",
             "92233720368547758.07", "-0.0123", "12", None)], [1700] * 7)
-        self.sql(client, "SELECT CAST('BEGIN;$1' AS VARCHAR(20)) AS \"BEGIN;$1\" FROM RDB$DATABASE",
+        self.sql(client, "SELECT CAST('BEGIN;$1' AS VARCHAR(20)) AS \"BEGIN;$1\" FROM \"SYSTEM\".\"RDB$DATABASE\"",
                  "SELECT 1", [("BEGIN;$1",)], [1043])
-        client.query_error(b"SELECT CAST(ASCII_CHAR(0) AS VARCHAR(1) CHARACTER SET UTF8) FROM RDB$DATABASE", "22021")
+        client.query_error(b'SELECT CAST(ASCII_CHAR(0) AS VARCHAR(1) CHARACTER SET "UTF8") FROM "SYSTEM"."RDB$DATABASE"', "22021")
         client.query_integer()
         client.close()
         self.no_attachments()
 
     def dml(self):
         client = SimpleClient(self).login()
-        self.sql(client, "INSERT INTO P4_ROWS(ID,V,TXT,B,N) VALUES (1,10,'one',TRUE,1.25)", "INSERT 0 1")
-        self.sql(client, "INSERT INTO P4_ROWS(ID,V) SELECT 2,20 FROM RDB$DATABASE UNION ALL SELECT 3,30 FROM RDB$DATABASE",
+        self.sql(client, 'INSERT INTO "PUBLIC"."P4_ROWS"("ID","V","TXT","B","N") VALUES (1,10,\'one\',TRUE,1.25)', "INSERT 0 1")
+        self.sql(client, 'INSERT INTO "PUBLIC"."P4_ROWS"("ID","V") SELECT 2,20 FROM "SYSTEM"."RDB$DATABASE" UNION ALL SELECT 3,30 FROM "SYSTEM"."RDB$DATABASE"',
                  "INSERT 0 2")
-        self.sql(client, "INSERT INTO P4_ROWS(ID,V) VALUES (4,40) RETURNING ID,V", "INSERT 0 1", [(4, 40)], [23, 23])
-        self.sql(client, "INSERT INTO P4_ROWS(ID,V) SELECT 5,50 FROM RDB$DATABASE UNION ALL SELECT 6,60 FROM RDB$DATABASE "
-                 "RETURNING ID", "INSERT 0 2", [(5,), (6,)], [23], unordered=True)
-        self.sql(client, "UPDATE P4_ROWS SET V=V+1 WHERE ID<=3 RETURNING ID,V", "UPDATE 3",
+        self.sql(client, 'INSERT INTO "PUBLIC"."P4_ROWS"("ID","V") VALUES (4,40) RETURNING "ID","V"', "INSERT 0 1", [(4, 40)], [23, 23])
+        self.sql(client, 'INSERT INTO "PUBLIC"."P4_ROWS"("ID","V") SELECT 5,50 FROM "SYSTEM"."RDB$DATABASE" UNION ALL SELECT 6,60 FROM "SYSTEM"."RDB$DATABASE" '
+                 'RETURNING "ID"', "INSERT 0 2", [(5,), (6,)], [23], unordered=True)
+        self.sql(client, 'UPDATE "PUBLIC"."P4_ROWS" SET "V"="V"+1 WHERE "ID"<=3 RETURNING "ID","V"', "UPDATE 3",
                  [(1, 11), (2, 21), (3, 31)], [23, 23], unordered=True)
-        self.sql(client, "UPDATE P4_ROWS SET V=1 WHERE ID<0", "UPDATE 0")
-        self.sql(client, "UPDATE P4_ROWS SET V=1 WHERE ID<0 RETURNING ID", "UPDATE 0", [], [23])
-        self.sql(client, "DELETE FROM P4_ROWS WHERE ID IN (5,6) RETURNING ID", "DELETE 2", [(5,), (6,)], [23], unordered=True)
-        self.sql(client, "DELETE FROM P4_ROWS WHERE ID<0", "DELETE 0")
-        self.sql(client, "MERGE INTO P4_ROWS T USING (SELECT 1 AS ID,111 AS V FROM RDB$DATABASE "
-                 "UNION ALL SELECT 7,70 FROM RDB$DATABASE) S ON T.ID=S.ID "
-                 "WHEN MATCHED THEN UPDATE SET T.V=S.V WHEN NOT MATCHED THEN INSERT(ID,V) VALUES(S.ID,S.V) RETURNING T.ID,T.V",
+        self.sql(client, 'UPDATE "PUBLIC"."P4_ROWS" SET "V"=1 WHERE "ID"<0', "UPDATE 0")
+        self.sql(client, 'UPDATE "PUBLIC"."P4_ROWS" SET "V"=1 WHERE "ID"<0 RETURNING "ID"', "UPDATE 0", [], [23])
+        self.sql(client, 'DELETE FROM "PUBLIC"."P4_ROWS" WHERE "ID" IN (5,6) RETURNING "ID"', "DELETE 2", [(5,), (6,)], [23], unordered=True)
+        self.sql(client, 'DELETE FROM "PUBLIC"."P4_ROWS" WHERE "ID"<0', "DELETE 0")
+        self.sql(client, 'MERGE INTO "PUBLIC"."P4_ROWS" "T" USING (SELECT 1 AS "ID",111 AS "V" FROM "SYSTEM"."RDB$DATABASE" '
+                 'UNION ALL SELECT 7,70 FROM "SYSTEM"."RDB$DATABASE") "S" ON "T"."ID"="S"."ID" '
+                 'WHEN MATCHED THEN UPDATE SET "T"."V"="S"."V" WHEN NOT MATCHED THEN INSERT("ID","V") VALUES("S"."ID","S"."V") RETURNING "T"."ID","T"."V"',
                  "MERGE 2", [(1, 111), (7, 70)], [23, 23], unordered=True)
-        self.sql(client, "MERGE INTO P4_ROWS T USING (SELECT 2 AS ID FROM RDB$DATABASE) S ON T.ID=S.ID "
+        self.sql(client, 'MERGE INTO "PUBLIC"."P4_ROWS" "T" USING (SELECT 2 AS "ID" FROM "SYSTEM"."RDB$DATABASE") "S" ON "T"."ID"="S"."ID" '
                  "WHEN MATCHED THEN DELETE", "MERGE 1")
-        self.sql(client, "MERGE INTO P4_ROWS T USING (SELECT 999 AS ID FROM RDB$DATABASE) S ON T.ID=S.ID "
-                 "WHEN MATCHED THEN UPDATE SET V=999", "MERGE 0")
-        self.sql(client, "UPDATE OR INSERT INTO P4_ROWS(ID,V) VALUES(7,77) MATCHING(ID) RETURNING ID,V",
+        self.sql(client, 'MERGE INTO "PUBLIC"."P4_ROWS" "T" USING (SELECT 999 AS "ID" FROM "SYSTEM"."RDB$DATABASE") "S" ON "T"."ID"="S"."ID" '
+                 'WHEN MATCHED THEN UPDATE SET "V"=999', "MERGE 0")
+        self.sql(client, 'UPDATE OR INSERT INTO "PUBLIC"."P4_ROWS"("ID","V") VALUES(7,77) MATCHING("ID") RETURNING "ID","V"',
                  "UPDATE OR INSERT 1", [(7, 77)], [23, 23])
-        self.sql(client, "UPDATE OR INSERT INTO P4_ROWS(ID,V) VALUES(8,80) MATCHING(ID)", "UPDATE OR INSERT 1")
-        self.sql(client, "UPDATE OR INSERT INTO P4_ROWS(ID,V) VALUES(9,90) MATCHING(ID) RETURNING ID",
+        self.sql(client, 'UPDATE OR INSERT INTO "PUBLIC"."P4_ROWS"("ID","V") VALUES(8,80) MATCHING("ID")', "UPDATE OR INSERT 1")
+        self.sql(client, 'UPDATE OR INSERT INTO "PUBLIC"."P4_ROWS"("ID","V") VALUES(9,90) MATCHING("ID") RETURNING "ID"',
                  "UPDATE OR INSERT 1", [(9,)], [23])
-        self.sql(client, "DELETE FROM P4_ROWS WHERE ID=4", "DELETE 1")
-        self.sql(client, "INSERT INTO P4_ROWS(ID,V) SELECT 10,100 FROM RDB$DATABASE WHERE 1=0 RETURNING ID",
+        self.sql(client, 'DELETE FROM "PUBLIC"."P4_ROWS" WHERE "ID"=4', "DELETE 1")
+        self.sql(client, 'INSERT INTO "PUBLIC"."P4_ROWS"("ID","V") SELECT 10,100 FROM "SYSTEM"."RDB$DATABASE" WHERE 1=0 RETURNING "ID"',
                  "INSERT 0 0", [], [23])
-        require(self.scalar_native("SELECT COUNT(*) AS OBSERVED FROM P4_ROWS") == 5, "native DML row count differs")
-        require(self.scalar_native("SELECT SUM(V) AS OBSERVED FROM P4_ROWS") == 389, "native DML values differ")
-        require(self.scalar_native("SELECT COUNT(*) AS OBSERVED FROM P4_AUDIT") == 9, "INSERT trigger did not execute")
-        self.isql("native_to_pg_change", "UPDATE P4_ROWS SET V=912 WHERE ID=9;\nCOMMIT;\nQUIT;\n")
-        self.sql(client, "SELECT V FROM P4_ROWS WHERE ID=9", "SELECT 1", [(912,)], [23])
+        require(self.scalar_native('SELECT COUNT(*) AS OBSERVED FROM "PUBLIC"."P4_ROWS"') == 5, "native DML row count differs")
+        require(self.scalar_native('SELECT SUM("V") AS OBSERVED FROM "PUBLIC"."P4_ROWS"') == 389, "native DML values differ")
+        require(self.scalar_native('SELECT COUNT(*) AS OBSERVED FROM "PUBLIC"."P4_AUDIT"') == 9, "INSERT trigger did not execute")
+        self.isql("native_to_pg_change", 'UPDATE "PUBLIC"."P4_ROWS" SET "V"=912 WHERE "ID"=9;\nCOMMIT;\nQUIT;\n')
+        self.sql(client, 'SELECT "V" FROM "PUBLIC"."P4_ROWS" WHERE "ID"=9', "SELECT 1", [(912,)], [23])
         client.close()
         self.no_attachments()
 
     def ddl(self):
         client = SimpleClient(self).login()
         operations = [
-            ("CREATE DOMAIN P4_DOMAIN AS INTEGER DEFAULT 5 NOT NULL", "CREATE DOMAIN"),
-            ("ALTER DOMAIN P4_DOMAIN SET DEFAULT 6", "ALTER DOMAIN"),
-            ("CREATE TABLE P4_DDL(ID P4_DOMAIN, V INTEGER)", "CREATE TABLE"),
-            ("ALTER TABLE P4_DDL ADD EXTRA INTEGER", "ALTER TABLE"),
-            ("CREATE INDEX P4_INDEX ON P4_DDL(V)", "CREATE INDEX"),
-            ("ALTER INDEX P4_INDEX INACTIVE", "ALTER INDEX"),
-            ("SET STATISTICS INDEX P4_INDEX", "SET STATISTICS"),
-            ("CREATE SEQUENCE P4_SEQUENCE START WITH 10", "CREATE SEQUENCE"),
-            ("ALTER SEQUENCE P4_SEQUENCE RESTART WITH 40", "ALTER SEQUENCE"),
-            ("CREATE VIEW P4_VIEW AS SELECT ID,V FROM P4_DDL", "CREATE VIEW"),
-            ("ALTER VIEW P4_VIEW AS SELECT ID,V FROM P4_DDL WHERE V>=0", "ALTER VIEW"),
-            ("COMMENT ON VIEW P4_VIEW IS 'UTF8 комментарий; BEGIN'", "COMMENT"),
-            ("GRANT SELECT ON P4_VIEW TO USER WIRE_PG_OTHER", "GRANT"),
-            ("REVOKE SELECT ON P4_VIEW FROM USER WIRE_PG_OTHER", "REVOKE"),
-            ("CREATE EXCEPTION P4_EXCEPTION 'first'", "CREATE EXCEPTION"),
-            ("ALTER EXCEPTION P4_EXCEPTION 'second'", "ALTER EXCEPTION"),
-            ("CREATE PROCEDURE P4_PROC RETURNS(V INTEGER) AS BEGIN V=6; SUSPEND; END", "CREATE PROCEDURE"),
-            ("CREATE OR ALTER PROCEDURE P4_PROC RETURNS(V INTEGER) AS BEGIN V=7; SUSPEND; END", "CREATE OR ALTER PROCEDURE"),
-            ("ALTER PROCEDURE P4_PROC RETURNS(V INTEGER) AS BEGIN V=8; SUSPEND; END", "ALTER PROCEDURE"),
+            ('CREATE DOMAIN "PUBLIC"."P4_DOMAIN" AS INTEGER DEFAULT 5 NOT NULL', "CREATE DOMAIN"),
+            ('ALTER DOMAIN "PUBLIC"."P4_DOMAIN" SET DEFAULT 6', "ALTER DOMAIN"),
+            ('CREATE TABLE "PUBLIC"."P4_DDL"("ID" "PUBLIC"."P4_DOMAIN", "V" INTEGER)', "CREATE TABLE"),
+            ('ALTER TABLE "PUBLIC"."P4_DDL" ADD "EXTRA" INTEGER', "ALTER TABLE"),
+            ('CREATE INDEX "PUBLIC"."P4_INDEX" ON "PUBLIC"."P4_DDL"("V")', "CREATE INDEX"),
+            ('ALTER INDEX "PUBLIC"."P4_INDEX" INACTIVE', "ALTER INDEX"),
+            ('SET STATISTICS INDEX "PUBLIC"."P4_INDEX"', "SET STATISTICS"),
+            ('CREATE SEQUENCE "PUBLIC"."P4_SEQUENCE" START WITH 10', "CREATE SEQUENCE"),
+            ('ALTER SEQUENCE "PUBLIC"."P4_SEQUENCE" RESTART WITH 40', "ALTER SEQUENCE"),
+            ('CREATE VIEW "PUBLIC"."P4_VIEW" AS SELECT "ID","V" FROM "PUBLIC"."P4_DDL"', "CREATE VIEW"),
+            ('ALTER VIEW "PUBLIC"."P4_VIEW" AS SELECT "ID","V" FROM "PUBLIC"."P4_DDL" WHERE "V">=0', "ALTER VIEW"),
+            ('COMMENT ON VIEW "PUBLIC"."P4_VIEW" IS \'UTF8 комментарий; BEGIN\'', "COMMENT"),
+            ('GRANT SELECT ON "PUBLIC"."P4_VIEW" TO USER "WIRE_PG_OTHER"', "GRANT"),
+            ('REVOKE SELECT ON "PUBLIC"."P4_VIEW" FROM USER "WIRE_PG_OTHER"', "REVOKE"),
+            ('CREATE EXCEPTION "PUBLIC"."P4_EXCEPTION" \'first\'', "CREATE EXCEPTION"),
+            ('ALTER EXCEPTION "PUBLIC"."P4_EXCEPTION" \'second\'', "ALTER EXCEPTION"),
+            ('CREATE PROCEDURE "PUBLIC"."P4_PROC" RETURNS("V" INTEGER) AS BEGIN "V"=6; SUSPEND; END', "CREATE PROCEDURE"),
+            ('CREATE OR ALTER PROCEDURE "PUBLIC"."P4_PROC" RETURNS("V" INTEGER) AS BEGIN "V"=7; SUSPEND; END', "CREATE OR ALTER PROCEDURE"),
+            ('ALTER PROCEDURE "PUBLIC"."P4_PROC" RETURNS("V" INTEGER) AS BEGIN "V"=8; SUSPEND; END', "ALTER PROCEDURE"),
         ]
         for sql, tag in operations:
             self.sql(client, sql, tag)
-        require(self.scalar_native("SELECT COUNT(*) AS OBSERVED FROM RDB$RELATIONS WHERE RDB$RELATION_NAME='P4_VIEW'") == 1,
+        require(self.scalar_native('SELECT COUNT(*) AS OBSERVED FROM "SYSTEM"."RDB$RELATIONS" WHERE "RDB$RELATION_NAME"=\'P4_VIEW\'') == 1,
                 "native observer cannot see committed CREATE VIEW")
-        require(self.scalar_native("SELECT COUNT(*) AS OBSERVED FROM RDB$FIELDS WHERE RDB$FIELD_NAME='P4_DOMAIN'") == 1,
+        require(self.scalar_native('SELECT COUNT(*) AS OBSERVED FROM "SYSTEM"."RDB$FIELDS" WHERE "RDB$FIELD_NAME"=\'P4_DOMAIN\'') == 1,
                 "native observer cannot see committed CREATE DOMAIN")
-        self.sql(client, "INSERT INTO P4_DDL(V) VALUES(22) RETURNING ID,V", "INSERT 0 1", [(6, 22)], [23, 23])
-        self.sql(client, "EXECUTE PROCEDURE P4_PROC", "EXECUTE PROCEDURE", [(8,)], [23])
-        self.sql(client, "RECREATE PROCEDURE P4_PROC RETURNS(V INTEGER) AS BEGIN V=9; SUSPEND; END", "RECREATE PROCEDURE")
-        self.sql(client, "SELECT V FROM P4_PROC", "SELECT 1", [(9,)], [23])
-        self.sql(client, "RECREATE TABLE P4_RECREATED(ID INTEGER)", "RECREATE TABLE")
-        for sql, tag in [("DROP TABLE P4_RECREATED", "DROP TABLE"), ("DROP PROCEDURE P4_PROC", "DROP PROCEDURE"),
-                         ("DROP EXCEPTION P4_EXCEPTION", "DROP EXCEPTION"), ("DROP VIEW P4_VIEW", "DROP VIEW"),
-                         ("DROP INDEX P4_INDEX", "DROP INDEX"), ("DROP TABLE P4_DDL", "DROP TABLE"),
-                         ("DROP DOMAIN P4_DOMAIN", "DROP DOMAIN"), ("DROP SEQUENCE P4_SEQUENCE", "DROP SEQUENCE")]:
+        self.sql(client, 'INSERT INTO "PUBLIC"."P4_DDL"("V") VALUES(22) RETURNING "ID","V"', "INSERT 0 1", [(6, 22)], [23, 23])
+        self.sql(client, 'EXECUTE PROCEDURE "PUBLIC"."P4_PROC"', "EXECUTE PROCEDURE", [(8,)], [23])
+        self.sql(client, 'RECREATE PROCEDURE "PUBLIC"."P4_PROC" RETURNS("V" INTEGER) AS BEGIN "V"=9; SUSPEND; END', "RECREATE PROCEDURE")
+        self.sql(client, 'SELECT "V" FROM "PUBLIC"."P4_PROC"', "SELECT 1", [(9,)], [23])
+        self.sql(client, 'RECREATE TABLE "PUBLIC"."P4_RECREATED"("ID" INTEGER)', "RECREATE TABLE")
+        for sql, tag in [('DROP TABLE "PUBLIC"."P4_RECREATED"', "DROP TABLE"), ('DROP PROCEDURE "PUBLIC"."P4_PROC"', "DROP PROCEDURE"),
+                         ('DROP EXCEPTION "PUBLIC"."P4_EXCEPTION"', "DROP EXCEPTION"), ('DROP VIEW "PUBLIC"."P4_VIEW"', "DROP VIEW"),
+                         ('DROP INDEX "PUBLIC"."P4_INDEX"', "DROP INDEX"), ('DROP TABLE "PUBLIC"."P4_DDL"', "DROP TABLE"),
+                         ('DROP DOMAIN "PUBLIC"."P4_DOMAIN"', "DROP DOMAIN"), ('DROP SEQUENCE "PUBLIC"."P4_SEQUENCE"', "DROP SEQUENCE")]:
             self.sql(client, sql, tag)
         client.close()
         self.no_attachments()
 
     def blocks(self):
         client = SimpleClient(self).login()
-        self.sql(client, "EXECUTE BLOCK AS BEGIN INSERT INTO P4_EFFECTS VALUES(701); END", "EXECUTE BLOCK")
-        self.sql(client, "EXECUTE BLOCK RETURNS(V INTEGER) AS BEGIN INSERT INTO P4_EFFECTS VALUES(702); "
-                 "V=11; SUSPEND; V=12; SUSPEND; END", "EXECUTE BLOCK", [(11,), (12,)], [23])
-        require(self.scalar_native("SELECT COUNT(*) AS OBSERVED FROM P4_EFFECTS WHERE ID IN (701,702)") == 2,
+        self.sql(client, 'EXECUTE BLOCK AS BEGIN INSERT INTO "PUBLIC"."P4_EFFECTS" VALUES(701); END', "EXECUTE BLOCK")
+        self.sql(client, 'EXECUTE BLOCK RETURNS("V" INTEGER) AS BEGIN INSERT INTO "PUBLIC"."P4_EFFECTS" VALUES(702); '
+                 '"V"=11; SUSPEND; "V"=12; SUSPEND; END', "EXECUTE BLOCK", [(11,), (12,)], [23])
+        require(self.scalar_native('SELECT COUNT(*) AS OBSERVED FROM "PUBLIC"."P4_EFFECTS" WHERE "ID" IN (701,702)') == 2,
                 "EXECUTE BLOCK changes were not committed")
         client.close()
         self.no_attachments()
 
     def errors_and_preflight(self):
         client = SimpleClient(self).login()
-        for sql, state in [("INSERT INTO P4_ROWS(ID,V) VALUES(1,1)", "23505"),
-                           ("INSERT INTO P4_ROWS(ID,V) VALUES(NULL,1)", "23000"),
-                           ("UPDATE P4_ROWS SET V=-1 WHERE ID=1", "23514"),
-                           ("BEGIN READ ONLY", "42601"), ("SELECT CAST($1 AS INTEGER) FROM RDB$DATABASE", "0A000")]:
+        for sql, state in [('INSERT INTO "PUBLIC"."P4_ROWS"("ID","V") VALUES(1,1)', "23505"),
+                           ('INSERT INTO "PUBLIC"."P4_ROWS"("ID","V") VALUES(NULL,1)', "23000"),
+                           ('UPDATE "PUBLIC"."P4_ROWS" SET "V"=-1 WHERE "ID"=1', "23514"),
+                           ("BEGIN READ ONLY", "42601"), ("SELECT CAST($1 AS INTEGER) FROM \"SYSTEM\".\"RDB$DATABASE\"", "0A000")]:
             result = client.query_error(sql.encode(), state)
             require(result["command"] is None, "failed SQL produced CommandComplete")
             self.no_transactions()
             client.query_integer()
-        require(self.scalar_native("SELECT V AS OBSERVED FROM P4_ROWS WHERE ID=1") == 111, "failed UPDATE was committed")
+        require(self.scalar_native('SELECT "V" AS OBSERVED FROM "PUBLIC"."P4_ROWS" WHERE "ID"=1') == 111, "failed UPDATE was committed")
         guarded = [
-            "INSERT INTO P4_ROWS(ID,V) VALUES(90,GEN_ID(P4_GUARD,1)) RETURNING CAST(V AS DECFLOAT(16))",
-            "INSERT INTO P4_ROWS(ID,V) SELECT 91,GEN_ID(P4_GUARD,1) FROM RDB$DATABASE RETURNING CAST('x' AS BLOB SUB_TYPE TEXT)",
-            "UPDATE P4_ROWS SET V=GEN_ID(P4_GUARD,1) WHERE ID=1 RETURNING CAST(V AS DECFLOAT(34))",
-            "SELECT V FROM P4_UNSUPPORTED", "EXECUTE PROCEDURE P4_UNSUPPORTED",
-            "INSERT INTO P4_ROWS(ID,V) VALUES(92,?)",
+            'INSERT INTO "PUBLIC"."P4_ROWS"("ID","V") VALUES(90,GEN_ID("PUBLIC"."P4_GUARD",1)) RETURNING CAST("V" AS DECFLOAT(16))',
+            'INSERT INTO "PUBLIC"."P4_ROWS"("ID","V") SELECT 91,GEN_ID("PUBLIC"."P4_GUARD",1) FROM "SYSTEM"."RDB$DATABASE" RETURNING CAST(\'x\' AS BLOB SUB_TYPE TEXT)',
+            'UPDATE "PUBLIC"."P4_ROWS" SET "V"=GEN_ID("PUBLIC"."P4_GUARD",1) WHERE "ID"=1 RETURNING CAST("V" AS DECFLOAT(34))',
+            'SELECT "V" FROM "PUBLIC"."P4_UNSUPPORTED"', 'EXECUTE PROCEDURE "PUBLIC"."P4_UNSUPPORTED"',
+            'INSERT INTO "PUBLIC"."P4_ROWS"("ID","V") VALUES(92,?)',
         ]
         for sql in guarded:
             result = client.query_error(sql.encode(), "0A000")
             require(result["columns"] is None and not result["rows"], "unsupported result started execution")
-            require(self.scalar_native("SELECT GEN_ID(P4_GUARD,0) AS OBSERVED FROM RDB$DATABASE") == 0,
+            require(self.scalar_native('SELECT GEN_ID("PUBLIC"."P4_GUARD",0) AS OBSERVED FROM "SYSTEM"."RDB$DATABASE"') == 0,
                     "unsupported metadata allowed nontransactional effects")
-            require(self.scalar_native("SELECT COUNT(*) AS OBSERVED FROM P4_EFFECTS WHERE ID=703") == 0,
+            require(self.scalar_native('SELECT COUNT(*) AS OBSERVED FROM "PUBLIC"."P4_EFFECTS" WHERE "ID"=703') == 0,
                     "unsupported procedure changed data")
             self.no_transactions()
             client.query_integer()
-        failed = client.query_error(b"SELECT CAST(1/V AS INTEGER) FROM P4_FETCH_ERROR", "22012")
+        failed = client.query_error(b'SELECT CAST(1/"V" AS INTEGER) FROM "PUBLIC"."P4_FETCH_ERROR"', "22012")
         require(failed["rows"] == [["1"]] and failed["command"] is None, "fetch error did not interrupt streamed rows")
-        require(self.scalar_native("SELECT COUNT(*) AS OBSERVED FROM P4_EFFECTS WHERE ID=704") == 0,
+        require(self.scalar_native('SELECT COUNT(*) AS OBSERVED FROM "PUBLIC"."P4_EFFECTS" WHERE "ID"=704') == 0,
                 "fetch error failed to roll back prior procedure changes")
         # Sequential scripts must stop at an invalid first command. Successful
         # prefixes and explicit commits are covered by pgwire_script_smoke.py.
-        for sql in ("INSERT INTO P4_ROWS(ID,V) VALUES(93,GEN_ID(P4_GUARD,1)) EXTRA_TOKEN; SELECT 42 FROM RDB$DATABASE",
-                    "CREATE TABLE P4_BATCH_BAD(ID INTEGER) EXTRA_TOKEN; SELECT 42 FROM RDB$DATABASE"):
+        for sql in ('INSERT INTO "PUBLIC"."P4_ROWS"("ID","V") VALUES(93,GEN_ID("PUBLIC"."P4_GUARD",1)) EXTRA_TOKEN; SELECT 42 FROM "SYSTEM"."RDB$DATABASE"',
+                    'CREATE TABLE "PUBLIC"."P4_BATCH_BAD"("ID" INTEGER) EXTRA_TOKEN; SELECT 42 FROM "SYSTEM"."RDB$DATABASE"'):
             client.query_error(sql.encode(), "42601")
-        require(self.scalar_native("SELECT GEN_ID(P4_GUARD,0) AS OBSERVED FROM RDB$DATABASE") == 0,
+        require(self.scalar_native('SELECT GEN_ID("PUBLIC"."P4_GUARD",0) AS OBSERVED FROM "SYSTEM"."RDB$DATABASE"') == 0,
                 "invalid first command was executed")
-        require(self.scalar_native("SELECT COUNT(*) AS OBSERVED FROM RDB$RELATIONS WHERE RDB$RELATION_NAME='P4_BATCH_BAD'") == 0,
+        require(self.scalar_native('SELECT COUNT(*) AS OBSERVED FROM "SYSTEM"."RDB$RELATIONS" WHERE "RDB$RELATION_NAME"=\'P4_BATCH_BAD\'') == 0,
                 "invalid first DDL command was committed")
         client.query_integer()
         client.close()
@@ -340,7 +340,7 @@ FROM RDB$DATABASE""", "SELECT 1", [("1.20", "-12345.60", "-92233720368547758.08"
     def commit_failure(self):
         client = SimpleClient(self).login()
         try:
-            client.send(packet(b"Q", b"SELECT V FROM P4_COMMIT_ERROR\0"))
+            client.send(packet(b"Q", b'SELECT "V" FROM "PUBLIC"."P4_COMMIT_ERROR"\x00'))
             kind, description = client.message()
             require(kind == b"T" and description == struct.pack("!H", 1) + b"V\0" +
                     struct.pack("!IhIhih", 0, 0, 23, 4, -1, 0),
@@ -360,7 +360,7 @@ FROM RDB$DATABASE""", "SELECT 1", [("1.20", "-12345.60", "-92233720368547758.08"
         finally:
             client.close(terminate=False)
         self.no_attachments()
-        require(self.scalar_native("SELECT COUNT(*) AS OBSERVED FROM P4_EFFECTS WHERE ID=705") == 0,
+        require(self.scalar_native('SELECT COUNT(*) AS OBSERVED FROM "PUBLIC"."P4_EFFECTS" WHERE "ID"=705') == 0,
                 "failed commit did not roll back the procedure change")
         healthy = SimpleClient(self).login()
         healthy.query_integer()
@@ -380,7 +380,7 @@ FROM RDB$DATABASE""", "SELECT 1", [("1.20", "-12345.60", "-92233720368547758.08"
             result = client.query_error(sql, "42601")
             require(not result["empty"], "malformed SQL was mistaken for EMPTY")
             client.query_integer()
-        client.send(packet(b"Q", b"/*empty*/\0") + packet(b"Q", b'SELECT CAST(42 AS INTEGER) FROM RDB$DATABASE\0'))
+        client.send(packet(b"Q", b"/*empty*/\0") + packet(b"Q", b'SELECT CAST(42 AS INTEGER) FROM "SYSTEM"."RDB$DATABASE"\0'))
         require(client.query_response()["empty"], "coalesced EMPTY frame was lost")
         require(client.query_response()["rows"] == [["42"]], "query after coalesced EMPTY was lost")
         client.close()
@@ -388,49 +388,49 @@ FROM RDB$DATABASE""", "SELECT 1", [("1.20", "-12345.60", "-92233720368547758.08"
 
     def lexical_boundary(self):
         client = SimpleClient(self).login()
-        self.sql(client, '(SELECT CAST(42 AS INTEGER) FROM RDB$DATABASE)', 'SELECT 1', [(42,)], [23])
+        self.sql(client, '(SELECT CAST(42 AS INTEGER) FROM "SYSTEM"."RDB$DATABASE")', 'SELECT 1', [(42,)], [23])
         self.sql(client, '-- UPDATE OR INSERT;\n /* ALTER SESSION RESET */ sElEcT '
-                 'CAST(42 AS INTEGER) AS "UPDATE" FROM RDB$DATABASE', 'SELECT 1', [(42,)], [23])
-        self.sql(client, 'wItH "UPDATE"("RETURNING") AS (SELECT CAST(43 AS INTEGER) FROM RDB$DATABASE) '
+                 'CAST(42 AS INTEGER) AS "UPDATE" FROM "SYSTEM"."RDB$DATABASE"', 'SELECT 1', [(42,)], [23])
+        self.sql(client, 'wItH "UPDATE"("RETURNING") AS (SELECT CAST(43 AS INTEGER) FROM "SYSTEM"."RDB$DATABASE") '
                  'SELECT "RETURNING", CAST(\'COMMIT; BEGIN $1 RETURNING\' AS VARCHAR(40)) AS "CREATE TABLE" '
                  'FROM "UPDATE"', 'SELECT 1', [(43, 'COMMIT; BEGIN $1 RETURNING')], [23, 1043])
-        self.sql(client, '/* CREATE VIEW */ cReAtE GLOBAL TEMPORARY TABLE P4_LEXICAL '
+        self.sql(client, '/* CREATE VIEW */ cReAtE GLOBAL TEMPORARY TABLE "PUBLIC"."P4_LEXICAL" '
                  '("RETURNING" INTEGER) ON COMMIT PRESERVE ROWS', 'CREATE TABLE')
-        self.sql(client, 'CREATE UNIQUE DESCENDING INDEX P4_LEXICAL_INDEX ON P4_LEXICAL("RETURNING")', 'CREATE INDEX')
-        self.sql(client, '/* SELECT */ InSeRt INTO P4_LEXICAL("RETURNING") VALUES(44) '
+        self.sql(client, 'CREATE UNIQUE DESCENDING INDEX "PUBLIC"."P4_LEXICAL_INDEX" ON "PUBLIC"."P4_LEXICAL"("RETURNING")', 'CREATE INDEX')
+        self.sql(client, '/* SELECT */ InSeRt INTO "PUBLIC"."P4_LEXICAL"("RETURNING") VALUES(44) '
                  'rEtUrNiNg "RETURNING"', 'INSERT 0 1', [(44,)], [23])
-        self.sql(client, 'UpDaTe P4_LEXICAL SET "RETURNING"=45 RETURNING "RETURNING"',
+        self.sql(client, 'UpDaTe "PUBLIC"."P4_LEXICAL" SET "RETURNING"=45 RETURNING "RETURNING"',
                  'UPDATE 1', [(45,)], [23])
-        self.sql(client, 'DeLeTe FROM P4_LEXICAL RETURNING "RETURNING"', 'DELETE 1', [(45,)], [23])
-        self.sql(client, 'DROP INDEX P4_LEXICAL_INDEX', 'DROP INDEX')
-        self.sql(client, 'DROP TABLE P4_LEXICAL', 'DROP TABLE')
-        self.sql(client, 'CREATE PACKAGE BODY AS BEGIN END', 'CREATE PACKAGE')
-        self.sql(client, 'DROP PACKAGE BODY', 'DROP PACKAGE')
-        self.sql(client, 'CREATE PACKAGE P4_LEXICAL_PACKAGE AS BEGIN END', 'CREATE PACKAGE')
-        self.sql(client, 'CREATE PACKAGE BODY P4_LEXICAL_PACKAGE AS BEGIN END', 'CREATE PACKAGE BODY')
-        self.sql(client, 'DROP PACKAGE BODY P4_LEXICAL_PACKAGE', 'DROP PACKAGE BODY')
-        self.sql(client, 'DROP PACKAGE P4_LEXICAL_PACKAGE', 'DROP PACKAGE')
-        self.sql(client, "SELECT RDB$SET_CONTEXT('USER_SESSION','P4_LEXICAL_GUARD','kept') FROM RDB$DATABASE",
+        self.sql(client, 'DeLeTe FROM "PUBLIC"."P4_LEXICAL" RETURNING "RETURNING"', 'DELETE 1', [(45,)], [23])
+        self.sql(client, 'DROP INDEX "PUBLIC"."P4_LEXICAL_INDEX"', 'DROP INDEX')
+        self.sql(client, 'DROP TABLE "PUBLIC"."P4_LEXICAL"', 'DROP TABLE')
+        self.sql(client, 'CREATE PACKAGE "PUBLIC"."BODY" AS BEGIN END', 'CREATE PACKAGE')
+        self.sql(client, 'DROP PACKAGE "PUBLIC"."BODY"', 'DROP PACKAGE')
+        self.sql(client, 'CREATE PACKAGE "PUBLIC"."P4_LEXICAL_PACKAGE" AS BEGIN END', 'CREATE PACKAGE')
+        self.sql(client, 'CREATE PACKAGE BODY "PUBLIC"."P4_LEXICAL_PACKAGE" AS BEGIN END', 'CREATE PACKAGE BODY')
+        self.sql(client, 'DROP PACKAGE BODY "PUBLIC"."P4_LEXICAL_PACKAGE"', 'DROP PACKAGE BODY')
+        self.sql(client, 'DROP PACKAGE "PUBLIC"."P4_LEXICAL_PACKAGE"', 'DROP PACKAGE')
+        self.sql(client, "SELECT RDB$SET_CONTEXT('USER_SESSION','P4_LEXICAL_GUARD','kept') FROM \"SYSTEM\".\"RDB$DATABASE\"",
                  'SELECT 1', [(0,)], [23])
         # Real transaction/session controls are covered by the P5 stateful suite.
-        for sql in ("USING IN AUTONOMOUS TRANSACTION DO INSERT INTO P4_EFFECTS VALUES (GEN_ID(P4_GUARD,1))",):
+        for sql in ('USING IN AUTONOMOUS TRANSACTION DO INSERT INTO "PUBLIC"."P4_EFFECTS" VALUES (GEN_ID("PUBLIC"."P4_GUARD",1))',):
             result = client.query(sql.encode())
             require(result['error'] is not None and result['error']['C'] == '0A000',
                     f"unsupported SQL {sql!r} did not return 0A000: {result!r}")
             self.no_transactions()
             self.sql(client, "SELECT CAST(RDB$GET_CONTEXT('USER_SESSION','P4_LEXICAL_GUARD') AS VARCHAR(4)) "
-                     "FROM RDB$DATABASE", 'SELECT 1', [('kept',)], [1043])
+                     "FROM \"SYSTEM\".\"RDB$DATABASE\"", 'SELECT 1', [('kept',)], [1043])
         for sql, state in (("ALTER SESSION RESET EXTRA_TOKEN", '42601'), ("COMMIT EXTRA_TOKEN", '42601'),
                            ("USING DO", '42601'),
                            # Native USING requires parameters, local declarations or an autonomous clause.
-                           ("USING DO INSERT INTO P4_EFFECTS VALUES(GEN_ID(P4_GUARD,1))", '42000'),
-                           ("USING DO INSERT INTO P4_EFFECTS VALUES(GEN_ID(P4_GUARD,1)); SELECT 42 FROM RDB$DATABASE", '42000')):
+                           ('USING DO INSERT INTO "PUBLIC"."P4_EFFECTS" VALUES(GEN_ID("PUBLIC"."P4_GUARD",1))', '42000'),
+                           ('USING DO INSERT INTO "PUBLIC"."P4_EFFECTS" VALUES(GEN_ID("PUBLIC"."P4_GUARD",1)); SELECT 42 FROM "SYSTEM"."RDB$DATABASE"', '42000')):
             result = client.query(sql.encode())
             require(result['error'] is not None and result['error']['C'] == state,
                     f"invalid SQL {sql!r} did not return {state}: {result!r}")
             self.no_transactions()
             client.query_integer()
-        require(self.scalar_native('SELECT GEN_ID(P4_GUARD,0) AS OBSERVED FROM RDB$DATABASE') == 0,
+        require(self.scalar_native('SELECT GEN_ID("PUBLIC"."P4_GUARD",0) AS OBSERVED FROM "SYSTEM"."RDB$DATABASE"') == 0,
                 'classification executed an unsupported or invalid first command')
         client.close()
         self.no_attachments()
@@ -446,7 +446,7 @@ BEGIN
   AUTOTERM_ANSWER = 6 * 7;
   SUSPEND;
 END;
-SELECT CAST(49 AS INTEGER) AS NATIVE_FOLLOWUP FROM RDB$DATABASE;
+SELECT CAST(49 AS INTEGER) AS NATIVE_FOLLOWUP FROM \"SYSTEM\".\"RDB$DATABASE\";
 ROLLBACK;
 QUIT;
 """

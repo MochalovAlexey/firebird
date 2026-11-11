@@ -23,14 +23,14 @@ import psycopg
 from psycopg import pq, sql
 
 
-ANSWER = 'SELECT CAST(42 AS INTEGER) AS "answer" FROM RDB$DATABASE'
+ANSWER = 'SELECT CAST(42 AS INTEGER) AS "answer" FROM "SYSTEM"."RDB$DATABASE"'
 SCALARS = """SELECT CAST(-32768 AS SMALLINT),CAST('9223372036854775807' AS BIGINT),
 CAST(TRUE AS BOOLEAN),CAST('Я x ' AS VARCHAR(8)),CAST('Я' AS CHAR(4)),CAST(NULL AS INTEGER),
 CAST(1.25 AS FLOAT),CAST(-2.5 AS DOUBLE PRECISION),
 CAST('-170141183460469231731687303715884105728' AS INT128),
 CAST('0.00000000000000000000000000000000000001' AS NUMERIC(38,38)),
 DATE '1999-12-31',TIME '00:00:00.0001',TIMESTAMP '1999-12-31 23:59:59.9999'
-FROM RDB$DATABASE"""
+FROM \"SYSTEM\".\"RDB$DATABASE\""""
 EXPECTED = (-32768,9223372036854775807,True,'Я x ','Я   ',None,1.25,-2.5,
             Decimal('-170141183460469231731687303715884105728'),Decimal('1e-38'),
             date(1999,12,31),time(0,0,0,100),datetime(1999,12,31,23,59,59,999900))
@@ -114,7 +114,7 @@ class Profiles:
                 require(cursor.fetchone() == EXPECTED and cursor.fetchone() is None, 'Simple scalar decoding differs')
                 scalar_metadata(cursor,False)
                 state(connection,pq.TransactionStatus.IDLE)
-                cursor.execute('SELECT CAST(1 AS INTEGER) FROM RDB$DATABASE WHERE 1=0',prepare=False)
+                cursor.execute('SELECT CAST(1 AS INTEGER) FROM "SYSTEM"."RDB$DATABASE" WHERE 1=0',prepare=False)
                 require(cursor.fetchall() == [] and cursor.rowcount == 0, 'zero-row Simple result differs')
         self.summary['checks'].append('ordinary_cursor_autocommit_simple_p8_scalars_and_empty_result')
 
@@ -136,7 +136,7 @@ class Profiles:
                 require(cursor.fetchone() == (42,), 'prepared query did not survive COMMIT')
                 connection.prepared_max = 2
                 for number in (61,62,63,64):
-                    cursor.execute(f'SELECT CAST({number} AS INTEGER) FROM RDB$DATABASE',prepare=True)
+                    cursor.execute(f'SELECT CAST({number} AS INTEGER) FROM "SYSTEM"."RDB$DATABASE"',prepare=True)
                     require(cursor.fetchone() == (number,), 'prepared LRU query differs')
                 state(connection,pq.TransactionStatus.IDLE)
         self.summary['checks'].append('forced_extended_text_binary_prepared_reuse_commit_and_named_lru_close')
@@ -151,26 +151,26 @@ class Profiles:
                     state(connection,expected)
                     require(cursor.statusmessage == tag, f'{text}: unexpected command tag {cursor.statusmessage}')
                 command('SET TRANSACTION READ WRITE READ COMMITTED NO WAIT',pq.TransactionStatus.INTRANS,'BEGIN')
-                command('INSERT INTO P9_ROWS VALUES(9301,11)',pq.TransactionStatus.INTRANS,'INSERT 0 1')
+                command('INSERT INTO "PUBLIC"."P9_ROWS" VALUES(9301,11)',pq.TransactionStatus.INTRANS,'INSERT 0 1')
                 command('COMMIT',pq.TransactionStatus.IDLE,'COMMIT')
                 command('SET TRANSACTION',pq.TransactionStatus.INTRANS,'BEGIN')
-                command('INSERT INTO P9_ROWS VALUES(9302,22)',pq.TransactionStatus.INTRANS,'INSERT 0 1')
+                command('INSERT INTO "PUBLIC"."P9_ROWS" VALUES(9302,22)',pq.TransactionStatus.INTRANS,'INSERT 0 1')
                 command('ROLLBACK',pq.TransactionStatus.IDLE,'ROLLBACK')
                 command('SET TRANSACTION',pq.TransactionStatus.INTRANS,'BEGIN')
-                command('INSERT INTO P9_ROWS VALUES(9303,33)',pq.TransactionStatus.INTRANS,'INSERT 0 1')
+                command('INSERT INTO "PUBLIC"."P9_ROWS" VALUES(9303,33)',pq.TransactionStatus.INTRANS,'INSERT 0 1')
                 command('SAVEPOINT PSYCO_RECOVER',pq.TransactionStatus.INTRANS,'SAVEPOINT')
-                command('INSERT INTO P9_ROWS VALUES(9304,44)',pq.TransactionStatus.INTRANS,'INSERT 0 1')
-                expected_error(lambda:cursor.execute('INSERT INTO P9_ROWS VALUES(9301,99)'),'23505')
+                command('INSERT INTO "PUBLIC"."P9_ROWS" VALUES(9304,44)',pq.TransactionStatus.INTRANS,'INSERT 0 1')
+                expected_error(lambda:cursor.execute('INSERT INTO "PUBLIC"."P9_ROWS" VALUES(9301,99)'),'23505')
                 state(connection,pq.TransactionStatus.INERROR)
                 expected_error(lambda:cursor.execute(ANSWER),'25P02')
                 command('ROLLBACK TO SAVEPOINT PSYCO_RECOVER',pq.TransactionStatus.INTRANS,'ROLLBACK')
                 command('RELEASE SAVEPOINT PSYCO_RECOVER',pq.TransactionStatus.INTRANS,'RELEASE')
                 command('COMMIT',pq.TransactionStatus.IDLE,'COMMIT')
                 command('SET TRANSACTION',pq.TransactionStatus.INTRANS,'BEGIN')
-                command('INSERT INTO P9_ROWS VALUES(9304,44)',pq.TransactionStatus.INTRANS,'INSERT 0 1')
-                expected_error(lambda:cursor.execute('INSERT INTO P9_ROWS VALUES(9301,99)'),'23505')
+                command('INSERT INTO "PUBLIC"."P9_ROWS" VALUES(9304,44)',pq.TransactionStatus.INTRANS,'INSERT 0 1')
+                expected_error(lambda:cursor.execute('INSERT INTO "PUBLIC"."P9_ROWS" VALUES(9301,99)'),'23505')
                 command('COMMIT',pq.TransactionStatus.IDLE,'ROLLBACK')
-                cursor.execute('SELECT ID,V FROM P9_ROWS WHERE ID BETWEEN 9301 AND 9304 ORDER BY ID',binary=True)
+                cursor.execute('SELECT "ID","V" FROM "PUBLIC"."P9_ROWS" WHERE "ID" BETWEEN 9301 AND 9304 ORDER BY "ID"',binary=True)
                 require(cursor.fetchall() == [(9301,11),(9303,33)], 'native commit/rollback effects differ')
         self.summary['checks'].append('native_transaction_controls_I_T_E_savepoint_and_failed_commit_no_prepare_cache')
         self.summary['committed_fixture_rows'] = [[9301,11],[9303,33]]
@@ -184,10 +184,10 @@ class Profiles:
             state(connection,pq.TransactionStatus.IDLE)
         self.summary['checks'].append('default_autocommit_false_implicit_BEGIN')
         with self.connect('parameter_and_literal',autocommit=True) as connection:
-            require(connection.execute('SELECT CAST(%s AS INTEGER) FROM RDB$DATABASE',(42,)).fetchone() == (42,),
+            require(connection.execute('SELECT CAST(%s AS INTEGER) FROM "SYSTEM"."RDB$DATABASE"',(42,)).fetchone() == (42,),
                     'typed numbered parameter Bind failed')
             state(connection,pq.TransactionStatus.IDLE)
-            query = sql.SQL('SELECT {} FROM RDB$DATABASE').format(sql.Literal(date(2000,1,1)))
+            query = sql.SQL('SELECT {} FROM "SYSTEM"."RDB$DATABASE"').format(sql.Literal(date(2000,1,1)))
             rendered = query.as_string(connection)
             require('::date' in rendered, 'installed driver did not generate the expected date literal cast')
             require(connection.execute(query).fetchone() == (date(2000,1,1),),
@@ -200,11 +200,11 @@ class Profiles:
         with self.connect('prepared_rollback_limit',autocommit=True) as connection:
             require(connection.execute(ANSWER,prepare=True).fetchone() == (42,), 'prepared-cache setup failed')
             connection.execute('SET TRANSACTION',prepare=False)
-            connection.execute('INSERT INTO P9_ROWS VALUES(9304,44)',prepare=False)
+            connection.execute('INSERT INTO "PUBLIC"."P9_ROWS" VALUES(9304,44)',prepare=False)
             # ROLLBACK itself succeeds; stock Psycopg then emits DEALLOCATE ALL.
             expected_error(lambda:connection.execute('ROLLBACK',prepare=False),'42601')
             state(connection,pq.TransactionStatus.IDLE)
-            require(connection.execute('SELECT COUNT(*) FROM P9_ROWS WHERE ID=9304',prepare=False).fetchone() == (0,),
+            require(connection.execute('SELECT COUNT(*) FROM "PUBLIC"."P9_ROWS" WHERE "ID"=9304',prepare=False).fetchone() == (0,),
                     'ROLLBACK did not happen before the driver maintenance error')
             require(connection.execute(ANSWER,prepare=False).fetchone() == (42,), 'maintenance error did not recover')
         self.summary['expected_limits'].append({'profile':'prepared_cache_ROLLBACK_maintenance_DEALLOCATE_ALL',

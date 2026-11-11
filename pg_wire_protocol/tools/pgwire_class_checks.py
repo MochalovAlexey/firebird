@@ -11,8 +11,8 @@ from pgwire_namespace_checks import (INSTALLER, CATALOG_INSTALLER, allocator,
 from wire_host_smoke import require
 
 CLASS_INSTALLER = INSTALLER.with_name('install_class_catalog.sql')
-CLASS_VIEW = 'PG_CATALOG.PG_CLASS'
-LOOKUP = f'SELECT OID,RELNAME,RELNAMESPACE,RELKIND FROM {CLASS_VIEW}'
+CLASS_VIEW = '"PG_CATALOG"."PG_CLASS"'
+LOOKUP = f'SELECT "OID","RELNAME","RELNAMESPACE","RELKIND" FROM {CLASS_VIEW}'
 TYPES = [20,1043,20,1043]
 LABELS = ['OID','RELNAME','RELNAMESPACE','RELKIND']
 NAMES = ['T','t','MiXeD','Таблица с пробелом','A"quote','Я'*56]
@@ -25,10 +25,10 @@ def values(output, label):
 def relation_metadata(config,label):
     # Read all native relations without the view's JOIN/filter/casts. The oracle
     # selects the supported scope in Python, using the independent private mapping.
-    sql = "SELECT RDB$RELATION_ID AS I,HEX_ENCODE(TRIM(TRAILING FROM RDB$RELATION_NAME)) AS H," \
-          "HEX_ENCODE(TRIM(TRAILING FROM RDB$SCHEMA_NAME)) AS S,COALESCE(RDB$RELATION_TYPE,0) AS T," \
-          "COALESCE(HEX_ENCODE(TRIM(TRAILING FROM RDB$PACKAGE_NAME)),'-') AS P " \
-          "FROM SYSTEM.RDB$RELATIONS ORDER BY RDB$RELATION_ID;\nROLLBACK;\nQUIT;\n"
+    sql = 'SELECT "RDB$RELATION_ID" AS I,HEX_ENCODE(TRIM(TRAILING FROM "RDB$RELATION_NAME")) AS H,' \
+          'HEX_ENCODE(TRIM(TRAILING FROM "RDB$SCHEMA_NAME")) AS S,COALESCE("RDB$RELATION_TYPE",0) AS T,' \
+          'COALESCE(HEX_ENCODE(TRIM(TRAILING FROM "RDB$PACKAGE_NAME")),\'-\') AS P ' \
+          'FROM "SYSTEM"."RDB$RELATIONS" ORDER BY "RDB$RELATION_ID";\nROLLBACK;\nQUIT;\n'
     output = native(config,label,sql,admin=True)['output']
     columns = [values(output,label) for label in ('I','H','S','T','P')]
     require(columns[0] and len({len(column) for column in columns})==1,'Native relation metadata is incomplete')
@@ -48,7 +48,7 @@ def expected_rows(relations,namespaces):
 
 def native_rows(config,label,*,readonly=False):
     sql = ('SET TRANSACTION READ ONLY;\n' if readonly else '') + \
-        f'SELECT OID AS I,HEX_ENCODE(RELNAME) AS H,RELNAMESPACE AS S,RELKIND AS K FROM {CLASS_VIEW} ORDER BY OID;\nROLLBACK;\nQUIT;\n'
+        f'SELECT "OID" AS I,HEX_ENCODE("RELNAME") AS H,"RELNAMESPACE" AS S,"RELKIND" AS K FROM {CLASS_VIEW} ORDER BY "OID";\nROLLBACK;\nQUIT;\n'
     output = native(config,label,sql)['output']
     columns = [values(output,label) for label in ('I','H','S','K')]
     require(len({len(column) for column in columns})==1,'Native PG_CLASS rows are incomplete')
@@ -56,17 +56,17 @@ def native_rows(config,label,*,readonly=False):
 
 
 def class_objects(config,label):
-    sql = "SELECT COUNT(*) AS N FROM SYSTEM.RDB$RELATIONS WHERE RDB$SCHEMA_NAME='PG_CATALOG' AND RDB$RELATION_NAME='PG_CLASS';\n" \
-          "SELECT COUNT(*) AS N FROM SYSTEM.RDB$USER_PRIVILEGES WHERE RDB$RELATION_SCHEMA_NAME='PG_CATALOG' AND RDB$RELATION_NAME='PG_CLASS';\n"
+    sql = 'SELECT COUNT(*) AS N FROM "SYSTEM"."RDB$RELATIONS" WHERE "RDB$SCHEMA_NAME"=\'PG_CATALOG\' AND "RDB$RELATION_NAME"=\'PG_CLASS\';\n' \
+          'SELECT COUNT(*) AS N FROM "SYSTEM"."RDB$USER_PRIVILEGES" WHERE "RDB$RELATION_SCHEMA_NAME"=\'PG_CATALOG\' AND "RDB$RELATION_NAME"=\'PG_CLASS\';\n'
     return numbers(native(config,label,sql+'ROLLBACK;\nQUIT;\n',admin=True)['output'])
 
 
 def protected_state(config,label):
     # Includes bootstrap owner/source/BLR/grants, APP-10 and PG_NAMESPACE definition/grants.
     snapshot = catalog_snapshot(config,label+'_bootstrap',True)
-    grants = native(config,label+'_grants',"SELECT RDB$USER,RDB$USER_TYPE,RDB$GRANTOR,RDB$PRIVILEGE,RDB$GRANT_OPTION,"
-        "RDB$RELATION_SCHEMA_NAME,RDB$RELATION_NAME,RDB$OBJECT_TYPE FROM SYSTEM.RDB$USER_PRIVILEGES "
-        "WHERE RDB$RELATION_NAME IS DISTINCT FROM 'PG_CLASS' AND RDB$USER IS DISTINCT FROM 'PG_CLASS' "
+    grants = native(config,label+'_grants','SELECT "RDB$USER","RDB$USER_TYPE","RDB$GRANTOR","RDB$PRIVILEGE","RDB$GRANT_OPTION",'
+        '"RDB$RELATION_SCHEMA_NAME","RDB$RELATION_NAME","RDB$OBJECT_TYPE" FROM "SYSTEM"."RDB$USER_PRIVILEGES" '
+        'WHERE "RDB$RELATION_NAME" IS DISTINCT FROM \'PG_CLASS\' AND "RDB$USER" IS DISTINCT FROM \'PG_CLASS\' '
         "ORDER BY 1,2,3,4,5,6,7,8;\nROLLBACK;\nQUIT;\n",admin=True)['output']
     return snapshot,grants,mapping(config,label+'_namespaces'),allocator(config,label+'_counter')
 
@@ -77,26 +77,26 @@ def class_catalog_fixture(h):
     bootstrap = INSTALLER.parent.parent/'compat.sql'
     prerequisites = INSTALLER.read_text()+bootstrap.read_text()+CATALOG_INSTALLER.read_text()
     native(config,'class_prerequisites',prerequisites,admin=True)
-    fixtures = 'CREATE SCHEMA "public";\nCREATE SCHEMA CLS_HIDDEN;\n' + \
-        ''.join('CREATE TABLE PUBLIC.'+identifier(name)+'(V INTEGER);\n' for name in NAMES) + \
-        'CREATE TABLE "public".T(V INTEGER);\nCREATE VIEW PUBLIC.CLS_V AS SELECT V FROM PUBLIC.T;\n' \
-        'CREATE TABLE PUBLIC.CLS_SECRET(V INTEGER);\nCREATE VIEW PUBLIC.CLS_SECRET_V AS SELECT V FROM PUBLIC.CLS_SECRET;\n' \
-        'CREATE TABLE CLS_HIDDEN.CLS_NO_USAGE(V INTEGER);\nGRANT SELECT ON CLS_HIDDEN.CLS_NO_USAGE TO PUBLIC;\n' \
-        'CREATE GLOBAL TEMPORARY TABLE PUBLIC.CLS_GTT4(V INTEGER) ON COMMIT PRESERVE ROWS;\n' \
-        'CREATE GLOBAL TEMPORARY TABLE PUBLIC.CLS_GTT5(V INTEGER) ON COMMIT DELETE ROWS;\n' \
-        'CREATE INDEX PUBLIC.CLS_INDEX ON PUBLIC.T(V);\nCREATE SEQUENCE PUBLIC.CLS_SEQUENCE;\n' \
-        'SET TERM ^;\nCREATE PACKAGE PUBLIC.CLS_PKG AS BEGIN\n' \
+    fixtures = 'CREATE SCHEMA "public";\nCREATE SCHEMA "CLS_HIDDEN";\n' + \
+        ''.join('CREATE TABLE "PUBLIC".'+identifier(name)+'(V INTEGER);\n' for name in NAMES) + \
+        'CREATE TABLE "public".T("V" INTEGER);\nCREATE VIEW "PUBLIC"."CLS_V" AS SELECT "V" FROM "PUBLIC".T;\n' \
+        'CREATE TABLE "PUBLIC"."CLS_SECRET"("V" INTEGER);\nCREATE VIEW "PUBLIC"."CLS_SECRET_V" AS SELECT "V" FROM "PUBLIC"."CLS_SECRET";\n' \
+        'CREATE TABLE "CLS_HIDDEN"."CLS_NO_USAGE"("V" INTEGER);\nGRANT SELECT ON "CLS_HIDDEN"."CLS_NO_USAGE" TO "PUBLIC";\n' \
+        'CREATE GLOBAL TEMPORARY TABLE "PUBLIC"."CLS_GTT4"("V" INTEGER) ON COMMIT PRESERVE ROWS;\n' \
+        'CREATE GLOBAL TEMPORARY TABLE "PUBLIC"."CLS_GTT5"("V" INTEGER) ON COMMIT DELETE ROWS;\n' \
+        'CREATE INDEX "PUBLIC"."CLS_INDEX" ON "PUBLIC".T("V");\nCREATE SEQUENCE "PUBLIC"."CLS_SEQUENCE";\n' \
+        'SET TERM ^;\nCREATE PACKAGE "PUBLIC"."CLS_PKG" AS BEGIN\n' \
         'TEMPORARY TABLE CLS_PT(V INTEGER) ON COMMIT PRESERVE ROWS;\nEND^\nSET TERM ;^\n' \
-        'GRANT CREATE SCHEMA TO USER WIRE_HOST_TEST;\nCOMMIT;\n'
+        'GRANT CREATE SCHEMA TO USER "WIRE_HOST_TEST";\nCOMMIT;\n'
     native(config,'class_fixtures',fixtures,admin=True)
     # Only this explicit fixture grant enables the later ordinary-user DDL.
-    native(config,'class_writer_schema','CREATE SCHEMA CLS_WRITER;\nCOMMIT;\n')
+    native(config,'class_writer_schema','CREATE SCHEMA "CLS_WRITER";\nCOMMIT;\n')
     external = h.work/'external.dat'
-    native(config,'class_external_fixture',f"CREATE TABLE PUBLIC.CLS_EXTERNAL EXTERNAL FILE '{external}' (V INTEGER);\nCOMMIT;\n",admin=True)
+    native(config,'class_external_fixture',f"CREATE TABLE \"PUBLIC\".\"CLS_EXTERNAL\" EXTERNAL FILE '{external}' (\"V\" INTEGER);\nCOMMIT;\n",admin=True)
     installer = CLASS_INSTALLER.read_text()
     before = protected_state(config,'class_before')
     relations = relation_metadata(config,'class_relations_before')
-    injected = installer.replace('\nCOMMIT;', '\nSELECT 1/0 FROM SYSTEM.RDB$DATABASE;\nCOMMIT;',1)
+    injected = installer.replace('\nCOMMIT;', '\nSELECT 1/0 FROM "SYSTEM"."RDB$DATABASE";\nCOMMIT;',1)
     error = native(config,'class_install_failure',injected,admin=True,error=True)
     require(error['sqlstates']==['22012'] and class_objects(config,'class_failure_objects')==[0,0] and
             protected_state(config,'class_failure')==before and relation_metadata(config,'class_failure_relations')==relations,
@@ -129,15 +129,15 @@ def class_catalog_fixture(h):
     report['missing_dependency_sqlstates'] = error['sqlstates']
     report['checks'].append('missing_namespace_dependency_refuses_without_partial_view')
     foreign = fresh('collision')
-    native(foreign,'class_collision_registry',INSTALLER.read_text()+'GRANT CREATE SCHEMA TO USER WIRE_HOST_TEST;\nCOMMIT;\n',admin=True)
-    native(foreign,'class_collision_object','CREATE SCHEMA PG_CATALOG;\nCREATE TABLE PG_CATALOG.PG_CLASS(V INTEGER);\n'
-           'INSERT INTO PG_CATALOG.PG_CLASS VALUES(73);\nCOMMIT;\n')
+    native(foreign,'class_collision_registry',INSTALLER.read_text()+'GRANT CREATE SCHEMA TO USER "WIRE_HOST_TEST";\nCOMMIT;\n',admin=True)
+    native(foreign,'class_collision_object','CREATE SCHEMA "PG_CATALOG";\nCREATE TABLE "PG_CATALOG"."PG_CLASS"("V" INTEGER);\n'
+           'INSERT INTO "PG_CATALOG"."PG_CLASS" VALUES(73);\nCOMMIT;\n')
     native(foreign,'class_collision_dependencies',bootstrap.read_text()+CATALOG_INSTALLER.read_text(),admin=True)
     old = protected_state(foreign,'class_collision_before')
     rels = relation_metadata(foreign,'class_collision_relations_before')
-    sql = "SELECT RDB$OWNER_NAME FROM SYSTEM.RDB$RELATIONS WHERE RDB$SCHEMA_NAME='PG_CATALOG' AND RDB$RELATION_NAME='PG_CLASS';\n" \
-          "SELECT RDB$USER,RDB$PRIVILEGE,RDB$GRANT_OPTION FROM SYSTEM.RDB$USER_PRIVILEGES WHERE RDB$RELATION_NAME='PG_CLASS' ORDER BY 1,2,3;\n" \
-          'SELECT V FROM PG_CATALOG.PG_CLASS;\nROLLBACK;\nQUIT;\n'
+    sql = 'SELECT "RDB$OWNER_NAME" FROM "SYSTEM"."RDB$RELATIONS" WHERE "RDB$SCHEMA_NAME"=\'PG_CATALOG\' AND "RDB$RELATION_NAME"=\'PG_CLASS\';\n' \
+          'SELECT "RDB$USER","RDB$PRIVILEGE","RDB$GRANT_OPTION" FROM "SYSTEM"."RDB$USER_PRIVILEGES" WHERE "RDB$RELATION_NAME"=\'PG_CLASS\' ORDER BY 1,2,3;\n' \
+          'SELECT "V" FROM "PG_CATALOG"."PG_CLASS";\nROLLBACK;\nQUIT;\n'
     original = native(foreign,'class_collision_snapshot_before',sql,admin=True)['output']
     error = native(foreign,'class_collision_install',installer,admin=True,error=True)
     require('already exists' in error['output'].lower() and protected_state(foreign,'class_collision_after')==old and
@@ -194,12 +194,12 @@ def class_catalog_client(config,client):
         require(data['parameter_oids']==input_types and [c['name'] for c in data['columns']]==LABELS,'Class SQL-derived input metadata differs')
         report['metadata'][name] = {'input':input_types,'output':TYPES,'labels':LABELS,'size_typmod_format':data['metadata']}
     def wire(*,connection=client,state=0):
-        data = query(LOOKUP+' ORDER BY OID',connection=connection,state=state,oids=TYPES)
+        data = query(LOOKUP+' ORDER BY "OID"',connection=connection,state=state,oids=TYPES)
         require([c['name'] for c in data['columns']]==LABELS,'Native labels changed')
-        raw = query('SELECT RDB$RELATION_ID,TRIM(TRAILING FROM RDB$RELATION_NAME),TRIM(TRAILING FROM RDB$SCHEMA_NAME),'
-            'COALESCE(RDB$RELATION_TYPE,0),RDB$PACKAGE_NAME FROM SYSTEM.RDB$RELATIONS ORDER BY RDB$RELATION_ID',
+        raw = query('SELECT "RDB$RELATION_ID",TRIM(TRAILING FROM "RDB$RELATION_NAME"),TRIM(TRAILING FROM "RDB$SCHEMA_NAME"),'
+            'COALESCE("RDB$RELATION_TYPE",0),"RDB$PACKAGE_NAME" FROM "SYSTEM"."RDB$RELATIONS" ORDER BY "RDB$RELATION_ID"',
             connection=connection,state=state)['rows']
-        namespaces = query('SELECT NATIVE_NAME,NAMESPACE_ID FROM PGWIRE_COMPAT.NAMESPACES',connection=connection,state=state)['rows']
+        namespaces = query('SELECT "NATIVE_NAME","NAMESPACE_ID" FROM "PGWIRE_COMPAT"."NAMESPACES"',connection=connection,state=state)['rows']
         rows = expected_rows([(int(i),name,schema,int(kind),'-' if package is None else package) for i,name,schema,kind,package in raw],
                              {name:int(value) for name,value in namespaces})
         require(data['rows']==rows,'Public view differs from native relation metadata in current transaction')
@@ -218,16 +218,16 @@ def class_catalog_client(config,client):
     targets = [by_name[(namespaces['PUBLIC'],name)] for name in NAMES] + \
               [by_name[(namespaces['public'],'T')],by_name[(namespaces['PUBLIC'],'CLS_V')]]
     require(len({row[0] for row in targets})==len(targets),'Case/schema collision mixed relation identities')
-    params(LOOKUP+' ORDER BY OID',rows=initial,oids=TYPES)
-    params(LOOKUP+' ORDER BY OID',binary=True,rows=binary_rows(initial),oids=TYPES)
-    prepare('class_by_id',LOOKUP+' WHERE OID=$1',[20])
-    prepare('class_by_name',LOOKUP+' WHERE RELNAME=$1 AND RELNAMESPACE=$2',[1043,20])
-    prepare('class_by_namespace',LOOKUP+' WHERE RELNAMESPACE=$1 ORDER BY OID',[20])
+    params(LOOKUP+' ORDER BY "OID"',rows=initial,oids=TYPES)
+    params(LOOKUP+' ORDER BY "OID"',binary=True,rows=binary_rows(initial),oids=TYPES)
+    prepare('class_by_id',LOOKUP+' WHERE "OID"=$1',[20])
+    prepare('class_by_name',LOOKUP+' WHERE "RELNAME"=$1 AND "RELNAMESPACE"=$2',[1043,20])
+    prepare('class_by_namespace',LOOKUP+' WHERE "RELNAMESPACE"=$1 ORDER BY "OID"',[20])
     for row in targets:
         oid,name,namespace,kind = row
         literal = "'"+name.replace("'","''")+"'"
-        query(LOOKUP+f' WHERE OID={oid}',rows=[row],oids=TYPES)
-        query(LOOKUP+f' WHERE RELNAME={literal} AND RELNAMESPACE={namespace}',rows=[row],oids=TYPES)
+        query(LOOKUP+f' WHERE "OID"={oid}',rows=[row],oids=TYPES)
+        query(LOOKUP+f' WHERE "RELNAME"={literal} AND "RELNAMESPACE"={namespace}',rows=[row],oids=TYPES)
         for binary in (False,True):
             result = binary_rows([row]) if binary else [row]
             params('class_by_id',[struct.pack('!q',int(oid)) if binary else oid],prepared=True,formats=[int(binary)],
@@ -237,20 +237,20 @@ def class_catalog_client(config,client):
     for schema in ('PUBLIC','public','PG_CATALOG'):
         value = namespaces[schema]
         rows = [row for row in initial if row[2]==str(value)]
-        query(LOOKUP+f' WHERE RELNAMESPACE={value} ORDER BY OID',rows=rows,oids=TYPES)
+        query(LOOKUP+f' WHERE "RELNAMESPACE"={value} ORDER BY "OID"',rows=rows,oids=TYPES)
         for binary in (False,True):
             params('class_by_namespace',[struct.pack('!q',value) if binary else str(value)],prepared=True,formats=[int(binary)],
                    binary=binary,rows=binary_rows(rows) if binary else rows,oids=TYPES)
     params('class_by_name',['absent',str(namespaces['PUBLIC'])],prepared=True,rows=[],oids=TYPES)
     params('class_by_id',['0'],prepared=True,rows=[],oids=TYPES)
-    for expression in ('OID AS "oid_alias"','CAST(OID AS BIGINT) AS OID'):
-        sql = f'SELECT {expression} FROM {CLASS_VIEW} WHERE OID=1'
+    for expression in ('"OID" AS "oid_alias"','CAST("OID" AS BIGINT) AS "OID"'):
+        sql = f'SELECT {expression} FROM {CLASS_VIEW} WHERE "OID"=1'
         query(sql,rows=[['1']],oids=[20])
         params(sql,binary=True,rows=[[struct.pack('!q',1).hex()]],oids=[20])
-    diagnostic = f"SELECT 1::INT8 FROM {CLASS_VIEW} WHERE RELKIND='r' AND RELNAME='T' AND RELNAMESPACE={namespaces['PUBLIC']} LIMIT 1"
+    diagnostic = f"SELECT 1::INT8 FROM {CLASS_VIEW} WHERE \"RELKIND\"='r' AND \"RELNAME\"='T' AND \"RELNAMESPACE\"={namespaces['PUBLIC']} LIMIT 1"
     query(diagnostic,rows=[['1']],oids=[20])
-    query(diagnostic.replace("RELNAME='T'","RELNAME='absent'"),rows=[],oids=[20])
-    query(diagnostic.replace("RELNAME='T'","RELNAME='CLS_V'"),rows=[],oids=[20])
+    query(diagnostic.replace('"RELNAME"=\'T\'','"RELNAME"=\'absent\''),rows=[],oids=[20])
+    query(diagnostic.replace('"RELNAME"=\'T\'','"RELNAME"=\'CLS_V\''),rows=[],oids=[20])
     record('native_oracle_exact_names_ids_namespaces_simple_extended_prepared_binary_metadata_diagnostic')
 
     excluded = [row for row in relations if row[3] not in (0,1) or row[4]!='-']
@@ -261,13 +261,13 @@ def class_catalog_client(config,client):
     # Separate native attachment: actual LTT and a declared temporary table have
     # usable data, but no permanent catalog rows. No savepoint/crash repro.
     output = native(config,'class_ltt',
-        'CREATE LOCAL TEMPORARY TABLE CLS_WRITER.CLS_LTT(V INTEGER) ON COMMIT PRESERVE ROWS;\n'
-        'INSERT INTO CLS_WRITER.CLS_LTT VALUES(7);\nCOMMIT;\nSELECT V AS N FROM CLS_WRITER.CLS_LTT;\n'
-        f"SELECT COUNT(*) AS N FROM {CLASS_VIEW} WHERE RELNAME='CLS_LTT';\n"
-        "SELECT COUNT(*) AS N FROM SYSTEM.RDB$RELATIONS WHERE RDB$RELATION_NAME='CLS_LTT';\n"
-        'SET TERM ^;\nEXECUTE BLOCK RETURNS (N INTEGER) AS DECLARE LOCAL TEMPORARY TABLE CLS_DECL(V INTEGER);\n'
-        'BEGIN INSERT INTO CLS_DECL VALUES(8); SELECT V FROM CLS_DECL INTO :N; SUSPEND; END^\nSET TERM ;^\n'
-        f"SELECT COUNT(*) AS N FROM {CLASS_VIEW} WHERE RELNAME='CLS_DECL';\nROLLBACK;\nQUIT;\n")['output']
+        'CREATE LOCAL TEMPORARY TABLE "CLS_WRITER"."CLS_LTT"("V" INTEGER) ON COMMIT PRESERVE ROWS;\n'
+        'INSERT INTO "CLS_WRITER"."CLS_LTT" VALUES(7);\nCOMMIT;\nSELECT "V" AS N FROM "CLS_WRITER"."CLS_LTT";\n'
+        f"SELECT COUNT(*) AS N FROM {CLASS_VIEW} WHERE \"RELNAME\"='CLS_LTT';\n"
+        'SELECT COUNT(*) AS N FROM "SYSTEM"."RDB$RELATIONS" WHERE "RDB$RELATION_NAME"=\'CLS_LTT\';\n'
+        'SET TERM ^;\nEXECUTE BLOCK RETURNS (N INTEGER) AS DECLARE LOCAL TEMPORARY TABLE "CLS_DECL"("V" INTEGER);\n'
+        'BEGIN INSERT INTO "CLS_DECL" VALUES(8); SELECT "V" FROM "CLS_DECL" INTO :N; SUSPEND; END^\nSET TERM ;^\n'
+        f"SELECT COUNT(*) AS N FROM {CLASS_VIEW} WHERE \"RELNAME\"='CLS_DECL';\nROLLBACK;\nQUIT;\n")['output']
     require(numbers(output)==[7,0,0,8,0] and wire()==initial and relation_metadata(config,'class_after_ltt')==relations,
             'Local/declared temporary tables changed permanent catalog')
     record('gtt_package_virtual_external_index_sequence_and_local_declared_temporary_exclusions')
@@ -279,11 +279,11 @@ def class_catalog_client(config,client):
         schema,table = name.split('.')
         require((namespaces[schema],table) in by_name,'Privileges filtered catalog row')
     for admin in (False,True):
-        for i,sql in enumerate((f"INSERT INTO {CLASS_VIEW} VALUES(1,'bad',1,'r')",f'UPDATE {CLASS_VIEW} SET OID=1',f'DELETE FROM {CLASS_VIEW}')):
+        for i,sql in enumerate((f"INSERT INTO {CLASS_VIEW} VALUES(1,'bad',1,'r')",f'UPDATE {CLASS_VIEW} SET "OID"=1',f'DELETE FROM {CLASS_VIEW}')):
             denied = native(config,f'class_readonly_{int(admin)}_{i}',sql+';\nCOMMIT;\nQUIT;\n',admin=admin,error=True)
             require('read-only' in denied['output'].lower() or (not admin and 'permission' in denied['output'].lower()),
                     'View write failed for a different reason')
-    denied = native(config,'class_no_ddl_grant','CREATE TABLE PUBLIC.CLS_DENIED(V INTEGER);\nCOMMIT;\nQUIT;\n',error=True)
+    denied = native(config,'class_no_ddl_grant','CREATE TABLE "PUBLIC"."CLS_DENIED"("V" INTEGER);\nCOMMIT;\nQUIT;\n',error=True)
     require('permission' in denied['output'].lower(),'Installer unexpectedly enabled DDL in PUBLIC')
     query('SET TRANSACTION READ ONLY',state=2)
     require(wire(state=2)==initial and wire(state=2)==initial,'READ ONLY lookup changed relation rows')
@@ -292,7 +292,7 @@ def class_catalog_client(config,client):
             native_rows(config,'class_native_readonly_repeat',readonly=True)==initial and
             relation_metadata(config,'class_after_readonly')==relations and protected_state(config,'class_access_after')==before,
             'Reads/denied writes changed relation metadata, namespace counter or grants')
-    require(query('SELECT PG_CATALOG.PG_BACKEND_PID()')['rows']==query('SELECT CURRENT_CONNECTION')['rows'], 'Bootstrap function changed')
+    require(query('SELECT "PG_CATALOG"."PG_BACKEND_PID"()')['rows']==query('SELECT CURRENT_CONNECTION')['rows'], 'Bootstrap function changed')
     record('unfiltered_catalog_without_data_privileges_owner_readonly_no_new_grants_readonly_no_allocation')
 
     other = Libpq(config)
@@ -302,9 +302,9 @@ def class_catalog_client(config,client):
         ns = str(namespaces['CLS_WRITER'])
         for kind in ('TABLE','VIEW'):
             name = 'CLS_TX_'+kind
-            create = ('CREATE TABLE CLS_WRITER.'+name+'(V INTEGER)' if kind=='TABLE' else
-                      'CREATE VIEW CLS_WRITER.'+name+' AS SELECT 1 AS V FROM SYSTEM.RDB$DATABASE')
-            drop = 'DROP '+kind+' CLS_WRITER.'+name
+            create = ('CREATE TABLE "CLS_WRITER".'+identifier(name)+'(\"V\" INTEGER)' if kind=='TABLE' else
+                      'CREATE VIEW "CLS_WRITER".'+identifier(name)+' AS SELECT 1 AS "V" FROM "SYSTEM"."RDB$DATABASE"')
+            drop = 'DROP '+kind+' \"CLS_WRITER\".'+identifier(name)
             current = wire()
             query('BEGIN',state=2)
             query(create,state=2)
@@ -315,8 +315,8 @@ def class_catalog_client(config,client):
             require(wire()==wire(connection=other)==native_rows(config,'class_committed_'+kind), 'Committed CREATE not visible')
             native_state = relation_metadata(config,'class_oracle_created_'+kind)
             require(wire()==expected_rows(native_state,namespaces),'Committed CREATE native ID differs')
-            alter = ('ALTER TABLE CLS_WRITER.'+name+' ADD W INTEGER' if kind=='TABLE' else
-                     'ALTER VIEW CLS_WRITER.'+name+' AS SELECT 2 AS V FROM SYSTEM.RDB$DATABASE')
+            alter = ('ALTER TABLE "CLS_WRITER".'+identifier(name)+' ADD \"W\" INTEGER' if kind=='TABLE' else
+                     'ALTER VIEW "CLS_WRITER".'+identifier(name)+' AS SELECT 2 AS "V" FROM "SYSTEM"."RDB$DATABASE"')
             query(alter)
             require([row for row in wire() if row[1]==name and row[2]==ns]==own,'ALTER changed relation identity')
             query('BEGIN',state=2)

@@ -6,6 +6,7 @@ import os
 import re
 import struct
 import subprocess
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,7 +15,7 @@ from pgwire_startup_smoke import packet
 from wire_host_smoke import Harness, require
 
 SELECT = 'SELECT CAST($1 AS BLOB SUB_TYPE BINARY)'
-INSERT = 'INSERT INTO BIN_ROWS(ID,B,NOTE) VALUES($1,$2,$3) RETURNING B'
+INSERT = 'INSERT INTO "PUBLIC"."BIN_ROWS"("ID","B","NOTE") VALUES($1,$2,$3) RETURNING "B"'
 CONFIG_UPDATE = 'UPDATE public.files SET MODIFIED = $1, DATASIZE = $2, BINARYDATA = $3 WHERE FILENAME = $4 AND PARTNO = $5'
 
 
@@ -49,24 +50,25 @@ def blob_input_fixture(h):
     blobs, _ = mixed_shape()
     fields = ','.join(f'C{i} ' + ('BLOB SUB_TYPE BINARY' if i in blobs else 'INTEGER') for i in range(92))
     h.isql('blob_input_schema', f"CONNECT '{h.database}';\n"
-        'CREATE TABLE BIN_ROWS(ID INTEGER NOT NULL PRIMARY KEY, B BLOB SUB_TYPE BINARY, NOTE VARCHAR(12));\n'
-        'CREATE SEQUENCE BIN_GUARD;\n'
-        'CREATE TABLE PUBLIC.FILES(MODIFIED TIMESTAMP, DATASIZE BIGINT, BINARYDATA BLOB SUB_TYPE BINARY, '
-        'FILENAME VARCHAR(80) CHARACTER SET UTF8, PARTNO INTEGER);\n'
-        "INSERT INTO PUBLIC.FILES VALUES(TIMESTAMP '2000-01-01',0,NULL,'config',1);\n"
-        "INSERT INTO PUBLIC.FILES VALUES(TIMESTAMP '2000-01-01',0,NULL,'config',2);\n"
-        "INSERT INTO PUBLIC.FILES VALUES(TIMESTAMP '2000-01-01',0,NULL,'other',1);\n"
-        f'CREATE TABLE BIN_MIXED({fields});\n'
+        'CREATE SCHEMA "public"; GRANT USAGE ON SCHEMA "public" TO "PUBLIC";\n'
+        'CREATE TABLE "PUBLIC"."BIN_ROWS"("ID" INTEGER NOT NULL PRIMARY KEY, "B" BLOB SUB_TYPE BINARY, "NOTE" VARCHAR(12));\n'
+        'CREATE SEQUENCE "PUBLIC"."BIN_GUARD";\n'
+        'CREATE TABLE "public"."files"("modified" TIMESTAMP, "datasize" BIGINT, "binarydata" BLOB SUB_TYPE BINARY, '
+        '"filename" VARCHAR(80) CHARACTER SET UTF8, "partno" INTEGER);\n'
+        'INSERT INTO "public"."files" VALUES(TIMESTAMP \'2000-01-01\',0,NULL,\'config\',1);\n'
+        'INSERT INTO "public"."files" VALUES(TIMESTAMP \'2000-01-01\',0,NULL,\'config\',2);\n'
+        'INSERT INTO "public"."files" VALUES(TIMESTAMP \'2000-01-01\',0,NULL,\'other\',1);\n'
+        f'CREATE TABLE "PUBLIC"."BIN_MIXED"({fields});\n'
         'SET TERM ^;\n'
-        'CREATE TRIGGER BIN_COUNT FOR BIN_ROWS ACTIVE BEFORE INSERT POSITION 0 AS DECLARE N BIGINT; '
-        'BEGIN N=GEN_ID(BIN_GUARD,1); END^\n'
-        'CREATE PROCEDURE BIN_PROC(A BLOB SUB_TYPE BINARY) RETURNS(B BLOB SUB_TYPE BINARY) AS BEGIN B=A; END^\n'
+        'CREATE TRIGGER BIN_COUNT FOR "PUBLIC"."BIN_ROWS" ACTIVE BEFORE INSERT POSITION 0 AS DECLARE "N" BIGINT; '
+        'BEGIN "N"=GEN_ID("PUBLIC"."BIN_GUARD",1); END^\n'
+        'CREATE PROCEDURE "PUBLIC"."BIN_PROC"(A BLOB SUB_TYPE BINARY) RETURNS("B" BLOB SUB_TYPE BINARY) AS BEGIN "B"=A; END^\n'
         'SET TERM ;^\n'
-        'GRANT SELECT,INSERT,UPDATE,DELETE ON BIN_ROWS TO USER WIRE_HOST_TEST;\n'
-        'GRANT SELECT,UPDATE ON PUBLIC.FILES TO USER WIRE_HOST_TEST;\n'
-        'GRANT SELECT,INSERT ON BIN_MIXED TO USER WIRE_HOST_TEST;\n'
-        'GRANT EXECUTE ON PROCEDURE BIN_PROC TO USER WIRE_HOST_TEST;\n'
-        'GRANT USAGE ON SEQUENCE BIN_GUARD TO USER WIRE_HOST_TEST;\nCOMMIT;\nQUIT;\n', embedded=True)
+        'GRANT SELECT,INSERT,UPDATE,DELETE ON "PUBLIC"."BIN_ROWS" TO USER WIRE_HOST_TEST;\n'
+        'GRANT SELECT,UPDATE ON "public"."files" TO USER WIRE_HOST_TEST;\n'
+        'GRANT SELECT,INSERT ON "PUBLIC"."BIN_MIXED" TO USER WIRE_HOST_TEST;\n'
+        'GRANT EXECUTE ON PROCEDURE "PUBLIC"."BIN_PROC" TO USER WIRE_HOST_TEST;\n'
+        'GRANT USAGE ON SEQUENCE "PUBLIC"."BIN_GUARD" TO USER WIRE_HOST_TEST;\nCOMMIT;\nQUIT;\n', embedded=True)
     source = Path(__file__).with_name('pgwire_blob_fixture.cpp')
     run = subprocess.run(['g++','-std=c++17','-g','-O0',str(source),'-I'+str(h.runtime/'include'),
         '-L'+str(h.runtime/'lib'),'-Wl,-rpath,'+str(h.runtime/'lib'),'-lfbclient','-o',str(h.work/'blob_fixture')],
@@ -120,14 +122,23 @@ def blob_input_client(config, client):
         require(data['parameter_oids'] == list(inputs), 'ParameterDescription OIDs differ')
         report['metadata'][name] = data['parameter_oids']
 
-    def native(extra=(), transactions=0):
-        expected = [(f'SELECT B FROM BIN_ROWS WHERE ID={key}', value) for key,value in sorted(persisted.items())]
+    def native(extra=(), transactions=0, wait_disconnect=False):
+        expected = [(f'SELECT "B" FROM "PUBLIC"."BIN_ROWS" WHERE "ID"={key}', value) for key,value in sorted(persisted.items())]
         label = 'blob_input_native_'+str(len(report['native_readbacks']))
-        output = Harness.isql(observer,label+'_count','SET ROLE PGWIRE_OBSERVER;\nSET LIST ON;\nSELECT COUNT(*) AS N FROM BIN_ROWS;\n'
-            'SELECT COUNT(*) AS N FROM MON$TRANSACTIONS T JOIN MON$ATTACHMENTS A '
+        sql = ('SET ROLE PGWIRE_OBSERVER;\nSET LIST ON;\nSELECT COUNT(*) AS "N" FROM "PUBLIC"."BIN_ROWS";\n'
+            'SELECT COUNT(*) AS "N" FROM MON$TRANSACTIONS T JOIN MON$ATTACHMENTS A '
             'ON A.MON$ATTACHMENT_ID=T.MON$ATTACHMENT_ID '
             "WHERE A.MON$REMOTE_VERSION='PgWire' AND A.MON$SYSTEM_FLAG=0;\nROLLBACK;\nQUIT;\n")
-        require(re.findall(r'^N\s+(\d+)\s*$',output,re.M) == [str(len(persisted)),str(transactions)], 'Native committed row or application transaction count differs')
+        deadline = time.monotonic() + config['timeout']
+        while True:
+            output = Harness.isql(observer,label+'_count',sql)
+            counts = re.findall(r'^N\s+(\d+)\s*$',output,re.M)
+            if counts == [str(len(persisted)),str(transactions)]:
+                break
+            require(wait_disconnect and time.monotonic() < deadline,
+                    'Native committed row or application transaction count differs: '+repr(counts))
+            # PQfinish closes the socket before the server finishes its rollback.
+            time.sleep(0.02)
         report['native_readbacks'].append(native_read(config,client,expected+list(extra),label))
 
     for name, hints in [('inferred',()),('zero',(0,)),('bytea',(17,))]:
@@ -135,7 +146,7 @@ def blob_input_client(config, client):
     params('hint mismatch',SELECT,[b'a'],oids=[25],error='0A000')
     params('untyped remains SQL-04','SELECT $1',[b'a'],error='HY004')
     for sql in ('SELECT CAST($1 AS BLOB SUB_TYPE TEXT)', 'SELECT CAST($1 AS BLOB SUB_TYPE 2)',
-                'SELECT CAST($1 AS VARCHAR(20) CHARACTER SET OCTETS)'):
+                'SELECT CAST($1 AS VARCHAR(20) CHARACTER SET "OCTETS")'):
         params('unsupported input',sql,[b'a'],error='0A000')
     params('SQL bytea cast excluded','SELECT $1::bytea',[b'a'],error='42601')
     prepare('insert',INSERT,inputs=(23,17,1043))
@@ -167,11 +178,11 @@ def blob_input_client(config, client):
             params(f'invalid text {mode}/{i}',INSERT,['900',wire,'bad'],error=error)
     query('SET standard_conforming_strings=on')
     native()
-    params('update returning','UPDATE BIN_ROWS SET B=$1 WHERE ID=$2 RETURNING B',
+    params('update returning','UPDATE "PUBLIC"."BIN_ROWS" SET "B"=$1 WHERE "ID"=$2 RETURNING "B"',
            [b'\\000\\377','1'],result_format=1,rows=[['00ff']],tag='UPDATE 1')
     persisted[1] = b'\x00\xff'
     for value in (b'',payload(40444),None):
-        params('singleton native parameter','EXECUTE PROCEDURE BIN_PROC(?)',[value],formats=[1],
+        params('singleton native parameter','EXECUTE PROCEDURE "PUBLIC"."BIN_PROC"(?)',[value],formats=[1],
                result_format=1,rows=[[None if value is None else value.hex()]])
     for control in ('COMMIT','ROLLBACK'):
         query('BEGIN',state=2)
@@ -183,21 +194,21 @@ def blob_input_client(config, client):
     params('transaction insert',INSERT,['100',b'abc','tx'],formats=[0,1,0],rows=[['\\x616263']],state=2)
     native(transactions=1)  # A separate native attachment cannot see uncommitted bytes.
     query('SAVEPOINT S',state=2)
-    params('savepoint update','UPDATE BIN_ROWS SET B=$1 WHERE ID=100 RETURNING B',[b'changed'],formats=[1],state=2)
+    params('savepoint update','UPDATE "PUBLIC"."BIN_ROWS" SET "B"=$1 WHERE "ID"=100 RETURNING "B"',[b'changed'],formats=[1],state=2)
     params('Bind error in T',SELECT,[b'\\400'],error='22P02',state=3)
     query('SELECT 42',error='25P02',state=3)
     query('ROLLBACK TO SAVEPOINT S',state=2)
-    query('SELECT B FROM BIN_ROWS WHERE ID=100',rows=[['\\x616263']],state=2)
+    query('SELECT "B" FROM "PUBLIC"."BIN_ROWS" WHERE "ID"=100',rows=[['\\x616263']],state=2)
     query('COMMIT'); persisted[100]=b'abc'; native()
     query('BEGIN',state=2)
     params('rolled back insert',INSERT,['101',b'rollback','tx'],formats=[0,1,0],state=2)
     query('ROLLBACK'); native()
     # A duplicate key reaches Execute after conversion. The nontransactional trigger proves execution.
-    guard = int(query('SELECT GEN_ID(BIN_GUARD,0)',rows=None)['rows'][0][0])
+    guard = int(query('SELECT GEN_ID("PUBLIC"."BIN_GUARD",0)',rows=None)['rows'][0][0])
     params('engine error after conversion',INSERT,['1',payload(40444),'duplicate'],formats=[0,1,0],error='23505')
-    query('SELECT GEN_ID(BIN_GUARD,0)',rows=[[str(guard+1)]])
+    query('SELECT GEN_ID("PUBLIC"."BIN_GUARD",0)',rows=[[str(guard+1)]])
     native()
-    results = client.query("INSERT INTO BIN_ROWS VALUES(102,CAST('x' AS BLOB),'batch'); SELECT 1/0",True)
+    results = client.query('INSERT INTO "PUBLIC"."BIN_ROWS" VALUES(102,CAST(\'x\' AS BLOB),\'batch\'); SELECT 1/0',True)
     require([r['sqlstate'] for r in results] == ['', '22012'], 'Implicit batch failure differs')
     native()
     query('BEGIN',state=2)
@@ -214,18 +225,18 @@ def blob_input_client(config, client):
     for filename,part in [('missing','1'),('config','9')]:
         params('selected23 UPDATE 0',CONFIG_UPDATE,values[:3]+[filename,part],formats=[0,0,1,0,0],tag='UPDATE 0')
     output = Harness.isql(observer,'selected23_native','SET LIST ON;\n'
-        'SELECT MODIFIED,DATASIZE,OCTET_LENGTH(BINARYDATA) AS N,FILENAME,PARTNO FROM PUBLIC.FILES ORDER BY FILENAME,PARTNO;\nROLLBACK;\nQUIT;\n')
+        'SELECT "modified","datasize",OCTET_LENGTH("binarydata") AS "N","filename","partno" FROM "public"."files" ORDER BY "filename","partno";\nROLLBACK;\nQUIT;\n')
     require('2026-11-11 12:34:56.1234' in output and re.findall(r'^N\s+(\S+)\s*$',output,re.M)==['40444','<null>','<null>'] and
-            re.findall(r'^FILENAME\s+(\S+)\s*$',output,re.M)==['config','config','other'] and
-            re.findall(r'^PARTNO\s+(\S+)\s*$',output,re.M)==['1','2','1'] and
-            re.findall(r'^DATASIZE\s+(\S+)\s*$',output,re.M)==['40444','0','0'], 'selected23 native scalar/WHERE results differ')
+            re.findall(r'^filename\s+(\S+)\s*$',output,re.M)==['config','config','other'] and
+            re.findall(r'^partno\s+(\S+)\s*$',output,re.M)==['1','2','1'] and
+            re.findall(r'^datasize\s+(\S+)\s*$',output,re.M)==['40444','0','0'], 'selected23 native scalar/WHERE results differ')
     blobs, values = mixed_shape()
-    sql = 'INSERT INTO BIN_MIXED VALUES('+','.join('$'+str(i+1) for i in range(92))+')'
+    sql = 'INSERT INTO "PUBLIC"."BIN_MIXED" VALUES('+','.join('$'+str(i+1) for i in range(92))+')'
     params('92 parameters / 68 blobs',sql,values,formats=[1 if i in blobs else 0 for i in range(92)],tag='INSERT 0 1')
-    query('SELECT '+','.join(f'C{i}' for i in range(92) if i not in blobs)+' FROM BIN_MIXED',
+    query('SELECT '+','.join(f'"C{i}"' for i in range(92) if i not in blobs)+' FROM "PUBLIC"."BIN_MIXED"',
                rows=[[str(i) for i in range(92) if i not in blobs]])
-    native([(f'SELECT C{i} FROM BIN_MIXED',values[i]) for i in blobs]+
-           [('SELECT BINARYDATA FROM PUBLIC.FILES WHERE FILENAME=\'config\' AND PARTNO=1',payload(40444))])
+    native([(f'SELECT C{i} FROM "PUBLIC"."BIN_MIXED"',values[i]) for i in blobs]+
+           [('SELECT "binarydata" FROM "public"."files" WHERE "filename"=\'config\' AND "partno"=1',payload(40444))])
     from pgwire_1c_smoke import Libpq
     disconnected = Libpq(config)
     try:
@@ -233,7 +244,7 @@ def blob_input_client(config, client):
         require(not disconnected.params(INSERT,['103',b'disconnect','tx'],formats=[0,1,0])['sqlstate'], 'Disconnect insert failed')
     finally:
         disconnected.close()
-    native()
+    native(wait_disconnect=True)
     report['scope'] = 'Subtype 0 input <=65533 bytes; selected23 and 68/92 fixture synthetic, not original schema/Bind or 1C opening'
     return report
 
@@ -243,10 +254,10 @@ def blob_input_protocols(h):
     checks = []
     def observe(label):
         output = h.isql('input_'+label,'SET ROLE PGWIRE_OBSERVER;\nSET LIST ON;\n'
-            'SELECT COUNT(*) AS N FROM MON$TRANSACTIONS T JOIN MON$ATTACHMENTS A '
+            'SELECT COUNT(*) AS "N" FROM MON$TRANSACTIONS T JOIN MON$ATTACHMENTS A '
             'ON A.MON$ATTACHMENT_ID=T.MON$ATTACHMENT_ID '
             "WHERE A.MON$REMOTE_VERSION='PgWire' AND A.MON$SYSTEM_FLAG=0;\n"
-            'SELECT COUNT(*) AS N FROM BIN_ROWS;\nSELECT GEN_ID(BIN_GUARD,0) AS N FROM RDB$DATABASE;\nROLLBACK;\nQUIT;\n')
+            'SELECT COUNT(*) AS "N" FROM "PUBLIC"."BIN_ROWS";\nSELECT GEN_ID("PUBLIC"."BIN_GUARD",0) AS "N" FROM "SYSTEM"."RDB$DATABASE";\nROLLBACK;\nQUIT;\n')
         return [int(n) for n in re.findall(r'^N\s+(\d+)\s*$',output,re.M)]
     try:
         before = observe('before')
@@ -263,11 +274,11 @@ def blob_input_protocols(h):
         for wire,error in [(b'\\x0','22023'),(b'\\400','22P02'),(b'\x00','22021'),(b'\xc0\x80','22021')]:
             raw.exchange(bind('bad','waiting',['700',wire,'bad'])+discard+packet(b'S'),b'EZ',error=error)
             raw.exchange(bind('missing','discarded')+packet(b'S'),b'EZ',error='26000')
-        unsupported = 'INSERT INTO BIN_ROWS(ID,B,NOTE) VALUES($1,$2,$3) RETURNING CAST(B AS BLOB SUB_TYPE TEXT)'
+        unsupported = 'INSERT INTO "PUBLIC"."BIN_ROWS"("ID","B","NOTE") VALUES($1,$2,$3) RETURNING CAST("B" AS BLOB SUB_TYPE TEXT)'
         raw.exchange(parse('bad',unsupported)+discard+packet(b'S'),b'EZ',error='0A000')
         require(observe('invalid') == before, 'Rejected bytea/output or discarded commands caused effects')
         checks.append('malformed_bytea_raw_encoding_and_unsupported_output_discard_before_execution')
-        sql = 'SELECT CAST($1 AS BLOB SUB_TYPE BINARY),42 FROM BIN_ROWS WHERE ID BETWEEN 1 AND 3 ORDER BY ID'
+        sql = 'SELECT CAST($1 AS BLOB SUB_TYPE BINARY),42 FROM "PUBLIC"."BIN_ROWS" WHERE "ID" BETWEEN 1 AND 3 ORDER BY "ID"'
         a,b = payload(65533),b'\xff'
         raw.exchange(parse('paged',sql)+bind('a','paged',[a],formats=[1],results=[1,0])+
             bind('b','paged',[b'\\377'],results=[0,1])+execute('a',1)+packet(b'H'),b'122Ds',end=b's',rows=[[a,'42']])
@@ -282,8 +293,8 @@ def blob_input_protocols(h):
         require(after == [0,before[1]+1,before[2]+1], 'A completed portal executed DML twice')
         checks.append('returning_portal_executes_once_implicit_commit')
         # Static scalar capacities make the actual native layout hit 1 MiB while Bind fits its frame.
-        sql = 'SELECT OCTET_LENGTH(CAST($1 AS BLOB)) FROM RDB$DATABASE WHERE ' + ' AND '.join(
-            f'CAST(${i} AS VARCHAR(32760) CHARACTER SET NONE) IS NOT NULL' for i in range(2,33))
+        sql = 'SELECT OCTET_LENGTH(CAST($1 AS BLOB)) FROM "SYSTEM"."RDB$DATABASE" WHERE ' + ' AND '.join(
+            f'CAST(${i} AS VARCHAR(32760) CHARACTER SET "NONE") IS NOT NULL' for i in range(2,33))
         raw.exchange(parse('boundary',sql)+bind('fits','boundary',[payload(32888)]+['a']*31,formats=[1]+[0]*31)+
                      execute('fits')+packet(b'S'),b'12DCZ',rows=[['32888']],tag='SELECT 1')
         raw.exchange(bind('over','boundary',[payload(32889)]+['a']*31,formats=[1]+[0]*31)+
@@ -291,7 +302,7 @@ def blob_input_protocols(h):
         checks.append('native_message_exact_1MiB_and_alignment_overflow_before_execute')
         # A 68-BLOB descriptor with short values remains small even with many bound portals.
         blobs,values = mixed_shape()
-        sql = 'INSERT INTO BIN_MIXED VALUES('+','.join('$'+str(i+1) for i in range(92))+')'
+        sql = 'INSERT INTO "PUBLIC"."BIN_MIXED" VALUES('+','.join('$'+str(i+1) for i in range(92))+')'
         raw.exchange(parse('mixed',sql)+packet(b'S'),b'1Z')
         for i in range(20):
             raw.exchange(bind('mixed'+str(i),'mixed',values,formats=[1 if j in blobs else 0 for j in range(92)])+

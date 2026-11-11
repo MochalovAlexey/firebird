@@ -1,5 +1,62 @@
 # Записанный профиль 1С: этапы совместимости
 
+## APP-13: имена и установка lowercase профиля
+
+Реализовано для review одним этапом: PG4 unquoted ASCII lowercase, точные quoted
+имена, native-safe stored SQL, реальные lowercase schemas/catalog entry points и
+начальный путь `"public", "pg_catalog", "SYSTEM"`. Native 1/2/3 сохраняются.
+`foo`/`FOO`/`"foo"` совпадают; старые native объекты требуют точных quotes, например
+`SELECT "V" FROM "PUBLIC"."TTT"`. Нет uppercase fallback или копирования user data.
+Полный [контракт](../COMPATIBILITY.md#app-13-правила-имён-pg4),
+[проверки](../VALIDATION.md#app-13-11-ноября-2026-правила-имён-pg4).
+
+На чистой отдельной UTF8/dialect3 базе запустить native isql от владельца/администратора
+в следующем порядке (credentials задаются вне SQL):
+
+```sh
+isql -bail -user OWNER -i pg_wire_protocol/1c/sql/install_namespace_registry.sql DATABASE_ALIAS
+isql -bail -user OWNER -i pg_wire_protocol/1c/compat.sql DATABASE_ALIAS
+isql -bail -user OWNER -i pg_wire_protocol/1c/sql/install_namespace_catalog.sql DATABASE_ALIAS
+isql -bail -user OWNER -i pg_wire_protocol/1c/sql/install_class_catalog.sql DATABASE_ALIAS
+isql -bail -user OWNER -i pg_wire_protocol/1c/sql/install_pg_names.sql DATABASE_ALIAS
+```
+
+Поверх исправного APP-10/11/12+compat.sql выполнить только последний скрипт, при
+активном namespace hook и без конкурентного DDL. `"pg_catalog"` должен отсутствовать:
+повтор/чужая schema означают отказ. `"public"` создаётся IF NOT EXISTS, существующие
+owner/data сохраняются. SET BAIL ON, AUTODDL OFF и один COMMIT дают атомарность;
+rollback новых schemas может оставить sequence gaps. Автоматических install/repair
+на attach нет. Рабочие базы и реальные таблицы 1С автоматически не мигрируются.
+
+Новые DISTINCT views `pg_catalog.pg_namespace(oid,nspname)` и
+`pg_catalog.pg_class(oid,relname,relnamespace,relkind)` доступны unquoted и read-only.
+Их labels lowercase, значения точные (включая uppercase), типы APP-11/12 прежние:
+wire20/1043 и wire20/1043/20/1043. Native PUBLIC/PG_CATALOG и lowercase public/pg_catalog
+имеют разные реальные registry IDs; старые IDs не меняются. Обычная PSQL-обёртка
+`pg_catalog.pg_backend_pid()` вызывает старую функцию. PUBLIC получает только
+USAGE этих schemas, SELECT views и EXECUTE wrapper. CREATE/DML права приложения
+задаются отдельно; schemas/views bootstrap не дают их всем. Например, native
+`GRANT CREATE TABLE ON SCHEMA "public" TO USER "APP_USER"` выдаёт право создания
+таблиц именно в lowercase schema; обычный native `GRANT CREATE TABLE` без ON SCHEMA
+относится к текущей native schema, обычно PUBLIC.
+
+После установки через PgWire:
+
+```sql
+SELECT pg_catalog.pg_backend_pid();
+SELECT oid, nspname FROM pg_namespace ORDER BY oid;
+CREATE TABLE Foo(Bar INTEGER); -- при отдельных CREATE правах: "public"."foo"
+INSERT INTO FOO VALUES(1);
+SELECT bar FROM "foo";
+```
+
+ALTER SESSION RESET восстанавливает public-first профиль. Пользовательский SET
+SEARCH_PATH действует до явного изменения/reset. Полный PG search_path/USAGE,
+regnamespace/oid/name, visibility/temp и selected04/10/11 остаются открытыми.
+Quoted trailing space/NUL отвергаются, native длины/лексика сохранены; нет U&/ICU
+или усечения 63 bytes. Stored SQL quotes folded identifiers и сохраняет literal
+канонизацию, в том числе strings=off. Старые `$n`/`::`/LIMIT root guards остаются.
+
 Незавершённые этапы, ограничения частичных реализаций и пробелы приёмки ведутся
 в общем [BACKLOG](../BACKLOG.md). Обновлять его после каждого этапа и review.
 
@@ -259,24 +316,10 @@ Bind. APP-07 закрыт по реализации и оставлен на rev
 2. Настроить PgWire по [quickstart](../quickstart.md), добавив alias этой базы
    в `databases.conf` и `DatabaseAliases`. В `Config = PgWireConfig` установить
    существующий `Workers = 8`: в записанной нагрузке шесть соединений.
-3. Через native isql, от владельца базы, установить SQL-функцию:
-
-   ```sh
-   /path/to/firebird/bin/isql -bail -user SYSDBA -password YOUR_PASSWORD \
-     -i pg_wire_protocol/1c/compat.sql inet://127.0.0.1:3050/pgwire_1c
-   ```
-
-4. Через psql на PgWire-порту выполнить исходный запрос:
-
-   ```sql
-   SELECT 42 AS "answer";
-   SELECT pg_catalog.pg_backend_pid();
-   ```
-
-Скрипт создаёт schema при отсутствии и устанавливает/обновляет одну функцию;
-USAGE schema и EXECUTE function выдаются PUBLIC. Он не создаёт таблицы 1С,
-не переносит её конфигурационные данные и не меняет глобальную конфигурацию
-сервера. Существующую PostgreSQL/1С базу он не подготавливает автоматически.
+3. Через native isql выполнить [полный порядок bootstrap](#app-13-имена-и-установка-lowercase-профиля).
+   Одного старого compat.sql недостаточно для unquoted lowercase entry points.
+4. Через PgWire выполнить `SELECT 42 AS "answer"` и `SELECT pg_catalog.pg_backend_pid()`.
+   Synthetic fixtures не переносят реальные данные 1С и не подтверждают её открытие.
 
 ## Следующие небольшие этапы
 
@@ -325,11 +368,11 @@ physical layout по фактическим длинам Bind. Engine созда
 | Группа исходного задания | Текущее состояние / что требуется |
 |---|---|
 | 1. Начало сессии | SELECT без FROM, ограниченная identity-функция, последовательные скрипты и все семь startup SET принимаются; реальные эффекты enable_mergejoin, cpu_operator_cost и lock_timeout отложены |
-| 2. SQL и параметры | Simple Query выполняет скрипты совместимого SQL; PG BEGIN без опций и последовательные типизированные `$n` поддержаны; postfix `::` добавлен для native builtin types; literal LIMIT 0…2147483647 поддержан; произвольная нумерация и общий LIMIT/OFFSET ещё не реализованы |
+| 2. SQL и параметры | Simple Query выполняет скрипты совместимого SQL; PG BEGIN без опций и последовательные типизированные `$n` поддержаны; postfix `::` добавлен для native builtin types; literal LIMIT 0…2147483647 поддержан; произвольная нумерация и общий LIMIT/OFFSET реализован для reviewы |
 | 3. Открытие базы | APP-12 даёт pg_class для постоянных таблиц/views; полный catalog, pg_database/visibility и служебные таблицы 1С ещё требуют реализации и настоящих данных |
 | 4. Типы и функции | Binary BLOB output выдаётся как bytea; input до 65533 decoded bytes поддержан. Большие input и SQL bytea type/casts/storage/index semantics не добавлены. mchar/mvarchar, regnamespace и BINROWVER остаются открытыми |
-| 5. Транзакции/конкуренция | PG BEGIN без опций использует реальные READ CONSISTENCY транзакции; native controls сохраняются; advisory locks и PG timeout semantics ещё не реализованы |
-| 6. Временные объекты/нагрузка | PG temporary DDL, serial4, ANALYZE и fasttrun_ext ещё не реализованы; нужен эталон их эффектов |
+| 5. Транзакции/конкуренция | PG BEGIN без опций использует реальные READ CONSISTENCY транзакции; native controls сохраняются; advisory locks и PG timeout semantics реализован для reviewы |
+| 6. Временные объекты/нагрузка | PG temporary DDL, serial4, ANALYZE и fasttrun_ext реализован для reviewы; нужен эталон их эффектов |
 
 Реализован [APP-10: внутренний namespace registry](NAMESPACE_REGISTRY_TASK.md),
 ревизия `5bbdaa763d` прошла review и независимую приёмку, см. VALIDATION.
@@ -348,12 +391,21 @@ schema/relation/field не заменяет type identity: UNION может со
 первой ветви при общем BIGINT. C++/API/codecs в APP-11 не меняются. Путь до первого
 запуска 1С/Гилёва — в [PROGRESS](PROGRESS.md); сквозной запуск пока не принят.
 
-Реализован и оставлен на review [APP-12: pg_class для постоянных таблиц/views](CLASS_CATALOG_TASK.md).
+Реализован [APP-12: pg_class для постоянных таблиц/views](CLASS_CATALOG_TASK.md);
+`13f64d0e00` прошёл review без замечаний и независимую приёмку.
 Четыре поля читаются из SYSTEM.RDB$RELATIONS с JOIN PG_NAMESPACE. OID — native
 relation ID+1; новый allocator/registry/hook не нужен. Сохраняются точные native
 имена и BIGINT/VARCHAR metadata, native reuse после DROP/wrap допустим.
 Этот независимый срез предшествует решению name resolution/regnamespace;
 полный pg_class, visibility и temporary objects пока не реализуются.
+
+Пользователь выбрал PG-правила имён и укрупнение следующих инструкций.
+[APP-13](PG_IDENTIFIER_NAMES_TASK.md) объединяет lowercase unquoted identifiers
+в PG4, точные quoted names, сохранение native-safe SQL source, lowercase
+bootstrap/catalog labels, initial path/RESET и savepoint journal. Native1/2/3
+не меняются; старые uppercase объекты в PG4 требуют точных quoted имён.
+Реализация и проверки подготовлены для review; установка и новый контракт описаны выше.
+Полные search_path/USAGE/regnamespace/visibility/temp остаются открытыми.
 
 ## Постоянные таблицы и представления в PG_CLASS: APP-12
 
@@ -411,8 +463,8 @@ catalog постоянных таблиц/views. Native DDL под user savepoin
 и helpers namespace-проверок. Результаты и SHA — в
 [VALIDATION](../VALIDATION.md#11-ноября-2026-pg_class-для-постоянных-таблиц-и-представлений).
 Диагностический SELECT с relkind/relname/relnamespace/LIMIT прошёл; это изменённый
-SQL, не приёмка selected04/10/11. APP-01/03/04/06 открыты. Следующее решение —
-PG/native name resolution и regnamespace, затем search-path visibility и temp namespace.
+SQL, не приёмка selected04/10/11. APP-01/03/04/06 открыты. APP-13 реализует согласованный PG naming contract; затем нужны regnamespace,
+search-path visibility и temp namespace.
 
 ## Публичное представление namespace IDs: APP-11
 

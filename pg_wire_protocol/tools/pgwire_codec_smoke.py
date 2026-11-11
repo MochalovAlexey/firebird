@@ -48,12 +48,12 @@ class CodecHarness(ExtendedHarness):
     def prepare(self):
         StartupHarness.prepare(self)
         self.isql('codec_fixtures', f"""CONNECT '{self.database}';
-CREATE TABLE P8_ROWS (ID INTEGER NOT NULL PRIMARY KEY, F4 FLOAT, F8 DOUBLE PRECISION,
-  D DATE, TM TIME, TS TIMESTAMP, I INT128, N NUMERIC(38,2));
-CREATE SEQUENCE P8_GUARD;
-GRANT SELECT, INSERT, UPDATE, DELETE ON P8_ROWS TO USER WIRE_HOST_TEST;
-GRANT USAGE ON SEQUENCE P8_GUARD TO USER WIRE_HOST_TEST;
-INSERT INTO P8_ROWS VALUES(1,1.25,-2.5,DATE '1999-12-31',TIME '00:00:00.0001',
+CREATE TABLE "PUBLIC"."P8_ROWS" ("ID" INTEGER NOT NULL PRIMARY KEY, F4 FLOAT, F8 DOUBLE PRECISION,
+  "D" DATE, TM TIME, "TS" TIMESTAMP, I INT128, "N" NUMERIC(38,2));
+CREATE SEQUENCE "PUBLIC"."P8_GUARD";
+GRANT SELECT, INSERT, UPDATE, DELETE ON "PUBLIC"."P8_ROWS" TO USER WIRE_HOST_TEST;
+GRANT USAGE ON SEQUENCE "PUBLIC"."P8_GUARD" TO USER WIRE_HOST_TEST;
+INSERT INTO "PUBLIC"."P8_ROWS" VALUES(1,1.25,-2.5,DATE '1999-12-31',TIME '00:00:00.0001',
   TIMESTAMP '1999-12-31 23:59:59.9999',CAST('{MIN128}' AS INT128),
   CAST('{DECIMAL38}' AS NUMERIC(38,2)));
 COMMIT;
@@ -61,7 +61,7 @@ QUIT;
 """, embedded=True)
 
     def value(self, client, datatype, value, oid, input_binary=False, output_binary=False):
-        events = client.exchange(parse('', f'SELECT CAST(? AS {datatype}) FROM RDB$DATABASE', [oid]) +
+        events = client.exchange(parse('', f'SELECT CAST(? AS {datatype}) FROM "SYSTEM"."RDB$DATABASE"', [oid]) +
             bind(values=[value], formats=[int(input_binary)], results=[int(output_binary)]) +
             describe(b'P') + execute() + packet(b'S'), b'12TDCZ', tag='SELECT 1')
         metadata = columns(events[2][1])
@@ -146,7 +146,7 @@ QUIT;
 
     def simple_null_and_visibility(self):
         c = ExtendedClient(self).login()
-        result = c.query(b'SELECT F4,F8,D,TM,TS,I,N FROM P8_ROWS WHERE ID=1')
+        result = c.query(b'SELECT F4,F8,"D",TM,"TS",I,"N" FROM "PUBLIC"."P8_ROWS" WHERE "ID"=1')
         require(result['error'] is None and result['command'] == 'SELECT 1' and result['state'] == 'I',
                 f'Simple Query extended types failed: {result!r}')
         require([col['oid'] for col in result['columns']] == [700,701,1082,1083,1114,1700,1700],
@@ -167,8 +167,7 @@ QUIT;
 
     def returning(self):
         c = ExtendedClient(self).login()
-        sql = ('INSERT INTO P8_ROWS(ID,F4,F8,D,TM,TS,I,N) VALUES(2,?,?,?,?,?,?,?) '
-               'RETURNING F4,F8,D,TM,TS,I,N')
+        sql = ('INSERT INTO "PUBLIC"."P8_ROWS"("ID",F4,F8,"D",TM,"TS",I,"N") VALUES(2,?,?,?,?,?,?,?) RETURNING F4,F8,"D",TM,"TS",I,"N"')
         values = ['1.25','-2.5','1999-12-31','00:00:00.0001','1999-12-31 23:59:59.9999',MIN128,DECIMAL38]
         expected = [bytes.fromhex('3fa00000'),bytes.fromhex('c004000000000000'),struct.pack('!i',-1),
                     struct.pack('!q',100),struct.pack('!q',-100),
@@ -182,14 +181,14 @@ QUIT;
             "AND TS=TIMESTAMP '1999-12-31 23:59:59.9999' "
             f"AND I=CAST('{MIN128}' AS INT128) AND N=CAST('{DECIMAL38}' AS NUMERIC(38,2))")
         require(actual == 1, 'native observer did not see exact committed Extended INSERT values')
-        result = c.query(b'UPDATE P8_ROWS SET D=DATE \'2000-01-01\' WHERE ID=2 RETURNING D,I,N')
+        result = c.query(b'UPDATE "PUBLIC"."P8_ROWS" SET "D"=DATE \'2000-01-01\' WHERE "ID"=2 RETURNING "D",I,"N"')
         require(result['error'] is None and result['command'] == 'UPDATE 1' and
                 result['rows'] == [['2000-01-01',MIN128,DECIMAL38]], 'Simple UPDATE RETURNING values differ')
         self.finish(c)
 
     def invalid_before_effects(self):
         c = ExtendedClient(self).login()
-        before = self.scalar_native('SELECT GEN_ID(P8_GUARD,0) AS OBSERVED FROM RDB$DATABASE')
+        before = self.scalar_native('SELECT GEN_ID("PUBLIC"."P8_GUARD",0) AS OBSERVED FROM "SYSTEM"."RDB$DATABASE"')
         invalid = (
             ('FLOAT','1e100',False,'22003'), ('FLOAT','1e-100',False,'22003'),
             ('DOUBLE PRECISION','1e10000',False,'22003'), ('DOUBLE PRECISION','1,25',False,'22P02'),
@@ -210,13 +209,13 @@ QUIT;
             ('NUMERIC(38,2)',struct.pack('!HhHHH',1,0,0,0,10000),True,'22P03'),
             ('NUMERIC(38,2)',numeric(0,2,[1,1]),True,'22P03'))
         for datatype, value, binary, state in invalid:
-            sql = f'SELECT CAST(? AS {datatype}),GEN_ID(P8_GUARD,1) FROM RDB$DATABASE'
+            sql = f'SELECT CAST(? AS {datatype}),GEN_ID("PUBLIC"."P8_GUARD",1) FROM "SYSTEM"."RDB$DATABASE"'
             try:
                 c.exchange(parse('',sql) + bind(values=[value],formats=[int(binary)]) + execute() +
                            packet(b'S'), b'1EZ', error=state)
             except RuntimeError as error:
                 raise RuntimeError(f'{datatype} value={value!r}: {error}') from error
-            require(self.scalar_native('SELECT GEN_ID(P8_GUARD,0) AS OBSERVED FROM RDB$DATABASE') == before,
+            require(self.scalar_native('SELECT GEN_ID("PUBLIC"."P8_GUARD",0) AS OBSERVED FROM "SYSTEM"."RDB$DATABASE"') == before,
                     f'invalid {datatype} input executed irreversible sequence effect')
         self.transaction_count(0)
         self.finish(c)

@@ -48,7 +48,7 @@ int main(void)
             !strcmp(PQparameterStatus(c,"integer_datetimes"),"on"), "integer_datetimes not advertised");
     const char* sql = "SELECT CAST(? AS FLOAT),CAST(? AS DOUBLE PRECISION),CAST(? AS DATE),"
         "CAST(? AS TIME),CAST(? AS TIMESTAMP),CAST(? AS INT128),CAST(? AS NUMERIC(38,2)),"
-        "CAST(? AS NUMERIC(38,38)) FROM RDB$DATABASE";
+        "CAST(? AS NUMERIC(38,38)) FROM \"SYSTEM\".\"RDB$DATABASE\"";
     const Oid types[] = {700,701,1082,1083,1114,1700,1700,1700};
     const char* text[] = {"1.25","-2.5","1999-12-31","00:00:00.0001",
         "1999-12-31 23:59:59.9999","-170141183460469231731687303715884105728",
@@ -97,7 +97,7 @@ int main(void)
     r = checked(c,PQexecPrepared(c,"wide_codecs",8,nulls,lengths,formats,1),PGRES_TUPLES_OK);
     binary_row(r,types,binary,lengths,1); PQclear(r);
     const char* invalid = "00:00:00.000001";
-    r = checked(c,PQexecParams(c,"SELECT CAST(? AS TIME) FROM RDB$DATABASE",1,NULL,&invalid,NULL,NULL,0),PGRES_FATAL_ERROR);
+    r = checked(c,PQexecParams(c,"SELECT CAST(? AS TIME) FROM \"SYSTEM\".\"RDB$DATABASE\"",1,NULL,&invalid,NULL,NULL,0),PGRES_FATAL_ERROR);
     require(PQresultErrorField(r,PG_DIAG_SQLSTATE) &&
             !strcmp(PQresultErrorField(r,PG_DIAG_SQLSTATE),"22008"), "inexact native time was not rejected");
     PQclear(r);

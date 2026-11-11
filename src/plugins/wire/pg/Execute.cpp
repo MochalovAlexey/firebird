@@ -155,6 +155,27 @@ void QueryExecutor::sendStrings(Protocol& protocol, bool value)
 	}
 }
 
+void QueryExecutor::initializeSearchPath()
+{
+	// Public first is also the native CREATE target. This is fixed profile SQL,
+	// not a client command, application transaction or attach ABI policy.
+	Request request;
+	FbLocalStatus status;
+	request.statement = attachment->prepare(&status, nullptr, 0,
+		"SET SEARCH_PATH TO \"public\", \"pg_catalog\", \"SYSTEM\"", SQL_DIALECT_V6, 0);
+	check(&status);
+	const auto unexpected = request.statement->execute(&status, nullptr, nullptr, nullptr, nullptr, nullptr);
+	check(&status);
+	if (unexpected)
+	{
+		unexpected->rollback(&status);
+		if (status->getState() & IStatus::STATE_ERRORS)
+			unexpected->release();
+		throw ProtocolError("XX000", "Search path initialization unexpectedly started a transaction");
+	}
+	request.close();
+}
+
 void QueryExecutor::reportStrings(Protocol& protocol)
 {
 	sendStrings(protocol, readStrings());
@@ -383,6 +404,8 @@ std::string QueryExecutor::control(IStatement* statement, const SqlInfo& info, b
 	// fatal, including a failed maintenance SET after a successful data rollback.
 	const bool wasEnding = ending;
 	ending = true;
+	if (kind == ControlKind::ResetSession)
+		initializeSearchPath();
 	switch (kind)
 	{
 	case ControlKind::Session:

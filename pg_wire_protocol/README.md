@@ -1,5 +1,12 @@
 # Wire-протоколы через плагины Firebird 6
 
+APP-13 реализован для review: в PG4 unquoted имена теперь ASCII lowercase,
+quoted имена точные; native 1/2/3 не меняются. Старые объекты требуют quotes,
+например `"PUBLIC"."TTT"` и `"SYSTEM"."RDB$DATABASE"`. Для unquoted CREATE/catalog
+запросов нужен отдельный [lowercase bootstrap](1c/README.md#app-13-имена-и-установка-lowercase-профиля).
+Сохранённый SQL канонизируется движком для native reprepare. Начальный/RESET path:
+`"public", "pg_catalog", "SYSTEM"`. Полный PG search_path/visibility/temp остаётся открытым.
+
 Что ещё нужно доделать и проверить: [единый BACKLOG](BACKLOG.md).
 Порядок этапов — [PLAN](PLAN.md), фактические проверки — [VALIDATION](VALIDATION.md).
 
@@ -47,7 +54,7 @@ Simple Query поддерживает [последовательные скри
 Пример запроса через `PQexec` или psycopg2 с `autocommit=True`, без `with connection`:
 
 ```sql
-SELECT CAST(40 + 2 AS INTEGER) AS "answer" FROM RDB$DATABASE
+SELECT CAST(40 + 2 AS INTEGER) AS "answer" FROM "SYSTEM"."RDB$DATABASE"
 ```
 
 Ожидаются значение `42`, имя колонки `answer` и PostgreSQL OID `23`. Текущие text results: SMALLINT/INTEGER/BIGINT, BOOLEAN, CHAR/VARCHAR, NUMERIC/DECIMAL в SHORT/LONG/INT64/INT128, FLOAT/DOUBLE, DATE/TIME/TIMESTAMP без TZ и NULL. OID соответственно 21/23/20, 16, 1042/1043, 1700, 700/701, 1082/1083/1114; table OID/attribute number 0, typmod=-1, alias из engine metadata. CHAR читается через varying fetch metadata с сохранением logical CHAR OID и пробелов. Поддержаны UTF8/NONE/ASCII с проверкой результата на valid UTF8; OCTETS и другие неподдержанные charsets/types получают 0A000 по metadata до исполнения. Input parameters в Simple Query пока получают 0A000.
@@ -131,12 +138,17 @@ APP-11 прошёл review и независимую приёмку в `a3e3c801
 
 ## Постоянные таблицы и views в PG_CLASS
 
-[APP-12](1c/CLASS_CATALOG_TASK.md) реализован и оставлен на review:
+[APP-12](1c/CLASS_CATALOG_TASK.md) прошёл review и независимую приёмку в `13f64d0e00`:
 [отдельный SQL installer](1c/sql/install_class_catalog.sql) создаёт read-only
 PG_CATALOG.PG_CLASS(OID, RELNAME, RELNAMESPACE, RELKIND) над RDB$RELATIONS и
 PG_NAMESPACE. OID = native relation ID + 1, RELNAME — точное native имя,
 RELNAMESPACE — прежний namespace ID, kind `r`/`v`; wire types 20/1043/20/1043.
 Новых allocator/registry/hook и изменений C++/API нет.
+
+Реализован для review [APP-13: PG-правила имён](1c/PG_IDENTIFIER_NAMES_TASK.md).
+Пользователь согласовал lowercase unquoted lookup только в PG4; этот переход
+реализован для review. В один этап входят parser/source, lowercase bootstrap,
+session path/RESET/savepoints и сквозной DDL/DML. Родные подключения сохраняются.
 
 Включены только schema-level persistent tables (type 0/legacy NULL) и views (1),
 в том числе SYSTEM и служебные. External/virtual/GTT/local/declared/package temporary

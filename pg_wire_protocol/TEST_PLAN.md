@@ -1,5 +1,25 @@
 # План приёмки wire plugins и PostgreSQL endpoint
 
+## APP-13: PG names и native source
+
+Свежая developer build, отдельные /tmp runtime/security/application databases.
+`tools/pgwire_1c_smoke.py --pg-names --firebird-dir BUILD/gen/Debug/firebird --work-dir NEW_TMP`
+проверяет ASCII folding, quoted case/Unicode/ограничения, CTE/aliases/non-reserved
+names, routines/named args, native DML readback, source VIEW/DEFAULT/CHECK/COMPUTED/
+index/PSQL и native reprepare, CTAS, root guards, search_path/RESET Simple+Extended,
+savepoint strings/E/T/ParameterStatus, installer fresh/existing public/atomic failure/
+repeat/collision/read-only и native catalog oracle. С `--capture-dir CAPTURE` читает
+исходный selected01; `--blobs`/`--blob-input` проверяют неизменённые selected06/23 и
+binary fixtures. Нельзя подменять metadata/byte/state expectations ради naming.
+
+`--strings` включает прямой API probe: native1/2/3, cache с одинаковым SQL в разных
+dialects, embedded NUL и AUTOTERM. Дополнительно startup/settings, Simple/Extended,
+script, namespace/class, parameters/casts/limits/begin, девять unit executables.
+В старых fixtures PG SQL явно quotes uppercase native objects; native1/2/3 probe
+SQL остаётся исходным. Credentials не сохраняются в reports. Known NAT-* crash
+repro не запускать; selected04/10/11 и реальное открытие 1С не объявлять PASS.
+Команды, runtime/source SHA, FAIL до исправлений и server exit — в VALIDATION.
+
 База — `master` Firebird 6, SHA из [BASELINE.md](BASELINE.md). Архитектура и SQL boundary определены в [ARCHITECTURE.md](ARCHITECTURE.md), transaction contract — в [CODEX_CONTEXT.md](CODEX_CONTEXT.md), заявляемые возможности — в [COMPATIBILITY.md](COMPATIBILITY.md).
 
 Python scaffold мигрирован под текущий контракт: 58 live cases прошли в P6. Начальные host tests расположены в src/common/tests/WireProtocolConfigTest.cpp, src/remote/server/wire/tests и isolated tools harness. P2/P3/P4 приёмка сохранена в VALIDATION. Предыдущая P5-ревизия прошла целевую Linux/Super приёмку с native ограничением READ CONSISTENCY + AUTO COMMIT; P6 повторил сборку, unit tests и целевые регрессии по [VALIDATION.md](VALIDATION.md). Целевой P6/M1 Linux/Super принят с известными native ограничениями, включая отдельно исключённый ON CONNECT shutdown. P7 Extended Query прошёл целевую Linux/Super приёмку: 16 групп. P8 codecs прошли целевую Linux/Super приёмку: восемь групп. P9 прошёл 17 групп с реальными C libpq, raw-wire и ограниченным профилем Psycopg 3; целевой M2 Linux/Super для совместимого SQL и реализованных codecs принят. Следующий этап — P10. PASS относится к зафиксированным cases/fixtures, а наличие строки в полной матрице не означает её прохождения.

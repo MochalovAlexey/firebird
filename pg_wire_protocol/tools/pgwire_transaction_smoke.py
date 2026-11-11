@@ -91,73 +91,77 @@ class TransactionHarness(QueryHarness):
     def prepare(self):
         StartupHarness.prepare(self)
         self.isql('transaction_fixtures', f"""CONNECT '{self.database}';
-CREATE TABLE P5_ROWS (ID INTEGER NOT NULL PRIMARY KEY, V INTEGER);
-INSERT INTO P5_ROWS VALUES (1,10);
-CREATE TABLE P5_SECRET (ID INTEGER);
-CREATE TABLE P5_RESET_FAULTS (ID INTEGER);
-CREATE TABLE P5_MANY (ID INTEGER);
-CREATE EXCEPTION P5_COMMIT_DENIED 'P5 deliberately rejected commit';
-CREATE EXCEPTION P5_RESET_DENIED 'P5 deliberately rejected reset';
-CREATE TABLE P5_PATH_ROWS (ID INTEGER);
-INSERT INTO P5_PATH_ROWS VALUES(10);
-CREATE SCHEMA P5_EXTRA;
-CREATE TABLE P5_EXTRA.P5_PATH_ROWS (ID INTEGER);
-INSERT INTO P5_EXTRA.P5_PATH_ROWS VALUES(20);
-CREATE SEQUENCE P5_GUARD;
-CREATE SEQUENCE P5_TIMEOUT_GUARD;
-GRANT SELECT, INSERT, UPDATE, DELETE ON P5_ROWS TO USER WIRE_HOST_TEST;
-GRANT SELECT ON P5_PATH_ROWS TO USER WIRE_HOST_TEST;
-GRANT USAGE ON SCHEMA P5_EXTRA TO USER WIRE_HOST_TEST;
-GRANT SELECT ON P5_EXTRA.P5_PATH_ROWS TO USER WIRE_HOST_TEST;
-GRANT USAGE ON SEQUENCE P5_GUARD TO USER WIRE_HOST_TEST;
-GRANT USAGE ON SEQUENCE P5_TIMEOUT_GUARD TO USER WIRE_HOST_TEST;
-GRANT INSERT, DELETE ON P5_RESET_FAULTS TO USER WIRE_HOST_TEST;
+CREATE TABLE "PUBLIC"."P5_ROWS" ("ID" INTEGER NOT NULL PRIMARY KEY, "V" INTEGER);
+INSERT INTO "PUBLIC"."P5_ROWS" VALUES (1,10);
+CREATE TABLE "PUBLIC"."P5_SECRET" ("ID" INTEGER);
+CREATE TABLE "PUBLIC"."P5_RESET_FAULTS" ("ID" INTEGER);
+CREATE TABLE "PUBLIC"."P5_MANY" ("ID" INTEGER);
+CREATE EXCEPTION "PUBLIC"."P5_COMMIT_DENIED" 'P5 deliberately rejected commit';
+CREATE EXCEPTION "PUBLIC"."P5_RESET_DENIED" 'P5 deliberately rejected reset';
+CREATE TABLE "PUBLIC"."P5_PATH_ROWS" ("ID" INTEGER);
+INSERT INTO "PUBLIC"."P5_PATH_ROWS" VALUES(10);
+CREATE SCHEMA "P5_EXTRA";
+CREATE TABLE "P5_EXTRA"."P5_PATH_ROWS" ("ID" INTEGER);
+INSERT INTO "P5_EXTRA"."P5_PATH_ROWS" VALUES(20);
+CREATE SEQUENCE "PUBLIC"."P5_GUARD";
+CREATE SEQUENCE "PUBLIC"."P5_TIMEOUT_GUARD";
+GRANT SELECT, INSERT, UPDATE, DELETE ON "PUBLIC"."P5_ROWS" TO USER WIRE_HOST_TEST;
+GRANT SELECT ON "PUBLIC"."P5_PATH_ROWS" TO USER WIRE_HOST_TEST;
+GRANT USAGE ON SCHEMA "P5_EXTRA" TO USER WIRE_HOST_TEST;
+GRANT SELECT ON "P5_EXTRA"."P5_PATH_ROWS" TO USER WIRE_HOST_TEST;
+GRANT USAGE ON SEQUENCE "PUBLIC"."P5_GUARD" TO USER WIRE_HOST_TEST;
+GRANT USAGE ON SEQUENCE "PUBLIC"."P5_TIMEOUT_GUARD" TO USER WIRE_HOST_TEST;
+GRANT INSERT, DELETE ON "PUBLIC"."P5_RESET_FAULTS" TO USER WIRE_HOST_TEST;
 GRANT ALTER DATABASE TO USER WIRE_HOST_TEST;
 SET TERM ^ ;
 EXECUTE BLOCK AS DECLARE VARIABLE I INTEGER = 0;
 BEGIN
   WHILE (I < 257) DO
   BEGIN
-    INSERT INTO P5_MANY VALUES(:I);
+    INSERT INTO "PUBLIC"."P5_MANY" VALUES(:I);
     I = I + 1;
   END
 END^
-CREATE PROCEDURE P5_TIMEOUT(P_ID INTEGER) RETURNS(V BIGINT) AS
+CREATE PROCEDURE "PUBLIC"."P5_TIMEOUT"("P_ID" INTEGER) RETURNS("V" BIGINT) AS
 BEGIN
-  INSERT INTO P5_ROWS VALUES(:P_ID,1);
-  V = GEN_ID(P5_TIMEOUT_GUARD,1);
-  SELECT COUNT(*) FROM P5_MANY A CROSS JOIN P5_MANY B CROSS JOIN P5_MANY C
-    CROSS JOIN P5_MANY D CROSS JOIN P5_MANY E INTO :V;
+  INSERT INTO "PUBLIC"."P5_ROWS" VALUES(:"P_ID",1);
+  "V" = GEN_ID("PUBLIC"."P5_TIMEOUT_GUARD",1);
+  SELECT COUNT(*) FROM "PUBLIC"."P5_MANY" "A" CROSS JOIN "PUBLIC"."P5_MANY" "B" CROSS JOIN "PUBLIC"."P5_MANY" "C"
+    CROSS JOIN "PUBLIC"."P5_MANY" "D" CROSS JOIN "PUBLIC"."P5_MANY" E INTO :"V";
   SUSPEND;
 END^
-CREATE TRIGGER P5_REJECT_COMMIT INACTIVE ON TRANSACTION COMMIT POSITION 0 AS
+CREATE TRIGGER "PUBLIC"."P5_REJECT_COMMIT" INACTIVE ON TRANSACTION COMMIT POSITION 0 AS
 BEGIN
   IF (CURRENT_USER = 'WIRE_HOST_TEST' AND
       RDB$GET_CONTEXT('USER_TRANSACTION', 'P5_FAIL_COMMIT') = '1') THEN
-    EXCEPTION P5_COMMIT_DENIED;
+    EXCEPTION "PUBLIC"."P5_COMMIT_DENIED";
 END^
-CREATE TRIGGER P5_REJECT_RESET INACTIVE ON CONNECT POSITION 0 AS
+CREATE TRIGGER "PUBLIC"."P5_REJECT_RESET" INACTIVE ON CONNECT POSITION 0 AS
 BEGIN
   IF (RESETTING AND CURRENT_USER = 'WIRE_HOST_TEST' AND
-      EXISTS(SELECT 1 FROM P5_RESET_FAULTS WHERE ID=1)) THEN
-    EXCEPTION P5_RESET_DENIED;
+      EXISTS(SELECT 1 FROM "PUBLIC"."P5_RESET_FAULTS" WHERE "ID"=1)) THEN
+    EXCEPTION "PUBLIC"."P5_RESET_DENIED";
 END^
 SET TERM ; ^
-GRANT USAGE ON EXCEPTION P5_COMMIT_DENIED TO TRIGGER P5_REJECT_COMMIT;
-GRANT USAGE ON EXCEPTION P5_RESET_DENIED TO TRIGGER P5_REJECT_RESET;
-GRANT SELECT ON P5_RESET_FAULTS TO TRIGGER P5_REJECT_RESET;
-GRANT EXECUTE ON PROCEDURE P5_TIMEOUT TO USER WIRE_HOST_TEST;
-GRANT INSERT ON P5_ROWS TO PROCEDURE P5_TIMEOUT;
-GRANT SELECT ON P5_MANY TO PROCEDURE P5_TIMEOUT;
-GRANT USAGE ON SEQUENCE P5_TIMEOUT_GUARD TO PROCEDURE P5_TIMEOUT;
+GRANT USAGE ON EXCEPTION "PUBLIC"."P5_COMMIT_DENIED" TO TRIGGER "PUBLIC"."P5_REJECT_COMMIT";
+GRANT USAGE ON EXCEPTION "PUBLIC"."P5_RESET_DENIED" TO TRIGGER "PUBLIC"."P5_REJECT_RESET";
+GRANT SELECT ON "PUBLIC"."P5_RESET_FAULTS" TO TRIGGER "PUBLIC"."P5_REJECT_RESET";
+GRANT EXECUTE ON PROCEDURE "PUBLIC"."P5_TIMEOUT" TO USER WIRE_HOST_TEST;
+GRANT INSERT ON "PUBLIC"."P5_ROWS" TO PROCEDURE "PUBLIC"."P5_TIMEOUT";
+GRANT SELECT ON "PUBLIC"."P5_MANY" TO PROCEDURE "PUBLIC"."P5_TIMEOUT";
+GRANT USAGE ON SEQUENCE "PUBLIC"."P5_TIMEOUT_GUARD" TO PROCEDURE "PUBLIC"."P5_TIMEOUT";
 COMMIT;
 QUIT;
 """, embedded=True)
 
+        self.isql('pg_path_fixture', f"CONNECT '{self.database}';\n"
+            'CREATE SCHEMA "public";\nGRANT USAGE ON SCHEMA "public" TO PUBLIC;\n'
+            'CREATE TABLE "public"."P5_PATH_ROWS"("ID" INTEGER);\n'
+            'INSERT INTO "public"."P5_PATH_ROWS" VALUES(10);\n'
+            'GRANT SELECT ON "public"."P5_PATH_ROWS" TO USER WIRE_HOST_TEST;\nCOMMIT;\nQUIT;\n', embedded=True)
+
     def transaction_count(self, expected):
-        count = self.scalar_native("SELECT COUNT(*) AS OBSERVED FROM MON$TRANSACTIONS T "
-            "JOIN MON$ATTACHMENTS A ON A.MON$ATTACHMENT_ID=T.MON$ATTACHMENT_ID "
-            "WHERE A.MON$REMOTE_VERSION='PgWire' AND A.MON$SYSTEM_FLAG=0", 'transaction_count')
+        count = self.scalar_native('SELECT COUNT(*) AS OBSERVED FROM MON$TRANSACTIONS "T" JOIN MON$ATTACHMENTS "A" ON "A".MON$ATTACHMENT_ID="T".MON$ATTACHMENT_ID WHERE "A".MON$REMOTE_VERSION=\'PgWire\' AND "A".MON$SYSTEM_FLAG=0', 'transaction_count')
         require(count == expected, f'expected {expected} application transaction(s), observed {count}')
 
     def monitor(self, column):
@@ -187,7 +191,7 @@ QUIT;
         return result
 
     def seen(self, identifier, expected):
-        count = self.scalar_native(f'SELECT COUNT(*) AS OBSERVED FROM P5_ROWS WHERE ID={identifier}')
+        count = self.scalar_native(f'SELECT COUNT(*) AS OBSERVED FROM "PUBLIC"."P5_ROWS" WHERE "ID"={identifier}')
         require(count == expected, f'native observer sees ID {identifier}: count {count}, expected {expected}')
 
     def start_transaction(self, client, suffix='READ WRITE READ COMMITTED NO WAIT'):
@@ -200,21 +204,21 @@ QUIT;
 
     def visibility(self):
         client = TransactionClient(self).login()
-        self.sql(client, 'SELECT CAST(MON$ISOLATION_MODE AS INTEGER), CAST(MON$LOCK_TIMEOUT AS INTEGER) '
-                 'FROM MON$TRANSACTIONS WHERE MON$TRANSACTION_ID=CURRENT_TRANSACTION',
+        self.sql(client, 'SELECT CAST("MON$ISOLATION_MODE" AS INTEGER), CAST("MON$LOCK_TIMEOUT" AS INTEGER) '
+                 'FROM "SYSTEM"."MON$TRANSACTIONS" WHERE "MON$TRANSACTION_ID"=CURRENT_TRANSACTION',
                  tag='SELECT 1', rows=[(4, -1)])
-        self.sql(client, 'INSERT INTO P5_ROWS VALUES(101,1)', tag='INSERT 0 1')
+        self.sql(client, 'INSERT INTO "PUBLIC"."P5_ROWS" VALUES(101,1)', tag='INSERT 0 1')
         self.seen(101, 1)
         self.start_transaction(client)
         transaction = self.monitor('MON$TRANSACTION_ID')
-        self.sql(client, 'INSERT INTO P5_ROWS VALUES(102,2)', 'T', 'INSERT 0 1')
+        self.sql(client, 'INSERT INTO "PUBLIC"."P5_ROWS" VALUES(102,2)', 'T', 'INSERT 0 1')
         self.seen(102, 0)
-        self.sql(client, 'SELECT V FROM P5_ROWS WHERE ID=102', 'T', 'SELECT 1', [(2,)])
+        self.sql(client, 'SELECT "V" FROM "PUBLIC"."P5_ROWS" WHERE "ID"=102', 'T', 'SELECT 1', [(2,)])
         require(self.monitor('MON$TRANSACTION_ID') == transaction, 'ordinary SQL replaced explicit transaction')
         self.sql(client, 'COMMIT', tag='COMMIT')
         self.seen(102, 1)
         self.start_transaction(client)
-        self.sql(client, 'INSERT INTO P5_ROWS VALUES(103,3)', 'T', 'INSERT 0 1')
+        self.sql(client, 'INSERT INTO "PUBLIC"."P5_ROWS" VALUES(103,3)', 'T', 'INSERT 0 1')
         self.sql(client, 'ROLLBACK', tag='ROLLBACK')
         self.seen(103, 0)
         self.close_client(client)
@@ -222,27 +226,27 @@ QUIT;
     def failed_state_and_savepoints(self):
         client = TransactionClient(self).login()
         self.start_transaction(client)
-        self.sql(client, 'INSERT INTO P5_ROWS VALUES(201,1)', 'T', 'INSERT 0 1')
+        self.sql(client, 'INSERT INTO "PUBLIC"."P5_ROWS" VALUES(201,1)', 'T', 'INSERT 0 1')
         self.sql(client, 'SAVEPOINT P5_POINT', 'T', 'SAVEPOINT')
-        self.sql(client, 'INSERT INTO P5_ROWS VALUES(202,2)', 'T', 'INSERT 0 1')
-        self.sql(client, 'INSERT INTO P5_ROWS VALUES(1,999)', 'E', error='23505')
+        self.sql(client, 'INSERT INTO "PUBLIC"."P5_ROWS" VALUES(202,2)', 'T', 'INSERT 0 1')
+        self.sql(client, 'INSERT INTO "PUBLIC"."P5_ROWS" VALUES(1,999)', 'E', error='23505')
         transaction = self.monitor('MON$TRANSACTION_ID')
         for sql, error in [
-            ('SELECT GEN_ID(P5_GUARD,1) FROM RDB$DATABASE', '25P02'),
-            ('SELECT * FROM P5_MISSING_TABLE', '25P02'),
-            ('SELECT P5_MISSING_COLUMN FROM P5_ROWS', '42703'),
-            ('SELECT * FROM P5_SECRET', '42501'),
+            ('SELECT GEN_ID("PUBLIC"."P5_GUARD",1) FROM "SYSTEM"."RDB$DATABASE"', '25P02'),
+            ('SELECT * FROM "PUBLIC"."P5_MISSING_TABLE"', '25P02'),
+            ('SELECT "PUBLIC"."P5_MISSING_COLUMN" FROM "PUBLIC"."P5_ROWS"', '42703'),
+            ('SELECT * FROM "PUBLIC"."P5_SECRET"', '42501'),
             ('SELECT', '42601'), ('BEGIN', '25P02'), ('COMMIT RETAINING', '42601'),
             ('SAVEPOINT P5_LATER', '25P02'), ('RELEASE SAVEPOINT P5_POINT', '25P02'),
             ('COMMIT RETAIN', '25P02'), ('ALTER SESSION RESET', '25P02')]:
             self.sql(client, sql, 'E', error=error)
         require(self.monitor('MON$TRANSACTION_ID') == transaction, 'E-state errors replaced native transaction')
-        require(self.scalar_native('SELECT GEN_ID(P5_GUARD,0) AS OBSERVED FROM RDB$DATABASE') == 0,
+        require(self.scalar_native('SELECT GEN_ID("PUBLIC"."P5_GUARD",0) AS OBSERVED FROM "SYSTEM"."RDB$DATABASE"') == 0,
                 '25P02 query was executed')
         self.sql(client, 'ROLLBACK TO SAVEPOINT P5_POINT', 'T', 'ROLLBACK')
-        self.sql(client, 'SELECT ID FROM P5_ROWS WHERE ID IN(201,202) ORDER BY ID', 'T', 'SELECT 1', [(201,)])
+        self.sql(client, 'SELECT "ID" FROM "PUBLIC"."P5_ROWS" WHERE "ID" IN(201,202) ORDER BY "ID"', 'T', 'SELECT 1', [(201,)])
         self.sql(client, 'RELEASE SAVEPOINT P5_POINT', 'T', 'RELEASE')
-        self.sql(client, 'INSERT INTO P5_ROWS VALUES(203,3)', 'T', 'INSERT 0 1')
+        self.sql(client, 'INSERT INTO "PUBLIC"."P5_ROWS" VALUES(203,3)', 'T', 'INSERT 0 1')
         self.sql(client, 'COMMIT', tag='COMMIT')
         self.seen(201, 1)
         self.seen(202, 0)
@@ -256,24 +260,24 @@ QUIT;
             self.sql(client, command + ' RETAIN', error='25000')
             self.sql(client, command + ' RETAINING', error='42601')
         self.start_transaction(client)
-        self.sql(client, 'INSERT INTO P5_ROWS VALUES(301,1)', 'T', 'INSERT 0 1')
+        self.sql(client, 'INSERT INTO "PUBLIC"."P5_ROWS" VALUES(301,1)', 'T', 'INSERT 0 1')
         transaction = self.monitor('MON$TRANSACTION_ID')
         self.sql(client, 'SET TRANSACTION', 'E', error='25001')
         require(self.monitor('MON$TRANSACTION_ID') == transaction, 'repeat start replaced transaction')
         self.sql(client, 'COMMIT', tag='ROLLBACK')
         self.seen(301, 0)
         self.start_transaction(client)
-        self.sql(client, 'INSERT INTO P5_ROWS VALUES(302,2)', 'T', 'INSERT 0 1')
+        self.sql(client, 'INSERT INTO "PUBLIC"."P5_ROWS" VALUES(302,2)', 'T', 'INSERT 0 1')
         self.sql(client, 'COMMIT RETAIN SNAPSHOT', 'T', 'COMMIT')
         self.seen(302, 1)
-        self.sql(client, 'INSERT INTO P5_ROWS VALUES(303,3)', 'T', 'INSERT 0 1')
+        self.sql(client, 'INSERT INTO "PUBLIC"."P5_ROWS" VALUES(303,3)', 'T', 'INSERT 0 1')
         self.sql(client, 'ROLLBACK RETAIN', 'T', 'ROLLBACK')
         self.seen(303, 0)
-        self.sql(client, 'INSERT INTO P5_ROWS VALUES(304,4)', 'T', 'INSERT 0 1')
-        self.sql(client, 'INSERT INTO P5_ROWS VALUES(1,999)', 'E', error='23505')
+        self.sql(client, 'INSERT INTO "PUBLIC"."P5_ROWS" VALUES(304,4)', 'T', 'INSERT 0 1')
+        self.sql(client, 'INSERT INTO "PUBLIC"."P5_ROWS" VALUES(1,999)', 'E', error='23505')
         self.sql(client, 'ROLLBACK TO SAVEPOINT P5_MISSING', 'E', error='3B000')
         self.sql(client, 'ROLLBACK RETAIN SNAPSHOT', 'T', 'ROLLBACK')
-        self.sql(client, 'SELECT COUNT(*) FROM P5_ROWS WHERE ID=304', 'T', 'SELECT 1', [(0,)])
+        self.sql(client, 'SELECT COUNT(*) FROM "PUBLIC"."P5_ROWS" WHERE "ID"=304', 'T', 'SELECT 1', [(0,)])
         self.sql(client, 'ROLLBACK', tag='ROLLBACK')
         self.seen(304, 0)
         self.close_client(client)
@@ -295,35 +299,35 @@ QUIT;
         self.start_transaction(client, 'READ ONLY SNAPSHOT NO WAIT')
         require(self.monitor('MON$READ_ONLY') == 1 and self.monitor('MON$ISOLATION_MODE') == 1,
                 'native READ ONLY/SNAPSHOT characteristics were not applied')
-        self.sql(client, 'INSERT INTO P5_ROWS VALUES(401,1)', 'E', error='25006')
+        self.sql(client, 'INSERT INTO "PUBLIC"."P5_ROWS" VALUES(401,1)', 'E', error='25006')
         self.sql(client, 'ROLLBACK', tag='ROLLBACK')
         self.seen(401, 0)
         self.start_transaction(client, 'READ WRITE READ COMMITTED NO WAIT')
         require(self.monitor('MON$READ_ONLY') == 0 and self.monitor('MON$ISOLATION_MODE') in (2, 3, 4),
                 'native READ COMMITTED characteristics were not applied')
-        self.sql(client, 'SELECT V FROM P5_ROWS WHERE ID=1', 'T', 'SELECT 1', [(10,)])
-        self.isql('concurrent_committed_change', 'UPDATE P5_ROWS SET V=11 WHERE ID=1;\nCOMMIT;\nQUIT;\n')
-        self.sql(client, 'SELECT V FROM P5_ROWS WHERE ID=1', 'T', 'SELECT 1', [(11,)])
+        self.sql(client, 'SELECT "V" FROM "PUBLIC"."P5_ROWS" WHERE "ID"=1', 'T', 'SELECT 1', [(10,)])
+        self.isql('concurrent_committed_change', 'UPDATE "PUBLIC"."P5_ROWS" SET "V"=11 WHERE "ID"=1;\nCOMMIT;\nQUIT;\n')
+        self.sql(client, 'SELECT "V" FROM "PUBLIC"."P5_ROWS" WHERE "ID"=1', 'T', 'SELECT 1', [(11,)])
         self.sql(client, 'ROLLBACK', tag='ROLLBACK')
-        self.isql('restore_baseline_value', 'UPDATE P5_ROWS SET V=10 WHERE ID=1;\nCOMMIT;\nQUIT;\n')
+        self.isql('restore_baseline_value', 'UPDATE "PUBLIC"."P5_ROWS" SET "V"=10 WHERE "ID"=1;\nCOMMIT;\nQUIT;\n')
         self.close_client(client)
 
     def session_reset(self):
         client = TransactionClient(self).login()
-        set_context = "SELECT RDB$SET_CONTEXT('USER_SESSION','P5_CONTEXT','kept') FROM RDB$DATABASE"
-        get_context = "SELECT CAST(RDB$GET_CONTEXT('USER_SESSION','P5_CONTEXT') AS VARCHAR(8)) FROM RDB$DATABASE"
+        set_context = "SELECT RDB$SET_CONTEXT('USER_SESSION','P5_CONTEXT','kept') FROM \"SYSTEM\".\"RDB$DATABASE\""
+        get_context = "SELECT CAST(RDB$GET_CONTEXT('USER_SESSION','P5_CONTEXT') AS VARCHAR(8)) FROM \"SYSTEM\".\"RDB$DATABASE\""
         self.sql(client, set_context, tag='SELECT 1', rows=[(0,)])
-        self.sql(client, 'SET ROLE PGWIRE_OBSERVER', tag='SET')
-        self.sql(client, "SELECT CURRENT_ROLE FROM RDB$DATABASE", tag='SELECT 1', rows=[('PGWIRE_OBSERVER',)])
+        self.sql(client, 'SET ROLE "PGWIRE_OBSERVER"', tag='SET')
+        self.sql(client, 'SELECT CURRENT_ROLE FROM "SYSTEM"."RDB$DATABASE"', tag='SELECT 1', rows=[('PGWIRE_OBSERVER',)])
         self.sql(client, "SET TIME ZONE '+02:00'", tag='SET')
-        self.sql(client, "SELECT RDB$GET_CONTEXT('SYSTEM','SESSION_TIMEZONE') FROM RDB$DATABASE",
+        self.sql(client, "SELECT RDB$GET_CONTEXT('SYSTEM','SESSION_TIMEZONE') FROM \"SYSTEM\".\"RDB$DATABASE\"",
                  tag='SELECT 1', rows=[('+02:00',)])
         self.sql(client, 'ALTER SESSION RESET', tag='RESET')
         self.sql(client, get_context, tag='SELECT 1', rows=[(None,)])
-        self.sql(client, 'SELECT CURRENT_ROLE FROM RDB$DATABASE', tag='SELECT 1', rows=[('NONE',)])
+        self.sql(client, 'SELECT CURRENT_ROLE FROM "SYSTEM"."RDB$DATABASE"', tag='SELECT 1', rows=[('NONE',)])
         self.start_transaction(client)
         self.sql(client, set_context, 'T', 'SELECT 1', [(0,)])
-        self.sql(client, 'INSERT INTO P5_ROWS VALUES(501,1)', 'T', 'INSERT 0 1')
+        self.sql(client, 'INSERT INTO "PUBLIC"."P5_ROWS" VALUES(501,1)', 'T', 'INSERT 0 1')
         transaction = self.monitor('MON$TRANSACTION_ID')
         self.sql(client, 'ALTER SESSION RESET', 'T', 'RESET')
         require(self.monitor('MON$TRANSACTION_ID') != transaction, 'RESET retained underlying transaction')
@@ -331,7 +335,7 @@ QUIT;
         self.sql(client, get_context, 'T', 'SELECT 1', [(None,)])
         self.sql(client, set_context, 'T', 'SELECT 1', [(0,)])
         self.sql(client, 'SAVEPOINT P5_RESET_RECOVERY', 'T', 'SAVEPOINT')
-        self.sql(client, 'INSERT INTO P5_ROWS VALUES(1,999)', 'E', error='23505')
+        self.sql(client, 'INSERT INTO "PUBLIC"."P5_ROWS" VALUES(1,999)', 'E', error='23505')
         transaction = self.monitor('MON$TRANSACTION_ID')
         self.sql(client, 'ALTER SESSION RESET', 'E', error='25P02')
         require(self.monitor('MON$TRANSACTION_ID') == transaction, 'RESET executed inside E')
@@ -342,16 +346,15 @@ QUIT;
 
     def auto_commit_characteristics(self):
         # Native control path independently establishes AUTO COMMIT semantics.
-        self.isql('native_auto_commit', 'COMMIT;\nSET TRANSACTION READ WRITE SNAPSHOT AUTO COMMIT;\n'
-                  'INSERT INTO P5_ROWS VALUES(601,1);\nROLLBACK;\nQUIT;\n')
+        self.isql('native_auto_commit', 'COMMIT;\nSET TRANSACTION READ WRITE SNAPSHOT AUTO COMMIT;\nINSERT INTO "PUBLIC"."P5_ROWS" VALUES(601,1);\nROLLBACK;\nQUIT;\n')
         self.seen(601, 1)
         client = TransactionClient(self).login()
         self.start_transaction(client, 'READ WRITE SNAPSHOT AUTO COMMIT')
         require(self.monitor('MON$AUTO_COMMIT') == 1, 'AUTO COMMIT was not applied')
         require(self.monitor('MON$ISOLATION_MODE') == 1, 'AUTO COMMIT did not use the SNAPSHOT fixture profile')
-        self.sql(client, 'INSERT INTO P5_ROWS VALUES(602,2)', 'T', 'INSERT 0 1')
+        self.sql(client, 'INSERT INTO "PUBLIC"."P5_ROWS" VALUES(602,2)', 'T', 'INSERT 0 1')
         self.seen(602, 1)
-        self.sql(client, 'INSERT INTO P5_ROWS VALUES(1,999)', 'E', error='23505')
+        self.sql(client, 'INSERT INTO "PUBLIC"."P5_ROWS" VALUES(1,999)', 'E', error='23505')
         self.sql(client, 'COMMIT', tag='ROLLBACK')
         self.seen(602, 1)  # A later failed block cannot undo an earlier native auto-commit.
         self.close_client(client)
@@ -360,10 +363,10 @@ QUIT;
         client = TransactionClient(self).login()
         self.start_transaction(client, 'READ WRITE READ COMMITTED NO AUTO UNDO')
         require(self.monitor('MON$AUTO_UNDO') == 0, 'NO AUTO UNDO was not applied')
-        self.sql(client, 'INSERT INTO P5_ROWS VALUES(603,3)', 'T', 'INSERT 0 1')
+        self.sql(client, 'INSERT INTO "PUBLIC"."P5_ROWS" VALUES(603,3)', 'T', 'INSERT 0 1')
         self.sql(client, 'SAVEPOINT P5_UNDO', 'T', 'SAVEPOINT')
-        self.sql(client, 'INSERT INTO P5_ROWS VALUES(604,4)', 'T', 'INSERT 0 1')
-        self.sql(client, 'INSERT INTO P5_ROWS VALUES(1,999)', 'E', error='23505')
+        self.sql(client, 'INSERT INTO "PUBLIC"."P5_ROWS" VALUES(604,4)', 'T', 'INSERT 0 1')
+        self.sql(client, 'INSERT INTO "PUBLIC"."P5_ROWS" VALUES(1,999)', 'E', error='23505')
         self.sql(client, 'ROLLBACK TO SAVEPOINT P5_UNDO', 'T', 'ROLLBACK')
         self.sql(client, 'COMMIT', tag='COMMIT')
         self.seen(603, 1)
@@ -377,11 +380,11 @@ QUIT;
         # Monitoring.cpp publishes statement milliseconds and attachment idle seconds.
         require(self.attachment_setting('MON$STATEMENT_TIMEOUT') == 2500, 'statement timeout was not applied')
         require(self.attachment_setting('MON$IDLE_TIMEOUT') == 120, 'session idle timeout was not applied')
-        self.sql(client, 'SELECT ID FROM P5_PATH_ROWS', tag='SELECT 1', rows=[(10,)])
-        self.sql(client, 'SET SEARCH_PATH TO P5_EXTRA, PUBLIC', tag='SET')
-        self.sql(client, 'SELECT ID FROM P5_PATH_ROWS', tag='SELECT 1', rows=[(20,)])
-        self.sql(client, 'SELECT ID FROM PUBLIC.P5_PATH_ROWS', tag='SELECT 1', rows=[(10,)])
-        value_sql = 'SELECT CAST(12.5 AS DOUBLE PRECISION) AS "coerced" FROM RDB$DATABASE'
+        self.sql(client, 'SELECT "ID" FROM "P5_PATH_ROWS"', tag='SELECT 1', rows=[(10,)])
+        self.sql(client, 'SET SEARCH_PATH TO "P5_EXTRA", "public", "SYSTEM"', tag='SET')
+        self.sql(client, 'SELECT "ID" FROM "P5_PATH_ROWS"', tag='SELECT 1', rows=[(20,)])
+        self.sql(client, 'SELECT "ID" FROM "PUBLIC"."P5_PATH_ROWS"', tag='SELECT 1', rows=[(10,)])
+        value_sql = 'SELECT CAST(12.5 AS DOUBLE PRECISION) AS "coerced" FROM "SYSTEM"."RDB$DATABASE"'
         self.sql(client, value_sql, tag='SELECT 1', rows=[('12.5',)])
         self.sql(client, 'SET BIND OF DOUBLE PRECISION TO VARCHAR(40)', tag='SET')
         result = client.query(value_sql.encode())
@@ -394,7 +397,7 @@ QUIT;
         self.sql(client, 'ALTER SESSION RESET', tag='RESET')
         require(self.attachment_setting('MON$STATEMENT_TIMEOUT') == 0 and
                 self.attachment_setting('MON$IDLE_TIMEOUT') == 0, 'RESET did not restore timeout settings')
-        self.sql(client, 'SELECT ID FROM P5_PATH_ROWS', tag='SELECT 1', rows=[(10,)])
+        self.sql(client, 'SELECT "ID" FROM "P5_PATH_ROWS"', tag='SELECT 1', rows=[(10,)])
         self.sql(client, value_sql, tag='SELECT 1', rows=[('12.5',)])
         self.close_client(client)
 
@@ -402,9 +405,9 @@ QUIT;
         for identifier, terminate in ((701, True), (702, False)):
             client = TransactionClient(self).login()
             self.start_transaction(client)
-            self.sql(client, f'INSERT INTO P5_ROWS VALUES({identifier},1)', 'T', 'INSERT 0 1')
+            self.sql(client, f'INSERT INTO "PUBLIC"."P5_ROWS" VALUES({identifier},1)', 'T', 'INSERT 0 1')
             if not terminate:
-                self.sql(client, 'INSERT INTO P5_ROWS VALUES(1,999)', 'E', error='23505')
+                self.sql(client, 'INSERT INTO "PUBLIC"."P5_ROWS" VALUES(1,999)', 'E', error='23505')
             self.close_client(client, terminate)
             self.seen(identifier, 0)
 
@@ -432,54 +435,52 @@ QUIT;
         for identifier, expected_state in ((811, 'I'), (812, 'E')):
             if expected_state == 'E':
                 self.start_transaction(client)
-                self.sql(client, 'INSERT INTO P5_ROWS VALUES(813,3)', 'T', 'INSERT 0 1')
+                self.sql(client, 'INSERT INTO "PUBLIC"."P5_ROWS" VALUES(813,3)', 'T', 'INSERT 0 1')
             client.connection.settimeout(4)
             started = time.monotonic()
-            self.sql(client, f'SELECT V FROM P5_TIMEOUT({identifier})', expected_state, error='57014')
+            self.sql(client, f'SELECT "V" FROM "PUBLIC"."P5_TIMEOUT"({identifier})', expected_state, error='57014')
             elapsed = time.monotonic() - started
             require(elapsed < 3, f'attachment statement timeout was overridden: {elapsed:.3f}s')
             client.connection.settimeout(5)
             if expected_state == 'E':
                 self.sql(client, 'ROLLBACK', tag='ROLLBACK')
             self.seen(identifier, 0)
-        require(self.scalar_native('SELECT GEN_ID(P5_TIMEOUT_GUARD,0) AS OBSERVED FROM RDB$DATABASE') == 2,
+        require(self.scalar_native('SELECT GEN_ID("PUBLIC"."P5_TIMEOUT_GUARD",0) AS OBSERVED FROM "SYSTEM"."RDB$DATABASE"') == 2,
                 'timeout did not interrupt both real engine executions')
         self.seen(813, 0)
-        self.sql(client, 'SELECT CAST(42 AS INTEGER) FROM RDB$DATABASE', tag='SELECT 1', rows=[(42,)])
+        self.sql(client, 'SELECT CAST(42 AS INTEGER) FROM "SYSTEM"."RDB$DATABASE"', tag='SELECT 1', rows=[(42,)])
         self.close_client(client)
 
     def fatal_commit_and_reset(self):
         # Fault triggers belong only to this group. Native AUTO COMMIT has its
         # own savepoint path and must be tested without injected commit hooks.
-        self.isql('activate_fault_triggers', 'ALTER TRIGGER P5_REJECT_COMMIT ACTIVE;\n'
-                  'ALTER TRIGGER P5_REJECT_RESET ACTIVE;\nCOMMIT;\nQUIT;\n')
+        self.isql('activate_fault_triggers', 'ALTER TRIGGER "PUBLIC"."P5_REJECT_COMMIT" ACTIVE;\nALTER TRIGGER "PUBLIC"."P5_REJECT_RESET" ACTIVE;\nCOMMIT;\nQUIT;\n')
         try:
             self.fatal_commit_and_reset_active()
         finally:
-            self.isql('deactivate_fault_triggers', 'ALTER TRIGGER P5_REJECT_COMMIT INACTIVE;\n'
-                      'ALTER TRIGGER P5_REJECT_RESET INACTIVE;\nCOMMIT;\nQUIT;\n')
+            self.isql('deactivate_fault_triggers', 'ALTER TRIGGER "PUBLIC"."P5_REJECT_COMMIT" INACTIVE;\nALTER TRIGGER "PUBLIC"."P5_REJECT_RESET" INACTIVE;\nCOMMIT;\nQUIT;\n')
 
     def fatal_commit_and_reset_active(self):
         client = TransactionClient(self).login()
         self.start_transaction(client)
-        self.sql(client, 'INSERT INTO P5_ROWS VALUES(801,1)', 'T', 'INSERT 0 1')
+        self.sql(client, 'INSERT INTO "PUBLIC"."P5_ROWS" VALUES(801,1)', 'T', 'INSERT 0 1')
         self.sql(client, "SELECT RDB$SET_CONTEXT('USER_TRANSACTION','P5_FAIL_COMMIT','1') "
-                 'FROM RDB$DATABASE', 'T', 'SELECT 1', [(0,)])
+                 'FROM "SYSTEM"."RDB$DATABASE"', 'T', 'SELECT 1', [(0,)])
         self.fatal_control(client, 'COMMIT', 'XX000')
         self.seen(801, 0)
 
         client = TransactionClient(self).login()
         self.start_transaction(client)
-        self.sql(client, 'INSERT INTO P5_ROWS VALUES(802,2)', 'T', 'INSERT 0 1')
-        self.isql('enable_reset_fault', 'INSERT INTO P5_RESET_FAULTS VALUES(1);\nCOMMIT;\nQUIT;\n')
+        self.sql(client, 'INSERT INTO "PUBLIC"."P5_ROWS" VALUES(802,2)', 'T', 'INSERT 0 1')
+        self.isql('enable_reset_fault', 'INSERT INTO "PUBLIC"."P5_RESET_FAULTS" VALUES(1);\nCOMMIT;\nQUIT;\n')
         try:
             # ON CONNECT runs after rollback and marks isc_ses_reset_failed (08003).
             self.fatal_control(client, 'ALTER SESSION RESET', '08003')
         finally:
-            self.isql('disable_reset_fault', 'DELETE FROM P5_RESET_FAULTS;\nCOMMIT;\nQUIT;\n')
+            self.isql('disable_reset_fault', 'DELETE FROM "PUBLIC"."P5_RESET_FAULTS";\nCOMMIT;\nQUIT;\n')
         self.seen(802, 0)
         healthy = TransactionClient(self).login()
-        self.sql(healthy, 'SELECT CAST(42 AS INTEGER) FROM RDB$DATABASE', tag='SELECT 1', rows=[(42,)])
+        self.sql(healthy, 'SELECT CAST(42 AS INTEGER) FROM "SYSTEM"."RDB$DATABASE"', tag='SELECT 1', rows=[(42,)])
         self.close_client(healthy)
 
     def build_c_driver(self):

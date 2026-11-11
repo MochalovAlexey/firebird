@@ -62,7 +62,7 @@ def strings_client(config, client):
         check("SELECT '"+source+"'", 'off', error=error)
     check("SELECT q'{\\n;}'", 'off', rows=[[['\\n;']]])
     check("SELECT 'a'\n'b'", 'off', rows=[[['ab']]])
-    check("EXECUTE BLOCK RETURNS (V VARCHAR(8)) AS BEGIN V='\\n'; SUSPEND; END; SELECT 2;",
+    check('EXECUTE BLOCK RETURNS ("V" VARCHAR(8)) AS BEGIN "V"=\'\\n\'; SUSPEND; END; SELECT 2;',
           'off', rows=[[['\n']], [['2']]])
     check("SELECT OCTET_LENGTH('" + r'\n'*16383 + "')", 'off', rows=[[['16383']]])
     # Native limit is deliberate; its diagnostic must not become AUTOTERM continuation.
@@ -71,8 +71,8 @@ def strings_client(config, client):
     check(SETTING+'on')
     check(SETTING+"'yes'", error='22023')
     check(SETTING+'off; SELECT 1/0; SELECT 2', error='22012')
-    check('INSERT INTO WIRE_HOST_ROWS VALUES(611); '+SETTING+'off; SELECT 1/0', error='22012')
-    check('SELECT COUNT(*) FROM WIRE_HOST_ROWS WHERE ID=611', rows=[[['0']]])
+    check('INSERT INTO "PUBLIC"."WIRE_HOST_ROWS" VALUES(611); '+SETTING+'off; SELECT 1/0', error='22012')
+    check('SELECT COUNT(*) FROM "PUBLIC"."WIRE_HOST_ROWS" WHERE "ID"=611', rows=[[['0']]])
     check(SETTING+'off; SELECT (', error='42601')
     check(SETTING+'off; COMMIT; '+SETTING+'on; SELECT 1/0', 'off', error='22012')
     check('ROLLBACK', 'off')
@@ -91,7 +91,7 @@ def strings_client(config, client):
     check('ROLLBACK TO a', 'off', 2)
     check('SELECT 1/0', 'off', 3, '22012')
     check('ROLLBACK')
-    for identifier, alias in [('low_name', 'LOW_NAME'), ('"q""uote "', '"q""uote"'), ('"я🙂 "','"я🙂"')]:
+    for identifier, alias in [('low_name', 'LOW_NAME'), ('"q""uote"', '"q""uote"'), ('"я🙂"','"я🙂"')]:
         check('SET TRANSACTION; SAVEPOINT '+identifier+'; '+SETTING+'off', 'off', 2)
         check('ROLLBACK TO '+alias, 'on', 2)
         check(SETTING+'off', 'off', 2)
@@ -120,29 +120,29 @@ def strings_client(config, client):
     check(SETTING+'off', 'off', 2)
     check('ROLLBACK')
     check('SET TRANSACTION; SAVEPOINT outer_point; '+SETTING+'off', 'off', 2)
-    check("EXECUTE BLOCK AS DECLARE V INTEGER; BEGIN EXECUTE STATEMENT 'SELECT 42 FROM RDB$DATABASE' INTO :V; END",
+    check('EXECUTE BLOCK AS DECLARE "V" INTEGER; BEGIN EXECUTE STATEMENT \'SELECT 42 FROM "SYSTEM"."RDB$DATABASE"\' INTO :"V"; END',
           'off', 2)
     check('ROLLBACK TO outer_point', 'on', 2)
     check('COMMIT')
     # Persisted PSQL source contains canonical native literals; inspect after reconnect below.
     check(SETTING+'off', 'off')
-    check("CREATE PROCEDURE STRING_SOURCE RETURNS (V VARCHAR(8)) AS BEGIN V='\\n'; SUSPEND; END", 'off')
+    check('CREATE PROCEDURE "PUBLIC"."STRING_SOURCE" RETURNS ("V" VARCHAR(8)) AS BEGIN "V"=\'\\n\'; SUSPEND; END', 'off')
     check(SETTING+'on')
-    check('SELECT V FROM STRING_SOURCE', rows=[[['\n']]])
-    check("EXECUTE BLOCK AS DECLARE S BLOB SUB_TYPE TEXT; BEGIN "
-          "SELECT RDB$PROCEDURE_SOURCE FROM RDB$PROCEDURES WHERE RDB$PROCEDURE_NAME='STRING_SOURCE' INTO :S; "
-          "EXECUTE STATEMENT 'ALTER PROCEDURE STRING_SOURCE RETURNS (V VARCHAR(8)) AS ' || S; END")
-    check('SELECT V FROM STRING_SOURCE', rows=[[['\n']]])
+    check('SELECT "V" FROM "PUBLIC"."STRING_SOURCE"', rows=[[['\n']]])
+    check('EXECUTE BLOCK AS DECLARE "S" BLOB SUB_TYPE TEXT; BEGIN '
+          'SELECT "RDB$PROCEDURE_SOURCE" FROM "SYSTEM"."RDB$PROCEDURES" WHERE "RDB$PROCEDURE_NAME"=\'STRING_SOURCE\' INTO :"S"; '
+          'EXECUTE STATEMENT \'ALTER PROCEDURE "PUBLIC"."STRING_SOURCE" RETURNS (V VARCHAR(8)) AS \' || "S"; END')
+    check('SELECT "V" FROM "PUBLIC"."STRING_SOURCE"', rows=[[['\n']]])
     from pgwire_1c_smoke import Libpq
     other = Libpq(config)
     try:
-        require(other.query('SELECT V FROM STRING_SOURCE', True)[0]['rows']==[['\n']], 'stored SQL meaning changed')
+        require(other.query('SELECT "V" FROM "PUBLIC"."STRING_SOURCE"', True)[0]['rows']==[['\n']], 'stored SQL meaning changed')
         check(SETTING+'off', 'off')
         require(other.query(LITERAL, True)[0]['rows']==[['\\n']], 'setting leaked between attachments')
     finally:
         other.close()
     check('ALTER SESSION RESET')
-    check('DROP PROCEDURE STRING_SOURCE')
+    check('DROP PROCEDURE "PUBLIC"."STRING_SOURCE"')
     sources = strings_sources(config, check)
     return {'passed':True,'queries':checks,'stored_sources':sources,
             'excluded_native_combinations':['TPB AUTO COMMIT with setting history',
@@ -154,74 +154,75 @@ def strings_sources(config, check):
     """Exercise native reprepare of both bare STRING and sql_string contexts."""
     temporal = ["2026-01-01", "12:34:56.1234", "2026-01-01 12:34:56.1234"]
     temporal_oids = [1082, 1083, 1114]
-    expressions = "DATE '2026-01-01' AS D, TIME '12:34:56.1234' AS T, " \
-                  "TIMESTAMP '2026-01-01 12:34:56.1234' AS TS"
+    expressions = "DATE '2026-01-01' AS \"D\", TIME '12:34:56.1234' AS \"T\", " \
+                  "TIMESTAMP '2026-01-01 12:34:56.1234' AS \"TS\""
     for mode in ('on', 'off'):
         check(SETTING+mode, mode)
-        table = 'STRINGS_CTAS_'+mode.upper()
-        check('CREATE TABLE '+table+' AS SELECT '+expressions+' FROM RDB$DATABASE WITH DATA', mode)
+        table = '"PUBLIC"."STRINGS_CTAS_'+mode.upper()+'"'
+        check('CREATE TABLE '+table+' AS SELECT '+expressions+' FROM "SYSTEM"."RDB$DATABASE" WITH DATA', mode)
         result = check('SELECT * FROM '+table, mode, rows=[[temporal]])[0]
         require([c['oid'] for c in result['columns']] == temporal_oids, 'CTAS temporal types changed')
         check('DROP TABLE '+table, mode)
 
     # Native EDS has no PG mode: compare to already decoded typed literals.
-    check("EXECUTE BLOCK RETURNS (D DATE, T TIME, TS TIMESTAMP) AS BEGIN "
+    check('EXECUTE BLOCK RETURNS ("D" DATE, "T" TIME, "TS" TIMESTAMP) AS BEGIN '
           "EXECUTE STATEMENT q'{SELECT DATE '2026-01-01', TIME '12:34:56.1234', "
-          "TIMESTAMP '2026-01-01 12:34:56.1234' FROM RDB$DATABASE}' INTO :D, :T, :TS; "
+          'TIMESTAMP \'2026-01-01 12:34:56.1234\' FROM "SYSTEM"."RDB$DATABASE"}\' INTO :"D", :"T", :"TS"; '
           "SUSPEND; END", 'off', rows=[[temporal]])
 
-    escaped_temporal = r"DATE '2026-\x30\x31-01' AS D, TIME '\x31\x32:34:56.1234' AS T, " \
-                       r"TIMESTAMP '\x32\x30\x32\x36-01-01 12:34:56.1234' AS TS"
-    text_expressions = r"'\n' AS S, '\u044F\U0001F642' AS U, 'a\';\\b' AS ESC, " \
-                       r"_UTF8 '\u044F' AS INTRO, q'{\n}' AS Q, " \
-                       "CAST(X'41' AS VARCHAR(1) CHARACTER SET UTF8) AS H"
+    escaped_temporal = 'DATE \'2026-\\x30\\x31-01\' AS "D", TIME \'\\x31\\x32:34:56.1234\' AS "T", ' \
+                       'TIMESTAMP \'\\x32\\x30\\x32\\x36-01-01 12:34:56.1234\' AS "TS"'
+    text_expressions = '\'\\n\' AS "S", \'\\u044F\\U0001F642\' AS "U", \'a\\\';\\\\b\' AS "ESC", ' \
+                       '_UTF8 \'\\u044F\' AS "INTRO", q\'{\\n}\' AS "Q", ' \
+                       'CAST(X\'41\' AS VARCHAR(1) CHARACTER SET "UTF8") AS "H"'
     mixed = temporal + ['\n', 'я🙂', "a';\\b", 'я', '\\n', 'A']
     mixed_oids = temporal_oids + [1042]*5 + [1043]
     # Parenthesized CTAS, CASE and nested SELECT exercise btyacc conflict replay.
-    check('CREATE TABLE STRINGS_CTAS_MIX AS (SELECT '+escaped_temporal+', '+text_expressions+
-          ", CASE WHEN 1=1 THEN (SELECT '\\u044F' FROM RDB$DATABASE) ELSE 'x' END AS C "
-          'FROM RDB$DATABASE) WITH DATA', 'off')
-    result = check('SELECT * FROM STRINGS_CTAS_MIX', 'off', rows=[[mixed+['я']]])[0]
+    check('CREATE TABLE \"PUBLIC\".\"STRINGS_CTAS_MIX\" AS (SELECT '+escaped_temporal+', '+text_expressions+
+          ', CASE WHEN 1=1 THEN (SELECT \'\\u044F\' FROM "SYSTEM"."RDB$DATABASE") ELSE \'x\' END AS "C" '
+          'FROM "SYSTEM"."RDB$DATABASE") WITH DATA', 'off')
+    result = check('SELECT * FROM \"PUBLIC\".\"STRINGS_CTAS_MIX\"', 'off', rows=[[mixed+['я']]])[0]
     require([c['oid'] for c in result['columns']] == mixed_oids+[1042],
             'Mixed CTAS metadata changed: '+repr(result['columns']))
     # Inferred charset catches a bare X literal silently turning text into BINARY.
-    charsets = check("SELECT TRIM(RF.RDB$FIELD_NAME), F.RDB$CHARACTER_SET_ID "
-          "FROM RDB$RELATION_FIELDS RF JOIN RDB$FIELDS F "
-          "ON F.RDB$SCHEMA_NAME=RF.RDB$FIELD_SOURCE_SCHEMA_NAME AND F.RDB$FIELD_NAME=RF.RDB$FIELD_SOURCE "
-          "WHERE RF.RDB$RELATION_NAME='STRINGS_CTAS_MIX' AND F.RDB$CHARACTER_SET_ID IS NOT NULL "
-          "ORDER BY RF.RDB$FIELD_POSITION", 'off')[0]['rows']
+    charsets = check('SELECT TRIM("RF"."RDB$FIELD_NAME"), "F"."RDB$CHARACTER_SET_ID" '
+          'FROM "SYSTEM"."RDB$RELATION_FIELDS" "RF" JOIN "SYSTEM"."RDB$FIELDS" "F" '
+          'ON "F"."RDB$SCHEMA_NAME"="RF"."RDB$FIELD_SOURCE_SCHEMA_NAME" AND "F"."RDB$FIELD_NAME"="RF"."RDB$FIELD_SOURCE" '
+          'WHERE "RF"."RDB$RELATION_NAME"=\'STRINGS_CTAS_MIX\' AND "F"."RDB$CHARACTER_SET_ID" IS NOT NULL '
+          'ORDER BY "RF"."RDB$FIELD_POSITION"', 'off')[0]['rows']
     require(charsets == [[name,'4'] for name in ('S','U','ESC','INTRO','Q','H','C')],
             'Stored expression lost UTF8 charset: '+repr(charsets))
-    check('DROP TABLE STRINGS_CTAS_MIX', 'off')
+    check('DROP TABLE \"PUBLIC\".\"STRINGS_CTAS_MIX\"', 'off')
 
     definitions = [
         ('STRINGS_TEMPORAL_SOURCE',
-         'RETURNS (D DATE, T TIME, TS TIMESTAMP, S VARCHAR(8) CHARACTER SET UTF8, '
-         'U VARCHAR(8) CHARACTER SET UTF8, ESC VARCHAR(8) CHARACTER SET UTF8, '
-         'INTRO VARCHAR(8) CHARACTER SET UTF8, Q VARCHAR(8) CHARACTER SET UTF8, '
-         'H VARCHAR(8) CHARACTER SET UTF8)',
-         r"BEGIN D=DATE '2026-\x30\x31-01'; T=TIME '\x31\x32:34:56.1234'; "
-         r"TS=TIMESTAMP '\x32\x30\x32\x36-01-01 12:34:56.1234'; "
-         r"S='\n'; U='\u044F\U0001F642'; ESC='a\';\\b'; INTRO=_UTF8 '\u044F'; "
-         r"Q=q'{\n}'; H=CAST(X'41' AS VARCHAR(8) CHARACTER SET UTF8); SUSPEND; END",
+         'RETURNS ("D" DATE, "T" TIME, "TS" TIMESTAMP, "S" VARCHAR(8) CHARACTER SET "UTF8", '
+         '"U" VARCHAR(8) CHARACTER SET "UTF8", "ESC" VARCHAR(8) CHARACTER SET "UTF8", '
+         '"INTRO" VARCHAR(8) CHARACTER SET "UTF8", "Q" VARCHAR(8) CHARACTER SET "UTF8", '
+         '"H" VARCHAR(8) CHARACTER SET "UTF8")',
+         'BEGIN "D"=DATE \'2026-\\x30\\x31-01\'; "T"=TIME \'\\x31\\x32:34:56.1234\'; '
+         '"TS"=TIMESTAMP \'\\x32\\x30\\x32\\x36-01-01 12:34:56.1234\'; '
+         '"S"=\'\\n\'; "U"=\'\\u044F\\U0001F642\'; "ESC"=\'a\\\';\\\\b\'; "INTRO"=_UTF8 \'\\u044F\'; '
+         '"Q"=q\'{\\n}\'; "H"=CAST(X\'41\' AS VARCHAR(8) CHARACTER SET "UTF8"); SUSPEND; END',
          mixed, temporal_oids+[1043]*6),
-        ('STRINGS_STATE_SOURCE', 'RETURNS (V INTEGER, S VARCHAR(8) CHARACTER SET UTF8)',
-         r"BEGIN BEGIN V=1/0; WHEN SQLSTATE '\x32\x32\x30\x31\x32' "
-         r"DO BEGIN V=42; S='\u044F'; END END SUSPEND; END", ['42','я'], [23,1043]),
+        ('STRINGS_STATE_SOURCE', 'RETURNS ("V" INTEGER, "S" VARCHAR(8) CHARACTER SET "UTF8")',
+         'BEGIN BEGIN "V"=1/0; WHEN SQLSTATE \'\\x32\\x32\\x30\\x31\\x32\' '
+         'DO BEGIN "V"=42; "S"=\'\\u044F\'; END END SUSPEND; END', ['42','я'], [23,1043]),
     ]
     sources = {}
     for name, declaration, body, values, oids in definitions:
-        check('CREATE PROCEDURE '+name+' '+declaration+' AS '+body, 'off')
-        result = check('SELECT * FROM '+name, 'off', rows=[[values]])[0]
+        qualified = '"PUBLIC"."'+name+'"'
+        check('CREATE PROCEDURE '+qualified+' '+declaration+' AS '+body, 'off')
+        result = check('SELECT * FROM '+('"PUBLIC"."'+name+'"'), 'off', rows=[[values]])[0]
         require([c['oid'] for c in result['columns']] == oids, 'Procedure metadata changed')
-        source = check("SELECT CAST(RDB$PROCEDURE_SOURCE AS VARCHAR(8191)) "
-                       "FROM RDB$PROCEDURES WHERE RDB$PROCEDURE_NAME='"+name+"'", 'off')[0]['rows'][0][0]
+        source = check('SELECT CAST("RDB$PROCEDURE_SOURCE" AS VARCHAR(8191)) '
+                       'FROM "SYSTEM"."RDB$PROCEDURES" WHERE "RDB$PROCEDURE_NAME"=\''+name+"'", 'off')[0]['rows'][0][0]
         sources[name] = source
         require(not re.search(r'(?:DATE|TIME|TIMESTAMP|SQLSTATE)\s+_UTF8', source),
                 'Bare STRING received an introducer: '+source)
         if name == 'STRINGS_TEMPORAL_SOURCE':
             require("DATE X'323032362D30312D3031'" in source and "_UTF8 X'0A'" in source and
-                    "_UTF8 X'D18FF09F9982'" in source and "Q=q'{\\n}'" in source,
+                    "_UTF8 X'D18FF09F9982'" in source and '"Q"=q\'{\\n}\'' in source,
                     'Mixed source did not preserve literal contexts: '+source)
         else:
             require("SQLSTATE X'3232303132'" in source and "_UTF8 X'D18F'" in source,
@@ -230,23 +231,23 @@ def strings_sources(config, check):
         # Read the real BLOB and feed it directly to the existing native EDS prepare.
         # Repeating this also checks that native serialization remains stable.
         for _ in range(2):
-            check("EXECUTE BLOCK AS DECLARE SRC BLOB SUB_TYPE TEXT; BEGIN "
-                  "SELECT RDB$PROCEDURE_SOURCE FROM RDB$PROCEDURES WHERE RDB$PROCEDURE_NAME='"+name+
-                  "' INTO :SRC; EXECUTE STATEMENT 'ALTER PROCEDURE "+name+' '+declaration+
-                  " AS ' || SRC; END", 'off')
-            check('SELECT * FROM '+name, 'off', rows=[[values]])
+            check('EXECUTE BLOCK AS DECLARE "SRC" BLOB SUB_TYPE TEXT; BEGIN '
+                  'SELECT "RDB$PROCEDURE_SOURCE" FROM "SYSTEM"."RDB$PROCEDURES" WHERE "RDB$PROCEDURE_NAME"=\''+name+
+                  '\' INTO :"SRC"; EXECUTE STATEMENT \'ALTER PROCEDURE '+qualified+' '+declaration+
+                  ' AS \' || "SRC"; END', 'off')
+            check('SELECT * FROM '+('"PUBLIC"."'+name+'"'), 'off', rows=[[values]])
 
     from pgwire_1c_smoke import Libpq
     peer = Libpq(config)
     try:
         for name, _, _, values, oids in definitions:
-            result = peer.query('SELECT * FROM '+name, True)
+            result = peer.query('SELECT * FROM '+('"PUBLIC"."'+name+'"'), True)
             require(len(result)==1 and not result[0]['sqlstate'] and result[0]['rows']==[values] and
                     [c['oid'] for c in result[0]['columns']]==oids, 'Reconnected procedure changed')
     finally:
         peer.close()
     for name, _, _, _, _ in definitions:
-        check('DROP PROCEDURE '+name, 'off')
+        check('DROP PROCEDURE '+('"PUBLIC"."'+name+'"'), 'off')
     check(SETTING+'on')
     return {'passed':True, 'ctas_modes':['on','off'], 'mixed_charsets':charsets,
             'procedure_sources':sources, 'native_alters_per_procedure':2, 'reconnect':True}
@@ -305,7 +306,7 @@ def strings_protocols(harness):
         c.check(q('ROLLBACK'),b'CZ')
         # Independent cursors and bound strings that must bypass SQL decoding.
         c.check(q(SETTING+'off'),b'CSZ',statuses=['off'])
-        c.check(parse('multi',"SELECT CAST('\\n' AS VARCHAR(8)) FROM RDB$TYPES ROWS 2")+
+        c.check(parse('multi','SELECT CAST(\'\\n\' AS VARCHAR(8)) FROM "RDB$TYPES" ROWS 2')+
                 parse('text','SELECT CAST(? AS VARCHAR(8))')+sync,b'11Z')
         c.check(q('SET TRANSACTION'),b'CZ',state='T')
         c.check(bind('a','multi')+bind('b','multi')+execute('a',1)+execute('b',1)+sync,
@@ -321,7 +322,7 @@ def strings_protocols(harness):
         result=subprocess.run([str(harness.runtime/'bin/isql'),'-quiet','-autoterm','-charset','UTF8',
             '-sql_dialect',str(dialect),f'inet://127.0.0.1:{harness.native_port}/wire_host'],
             input='SET LIST ON;\n'+SETTING+"off;\nSELECT 42 AS STANDARD_CONFORMING_STRINGS FROM RDB$DATABASE;\n"
-                  +r"SELECT OCTET_LENGTH('\n') AS N FROM RDB$DATABASE;"+'\nROLLBACK;\nQUIT;\n',
+                  +'SELECT OCTET_LENGTH(\'\\n\') AS N FROM RDB$DATABASE;'+'\nROLLBACK;\nQUIT;\n',
             capture_output=True,text=True,env=env,cwd=harness.temp,timeout=harness.timeout)
         output=result.stdout+result.stderr
         (harness.work/f'native_strings_{dialect}.log').write_text(harness.redact(output))

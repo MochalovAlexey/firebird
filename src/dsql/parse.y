@@ -1488,7 +1488,7 @@ grantee($granteeArray)
 		{ $granteeArray->add(GranteeClause(obj_view, *$2)); }
 	| ROLE symbol_role_name
 		{ $granteeArray->add(GranteeClause(obj_sql_role, QualifiedName(*$2))); }
-	| SYSTEM PRIVILEGE valid_symbol_name
+	| SYSTEM PRIVILEGE canonical_symbol_name
 		{ $granteeArray->add(GranteeClause(obj_privilege, QualifiedName(*$3))); }
 	;
 
@@ -2271,7 +2271,7 @@ system_privileges_list($createAlterRole)
 
 %type system_privilege(<createAlterRoleNode>)
 system_privilege($createAlterRole)
-	: valid_symbol_name		{ $createAlterRole->addPrivilege($1); }
+	: canonical_symbol_name		{ $createAlterRole->addPrivilege($1); }
 	;
 
 
@@ -3320,13 +3320,13 @@ deterministic_clause_opt
 
 %type <externalClause> external_clause
 external_clause
-	: EXTERNAL NAME utf_string ENGINE valid_symbol_name
+	: EXTERNAL NAME utf_string ENGINE canonical_symbol_name
 		{
 			$$ = newNode<ExternalClause>();
 			$$->name = *$3;
 			$$->engine = *$5;
 		}
-	| EXTERNAL ENGINE valid_symbol_name
+	| EXTERNAL ENGINE canonical_symbol_name
 		{
 			$$ = newNode<ExternalClause>();
 			$$->engine = *$3;
@@ -5048,7 +5048,12 @@ alter_column_name
 %type <metaNamePtr> keyword_or_column
 keyword_or_column
 	: valid_symbol_name
-	| ADMIN					// added in IB 5.0
+	| reserved_column_name { $$ = makeIdentifier($1, YYPOSNARG(1)); }
+	;
+
+%type <metaNamePtr> reserved_column_name
+reserved_column_name
+	: ADMIN					// added in IB 5.0
 	| COLUMN				// added in IB 6.0
 	| EXTRACT
 	| YEAR
@@ -5308,7 +5313,7 @@ db_alter_clause($alterDatabaseNode)
 		{ $alterDatabaseNode->clauses |= AlterDatabaseNode::CLAUSE_END_BACKUP; }
 	| SET DEFAULT CHARACTER SET symbol_character_set_name
 		{ $alterDatabaseNode->setDefaultCharSet = *$5; }
-	| ENCRYPT WITH valid_symbol_name crypt_key_clause($alterDatabaseNode)
+	| ENCRYPT WITH canonical_symbol_name crypt_key_clause($alterDatabaseNode)
 		{
 			setClauseFlag($alterDatabaseNode->clauses, AlterDatabaseNode::CLAUSE_CRYPT, "CRYPT");
 			$alterDatabaseNode->cryptPlugin = *$3;
@@ -5334,7 +5339,7 @@ db_alter_clause($alterDatabaseNode)
 %type crypt_key_clause(<alterDatabaseNode>)
 crypt_key_clause($alterDatabaseNode)
 	: // nothing
-	| KEY valid_symbol_name		{ $alterDatabaseNode->keyName = *$2; }
+	| KEY canonical_symbol_name		{ $alterDatabaseNode->keyName = *$2; }
 	;
 
 %type pub_table_filter(<alterDatabaseNode>)
@@ -5528,7 +5533,7 @@ drop_clause
 			node->silent = $2;
 			$$ = node;
 		}
-	| USER if_exists_opt symbol_user_name USING PLUGIN valid_symbol_name
+	| USER if_exists_opt symbol_user_name USING PLUGIN canonical_symbol_name
 		{
 			const auto node = newNode<DropUserNode>(*$3, $6);
 			node->silent = $2;
@@ -6307,13 +6312,13 @@ set_role
 
 %type <mngNode> set_debug_option
 set_debug_option
-	: SET DEBUG OPTION valid_symbol_name '=' constant
+	: SET DEBUG OPTION canonical_symbol_name '=' constant
 		{ $$ = newNode<SetDebugOptionNode>($4, $6); }
 	;
 
 %type <setDecFloatRoundNode> set_decfloat_round
 set_decfloat_round
-	: SET DECFLOAT ROUND valid_symbol_name
+	: SET DECFLOAT ROUND canonical_symbol_name
 		{ $$ = newNode<SetDecFloatRoundNode>($4); }
 	;
 
@@ -6395,7 +6400,7 @@ decfloat_traps_list($setDecFloatTrapsNode)
 
 %type decfloat_trap(<setDecFloatTrapsNode>)
 decfloat_trap($setDecFloatTrapsNode)
-	: valid_symbol_name
+	: canonical_symbol_name
 		{ $setDecFloatTrapsNode->trap($1); }
 	;
 
@@ -6450,7 +6455,7 @@ pg_setting_assignment
 %type <stringPtr> pg_setting_value
 pg_setting_value
 	: STRING			{ $$ = newString($1->getString()); }
-	| valid_symbol_name	{ $$ = newString($1->c_str()); }
+	| canonical_symbol_name	{ $$ = newString($1->c_str()); }
 	| ON				{ $$ = newString("ON"); }
 	;
 
@@ -8418,7 +8423,7 @@ user_fixed_option($node)
 
 %type use_plugin(<createAlterUserNode>)
 use_plugin($node)
-	: USING PLUGIN valid_symbol_name
+	: USING PLUGIN canonical_symbol_name
 							{ setClause($node->plugin, "USING PLUGIN", $3); }
 	;
 
@@ -8430,11 +8435,11 @@ user_var_list($node)
 
 %type user_var_option(<createAlterUserNode>)
 user_var_option($node)
-	: valid_symbol_name '=' utf_string
+	: canonical_symbol_name '=' utf_string
 		{
 			$node->addProperty($1, $3);
 		}
-	| DROP valid_symbol_name
+	| DROP canonical_symbol_name
 		{
 			$node->addProperty($2);
 		}
@@ -8549,7 +8554,7 @@ map_from($node)
 
 %type <metaNamePtr> map_from_symbol_name
 map_from_symbol_name
-	: valid_symbol_name
+	: canonical_symbol_name
 	| USER					{ $$ = newNode<MetaName>("USER"); }
 	| GROUP					{ $$ = newNode<MetaName>("GROUP"); }
 	;
@@ -8557,12 +8562,12 @@ map_from_symbol_name
 %type <intlStringPtr> map_logoninfo
 map_logoninfo
 	: sql_string
-	| valid_symbol_name		{ $$ = newIntlString($1->c_str(), metadataCharSet->getName()); }
+	| canonical_symbol_name		{ $$ = newIntlString($1->c_str(), metadataCharSet->getName()); }
 	;
 
 %type map_using(<mappingNode>)
 map_using($node)
-	: PLUGIN valid_symbol_name map_in
+	: PLUGIN canonical_symbol_name map_in
 		{
 			$node->mode = 'P';
 			$node->plugin = $2;
@@ -8592,7 +8597,7 @@ map_using($node)
 %type <metaNamePtr> map_in
 map_in
 	: /* nothing */				{ $$ = NULL; }
-	| IN valid_symbol_name		{ $$ = $2; }
+	| IN canonical_symbol_name		{ $$ = $2; }
 	;
 
 %type map_to(<mappingNode>)
@@ -8978,7 +8983,7 @@ sql_string
 			if (auto mark = strMarks.get($1))	// hex strings have no mark
 				mark->introducerAllowed = true;
 		}
-	| INTRODUCER schema_opt_qualified_name
+	| INTRODUCER introducer_name
 			[
 				// feedback for lexer
 				introducerCharSetName = $2;
@@ -9009,6 +9014,16 @@ sql_string
 				mark->introduced = true;
 			}
 		}
+	;
+
+// A literal introducer retains its native charset spelling, like symbolic
+// BLOB subtypes. It is not a PG object-name occurrence in the stored SQL.
+%type <qualifiedNamePtr> introducer_name
+introducer_name
+	: canonical_symbol_name
+		{ $$ = newNode<QualifiedName>(*$1); }
+	| canonical_symbol_name '.' canonical_symbol_name
+		{ $$ = newNode<QualifiedName>(*$3, *$1); }
 	;
 
 %type <stringPtr> utf_string
@@ -9643,7 +9658,7 @@ system_function_special_syntax
 				newNode<ValueListNode>(MAKE_const_slong($3))->add($5)->add($7));
 			$$->dsqlSpecialSyntax = true;
 		}
-	| encrypt_decrypt '(' value USING valid_symbol_name crypt_opt_mode KEY value crypt_opt_iv crypt_opt_counter_type crypt_opt_counter ')'
+	| encrypt_decrypt '(' value USING canonical_symbol_name crypt_opt_mode KEY value crypt_opt_iv crypt_opt_counter_type crypt_opt_counter ')'
 		{
 			$$ = newNode<SysFuncCallNode>(*$1,
 				newNode<ValueListNode>($3)->add(MAKE_str_constant(newIntlString($5->c_str()), CS_ASCII))->
@@ -9659,7 +9674,7 @@ system_function_special_syntax
 		}
 	| HASH '(' value ')'
 		{ $$ = newNode<SysFuncCallNode>(*$1, newNode<ValueListNode>($3)); }
-	| hash_func '(' value USING valid_symbol_name ')'
+	| hash_func '(' value USING canonical_symbol_name ')'
 		{
 			$$ = newNode<SysFuncCallNode>(*$1,
 				newNode<ValueListNode>($3)->add(MAKE_str_constant(newIntlString($5->c_str()), CS_ASCII)));
@@ -9711,7 +9726,7 @@ system_function_special_syntax
 					add(MAKE_str_constant(newIntlString($8->c_str()), CS_ASCII))->add($9)->add($10));
 			$$->dsqlSpecialSyntax = true;
 		}
-	| RDB_SYSTEM_PRIVILEGE '(' valid_symbol_name ')'
+	| RDB_SYSTEM_PRIVILEGE '(' canonical_symbol_name ')'
 		{
 			ValueExprNode* v = MAKE_system_privilege($3->c_str());
 			$$ = newNode<SysFuncCallNode>(*$1, newNode<ValueListNode>(v));
@@ -9748,7 +9763,7 @@ crypt_opt_pkcs
 crypt_opt_hash
 	: // nothing
 		{ $$ = newNode<MetaName>(""); }
-	| HASH valid_symbol_name
+	| HASH canonical_symbol_name
 		{ $$ = $2; }
 	;
 
@@ -9764,7 +9779,7 @@ crypt_opt_saltlen
 crypt_opt_mode
 	: // nothing
 		{ $$ = newNode<MetaName>(""); }
-	| MODE valid_symbol_name
+	| MODE canonical_symbol_name
 		{ $$ = $2; }
 	;
 
@@ -9902,7 +9917,7 @@ udf
 %type <qualifiedNamePtr> symbol_UDF_call_name
 symbol_UDF_call_name
 	: SYMBOL
-		{ $$ = newNode<QualifiedName>(*$1); }
+		{ $$ = newNode<QualifiedName>(*makeIdentifier($1, YYPOSNARG(1))); }
 	| valid_symbol_name '.' valid_symbol_name
 		{ $$ = newNode<QualifiedName>(*$3, *$1); }
 	| valid_symbol_name '.' valid_symbol_name '.' valid_symbol_name
@@ -10273,7 +10288,7 @@ symbol_UDF_name
 
 %type <metaNamePtr> symbol_blob_subtype_name
 symbol_blob_subtype_name
-	: valid_symbol_name
+	: canonical_symbol_name
 	| BINARY
 	;
 
@@ -10320,7 +10335,7 @@ symbol_filter_name
 
 %type <metaNamePtr> symbol_gdscode_name
 symbol_gdscode_name
-	: valid_symbol_name
+	: canonical_symbol_name
 	;
 
 %type <qualifiedNamePtr> symbol_generator_name
@@ -10418,6 +10433,13 @@ schema_opt_qualified_name
 
 %type <metaNamePtr> valid_symbol_name
 valid_symbol_name
+	: canonical_symbol_name
+		{ $$ = makeIdentifier($1, YYPOSNARG(1)); }
+	;
+
+// Non-object symbolic values retain their native keyword interpretation.
+%type <metaNamePtr> canonical_symbol_name
+canonical_symbol_name
 	: SYMBOL
 	| non_reserved_word
 	;

@@ -160,7 +160,7 @@ SqlInfo savepointCommand(std::string tag, ControlKind kind, const Token& token)
 	if (token.kind == TokenKind::Word)
 	{
 		for (const unsigned char c : token.text)
-			decoded += char(c >= 'a' && c <= 'z' ? c - ('a' - 'A') : c);
+			decoded += char(c >= 'A' && c <= 'Z' ? c + ('a' - 'A') : c);
 	}
 	else
 	{
@@ -171,8 +171,8 @@ SqlInfo savepointCommand(std::string tag, ControlKind kind, const Token& token)
 				++i; // doubled quote
 		}
 	}
-	// MetaString shares the engine's trailing-space normalization. Length and UTF8
-	// validity are checked by prepare, before this descriptor is used as history.
+	// Length, UTF8 and unrepresentable quoted names are checked by prepare before
+	// this descriptor is used as history. Keywords retain their own classification.
 	if (decoded.size() <= MAX_SQL_IDENTIFIER_LEN)
 	{
 		const MetaString normalized(decoded.data(), decoded.size());

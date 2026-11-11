@@ -126,6 +126,7 @@ private:
 		bool introduced;
 		bool escaped = false;
 		bool introducerAllowed = false;
+		bool identifier = false;
 		unsigned pos;
 		unsigned length;
 		IntlString* str;
@@ -236,6 +237,7 @@ private:
 
 	int lexPgString();
 	void transformString(const char* start, unsigned length, Firebird::string& dest);
+	MetaName* makeIdentifier(MetaName* name, const Position& position);
 	Firebird::string makeParseStr(const Position& p1, const Position& p2);
 	ParameterNode* make_parameter();
 
@@ -401,6 +403,7 @@ private:
 	Firebird::CharSet* metadataCharSet;
 	Firebird::string transformedString;
 	Firebird::GenericMap<Firebird::NonPooled<IntlString*, StrMark> > strMarks;
+	Firebird::SortedArray<StrMark> identifierMarks;
 	bool stmt_ambiguous;
 	DsqlStatement* parsedStatement = nullptr;
 	StmtNode* parsedDmlNode = nullptr;

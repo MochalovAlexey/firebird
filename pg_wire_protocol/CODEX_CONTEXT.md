@@ -1,5 +1,25 @@
 # Контекст реализации wire protocol plugins в Firebird 6
 
+## APP-13: действующий naming/session contract
+
+PG4 складывает unquoted object identifiers в ASCII lowercase только в grammar
+identifier positions; canonical tokens/builtins/symbolic values остаются native.
+Quoted trailing space/NUL отвергаются до MetaName. Final-action identifier marks
+сливаются с literal marks в Parser::transformString; сохранённый SQL безопасен для
+native3 reprepare. Dynamic SQL literals и guards `$n`/`::`/LIMIT сохраняются.
+
+QueryExecutor::initializeSearchPath использует prepare/execute с nullptr transaction
+и native dialect 3 для фиксированного `SET SEARCH_PATH TO "public", "pg_catalog", "SYSTEM"`.
+Вызов после attach до AuthenticationOk и после успешного прямого RESET в общем
+control path под `ending` guard. Между командами путь не сбрасывается. SqlInfo
+normalizes только unquoted savepoint name в lowercase, engine prepare проверяет SQL.
+Нет нового API, cache или преобразования startup identity strings.
+
+Lowercase bootstrap — отдельный атомарный [installer](1c/sql/install_pg_names.sql)
+над APP-10/11/12+compat.sql. Старые native schemas/data не переименовываются и не
+копируются. [Контракт и ограничения](COMPATIBILITY.md#app-13-правила-имён-pg4),
+[порядок установки](1c/README.md#app-13-имена-и-установка-lowercase-профиля).
+
 Контракт реализации M0–M3. Архитектура host/plugin определена в [ARCHITECTURE.md](ARCHITECTURE.md), границы приёмки — в [COMPATIBILITY.md](COMPATIBILITY.md), [PLAN.md](PLAN.md) и [TEST_PLAN.md](TEST_PLAN.md). Прямые требования пользователя имеют приоритет. Предыдущая P5-ревизия прошла целевую Linux/Super loopback приёмку: I/T/E, native transaction/session controls и recovery. В P6 сборка, unit tests и host/startup/Simple Query/transaction/lifecycle/native регрессии прошли. **Известное ограничение native baseline: READ COMMITTED READ CONSISTENCY + AUTO COMMIT не входит в подтверждённую совместимость; SNAPSHOT AUTO COMMIT проверен.** Целевой P6/M1 Linux/Super принят с известными native ограничениями. Shutdown во время ON CONNECT остаётся отдельным исключением: native Debug assertion воспроизводится также без wire endpoints. P7 Extended Query прошёл целевую Linux/Super приёмку: 16 групп. P8 codecs прошли целевую Linux/Super приёмку: восемь групп. P9 прошёл 17 групп с реальными C libpq, raw-wire и ограниченным профилем Psycopg 3; целевой M2 Linux/Super для совместимого SQL и реализованных codecs принят. Следующий этап — P10. Результаты и границы покрытия — в [VALIDATION.md](VALIDATION.md). TLS, Windows и другие server modes требуют отдельной реализации и приёмки.
 
 ## 1. Цель и границы

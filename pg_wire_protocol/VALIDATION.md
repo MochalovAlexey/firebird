@@ -1,5 +1,190 @@
 # Проверки реализации
 
+## APP-13: 11 ноября 2026 — правила имён PG4
+
+Реализация на review, без staging/commit. База `13f64d0e003b4b8d647a059016e52c79e2de6050` плюс рабочий diff;
+production diff (`git diff -- src`) SHA256 `d34d6e4e41f711a6a2b2446677e6a4ed6cdec09e0f25766461d88cc1a3611b30`.
+Предшествующие пользовательские изменения документов сохранены. Публичные API/ODS/DPB
+не расширялись; новых runtime dependencies нет. Исполнение — Linux/Super, локальный TCP, реальные C libpq 14.24,
+ctypes libpq 14.24 и psycopg2 2.9.2. Все базы/security/runtime/locks — отдельные `/tmp`.
+Рабочие сервер/1С не менялись; known NAT-* crash repro не запускались.
+
+Свежая out-of-tree developer build: `/tmp/firebird-pgwire-names-build-20261111`. Configure и полный make завершились
+с exit 0; после исправления introducer и отделения symbolic security values выполнены
+incremental rebuilds в той же свежей сборке. Conflicts unchanged: **158 shift/reduce,
+11 reduce/reduce**. `configure.log`, `build.log`, `rebuild-introducer.log`,
+`rebuild-symbolic.log` сохранены в build directory. Девять unit executables PASS
+(`units.json`): SQL 576, input 559, numeric 502, float 112, temporal 313, session 5
+scenarios, protocol/result/error. API проверяется отдельно ниже.
+
+```sh
+mkdir /tmp/firebird-pgwire-names-build-20261111
+cd /tmp/firebird-pgwire-names-build-20261111
+/home/aleksey/dev/my_firebird/firebird/configure --enable-binreloc --enable-developer
+make -j2
+make -C gen -j2 TARGET=Debug pgwire_tests wire_tests
+# Run the nine gen/Debug/firebird/tests/pgwire_*_test executables; units.json records exit/output.
+```
+
+Все финальные строки таблицы используют один окончательный engine SHA ниже.
+Summary находится в `/tmp/firebird-pgwire-names-SUFFIX/summary.json`; там же logs,
+native observers/readbacks, source captures, protocol results и helper hashes.
+**Каждый server run: exit 0, forced_kill=false**, включая дополнительные trace runs.
+
+| SUFFIX | Mode/tool | Результат |
+|---|---|---|
+| `06` | `--pg-names + capture` | PASS: 109 libpq results, 6 installer groups; selected01, native source reprepare |
+| `strings-04` | `--strings` | PASS: 156 libpq queries, raw ParameterStatus/portals, native/API 1209 checks |
+| `namespace-03` | `--namespace-catalog` | PASS: 128 queries; native oracle, metadata/rights/DDL lifecycle |
+| `class-03` | `--class-catalog` | PASS: 228 results; native oracle, metadata/rights/DDL lifecycle |
+| `blobs-03` | `--blobs + capture` | PASS: 92 checks + raw; selected06, unchanged binary fixtures |
+| `input-06` | `--blob-input + capture` | PASS: 125 checks, 9 native readbacks + raw; selected23, 68/92 shape |
+| `settings-03` | `--settings + capture` | PASS: 190 queries + raw, native1/2/3 SET rejection |
+| `parameters-01` | `--parameters` | PASS: 73 checks + raw, 92 values, native readback |
+| `casts-03` | `--casts` | PASS: 129 checks + raw/native; root guards unchanged |
+| `limits-02` | `--limits` | PASS: 112 checks + raw/native; root guards unchanged |
+| `begin-02` | `--begin` | PASS: 88 queries, 43 native observations + raw/native |
+| `select-02` | `no mode flag` | PASS: SELECT/cache/native1/2/3, numeric DDL/DML, two backend identities |
+| `startup-02` | `pgwire_startup_smoke.py` | PASS: 49 groups, malformed/auth/native coexistence/trace/shutdown |
+| `simple-03` | `pgwire_simple_query_smoke.py` | PASS: 12 groups, raw/C libpq/psycopg2, DDL/DML, failures |
+| `extended-03` | `pgwire_extended_query_smoke.py` | PASS: 16 groups, C libpq/raw, portals/RESET/bounds/shutdown |
+| `scripts-02` | `pgwire_script_smoke.py` | PASS: 8 groups, Simple scripts, first error/commit/rollback |
+| `transactions-02` | `pgwire_transaction_smoke.py` | PASS: 14 groups, native controls/RESET/fatal cleanup/C libpq |
+
+Команды из корня repository (work-dir должен быть новым; SUFFIX из таблицы —
+сохранённые результаты, повтор потребует другого имени). Modes из первых 12 строк
+передаются `pgwire_1c_smoke.py`; `+ capture` означает аргумент `--capture-dir`:
+
+```sh
+NAMES_RUNTIME=/tmp/firebird-pgwire-names-build-20261111/gen/Debug/firebird
+NAMES_CAPTURE=/home/aleksey/dev/1c/captures/20261109T105635Z
+NAMES_HEADERS=/tmp/firebird-pgwire-names-deps/libpq-dev/usr/include/postgresql
+NAMES_LIBPQ=/lib/x86_64-linux-gnu/libpq.so.5
+python3 -B pg_wire_protocol/tools/pgwire_1c_smoke.py --firebird-dir "$NAMES_RUNTIME" --work-dir /tmp/firebird-pgwire-names-06 --pg-names --capture-dir "$NAMES_CAPTURE" --timeout 120
+python3 -B pg_wire_protocol/tools/pgwire_1c_smoke.py --firebird-dir "$NAMES_RUNTIME" --work-dir /tmp/firebird-pgwire-names-input-06 --blob-input --capture-dir "$NAMES_CAPTURE" --timeout 120
+python3 -B pg_wire_protocol/tools/pgwire_startup_smoke.py --firebird-dir "$NAMES_RUNTIME" --work-dir /tmp/firebird-pgwire-names-startup-02 --timeout 120
+python3 -B pg_wire_protocol/tools/pgwire_simple_query_smoke.py --firebird-dir "$NAMES_RUNTIME" --work-dir /tmp/firebird-pgwire-names-simple-03 --libpq-include-dir "$NAMES_HEADERS" --libpq-library "$NAMES_LIBPQ" --driver-python /usr/bin/python3 --timeout 120
+python3 -B pg_wire_protocol/tools/pgwire_extended_query_smoke.py --firebird-dir "$NAMES_RUNTIME" --work-dir /tmp/firebird-pgwire-names-extended-03 --libpq-include-dir "$NAMES_HEADERS" --libpq-library "$NAMES_LIBPQ" --timeout 120
+python3 -B pg_wire_protocol/tools/pgwire_script_smoke.py --firebird-dir "$NAMES_RUNTIME" --work-dir /tmp/firebird-pgwire-names-scripts-02 --timeout 120
+python3 -B pg_wire_protocol/tools/pgwire_transaction_smoke.py --firebird-dir "$NAMES_RUNTIME" --work-dir /tmp/firebird-pgwire-names-transactions-02 --libpq-include-dir "$NAMES_HEADERS" --libpq-library "$NAMES_LIBPQ" --timeout 120
+```
+
+Headers libpq-dev 14.24 скачаны `apt-get download` и распакованы `dpkg-deb -x`
+в `/tmp/firebird-pgwire-names-deps`, без установки пакетов. Новых runtime dependencies нет.
+
+APP-13 проверяет `foo`/`FOO`/`"foo"`, отдельные `"Foo"`/`"FOO"`, names/CTE/aliases/
+non-reserved keywords, named arguments/variables, ABS/MOD/DECFLOAT, точный quoted
+доступ к старой PUBLIC.TTT и отсутствие fallback. Quoted UTF8/leading space/doubled
+quote/56-character name сохраняются. Trailing space и 64 ASCII characters rejected;
+embedded NUL проверен прямым API с явной длиной. Unquoted Unicode остаётся native
+syntax rejection 42601: новая лексика не добавлялась.
+
+Проверен исходный selected01 (SHA256
+`b11e7057e098fb36df02cdf535827175f82ef05198a11662c8a4b18931aab363`), неизменённые
+selected06/23 на новых физических lowercase `"public"."params"`/`"public"."files"`
+с прежними binary payloads. Это synthetic fixtures, не перенос настоящей базы/Bind.
+Новые pg_namespace/pg_class labels lowercase, values/types равны native oracle;
+старые uppercase rows остаются. Installer: fresh/existing public, owner/data,
+old IDs/bootstrap, failure before COMMIT, repeat/collision, readonly owner/user.
+
+Stored source реально извлечён из metadata и переподготовлен отдельным native3
+attachment (`names_native_reprepare.log`), не только исполнен старый BLR. Например:
+`SELECT "baseval" AS "myalias", "textval" || _UTF8 X'0958' AS "textalias" FROM "sourcetable"`;
+PSQL variables/args quotes сохранены, CHECK/COMPUTED/index выражения повторно созданы,
+DEFAULT strings=off остаётся `DEFAULT _UTF8 X'466F6F0A424152'`. CTAS и native dynamic
+SQL проверены; `$n`/`::`/LIMIT DDL guards остались 0A000. Native1/2/3 и одинаковый SQL
+по двум dialect cache entries подтверждены API. Prepared Bind использует текущий
+search path согласно прежнему механизму reprepare. Simple/Extended RESET возвращают
+public-first путь без лишних результатов/transactions. Savepoints `a`/`"a"`/`"A"`
+проверены со strings on/off, E→T, ROLLBACK TO/RELEASE и ParameterStatus.
+
+Ранние FAIL сохранены, не засчитаны как приёмка: names-01/02/03 — неверные тестовые
+ожидания SQLSTATE (42P01, 23514) и prepared reuse после SET path; names-05 — native
+lexical отказ unquoted Unicode. API-01/result02 выявил реальную регрессию `_UTF8`:
+introducer был identifier-folded, исправлен отдельной canonical grammar production.
+Предыдущие blob/input/Simple/Extended/settings/strings/catalog/casts/begin/scripts/
+transaction/select runs останавливались на пропущенных quotes у native fixtures,
+неверных native1 recovery templates или старых alias/label expectations. Они исправлены
+в исходниках harnesses; native1/2/3 templates сохранены. Для default SELECT fixture
+добавлен именно `GRANT CREATE TABLE ON SCHEMA "public"`, отдельно от bootstrap.
+Input-04 выявил гонку наблюдения после PQfinish: теперь ограниченное ожидание server
+rollback использует новые native snapshots; byte/count/transaction assertions прежние.
+Поздние PASS выше заменяют эти FAIL. Форматирование fixtures после PASS меняло только
+Python представление строк; runtime hashes и SQL semantics сохранены.
+
+SKIP/out of scope: исходные selected04/10/11, regnamespace/oid/name, visibility/temp,
+полный PG search_path/USAGE/transactional SET, реальный клиент 1С/Гилёв, Windows/TLS,
+known NAT-* crash repro и backup/restore identity. APP-01/03/04/06 и SQL-05 остаются
+открытыми. Установка не выдаёт CREATE/DML всем и не мигрирует рабочие базы.
+
+SHA256 окончательных artifacts/source:
+
+| Artifact | SHA256 |
+|---|---|
+| `firebird` | `f14fba1af980cc0112dd53c4b4929fd6419ea9c6420e9c6d1830a502e34fa9b6` |
+| `libEngine14.so` | `afbb16bb1b2b05b988a1ff39416303f968233e8b243c9159c2ed49eaccfd7e1c` |
+| `libPgWire.so` | `aa1c1e67b486d066bf36bca4ca8033450b0e4c3d8ef10e539cba9c53952d98f9` |
+| `install_pg_names.sql` | `661f72900ce282aea59a4f409606fbfc4f6bfb6af7e548fcb3c6409d650cf889` |
+| `pgwire_names_checks.py` | `e9290b0de66de91ee454c8c7ef0d3a7ef62e5ce2bf5a57881c5a3d0c2845e009` |
+| `pgwire_strings_api.cpp` | `ddb2dd40b9a3f64f445dc86a14a4e5571d45306a968c6e03c0dd71677a8aea00` |
+
+
+## 11 ноября 2026: архитектурный review pg_class
+
+Проверена ревизия `13f64d0e003b4b8d647a059016e52c79e2de6050` относительно
+`a3e3c80123`: SQL installer, прежний harness/новые проверки и границы документации.
+Замечаний к APP-12 не найдено. Production — только SQL-view; src diff пуст,
+APP-10/11/compat.sql и namespace helpers не изменены. Ограничения типов, rows,
+ID reuse и restore соответствуют заданию.
+
+Независимо повторена целевая приёмка из чистого worktree:
+
+```sh
+python3 -B pg_wire_protocol/tools/pgwire_1c_smoke.py \
+  --firebird-dir /tmp/firebird-pgwire-catalog-source-20261111 \
+  --work-dir /tmp/firebird-pgwire-class-catalog-review-20261111 \
+  --class-catalog --timeout 180
+```
+
+В summary.json: completed=true, class_catalog_passed=true. PASS: 5 групп установки,
+4 native/libpq группы, 228 results, включая prepare/describe и oracle reads.
+libpq 14.24. Сервер PID 1328499, native 45969, PgWire 47463: exit_code=0,
+forced_kill=false, shutdown 0.164 s. SQL/harness и runtime SHA совпали с таблицей
+реализации ниже; source_revision=13f64d0e00, source_diff_sha256 пустого diff.
+Готовая сборка переиспользована: C++ не менялся, rebuild и старые suites не
+повторялись. Разрешённый loopback TCP, изолированные /tmp runtime/security/data;
+рабочая 1С не затрагивалась, known NAT-* crash repro не запускались.
+
+APP-12 закрыт в своей ограниченной области. Далее пользователь явно выбрал
+PG-правила имён в PG dialect, сохранив native подключения, и увеличение объёма
+одной инструкции. Подготовлен [APP-13](1c/PG_IDENTIFIER_NAMES_TASK.md): parser,
+native-safe source, реальные lowercase bootstrap objects, session search path,
+RESET/savepoints и end-to-end DDL/DML. Это задание, не выполненная приёмка.
+
+При проектировании следующих функций выполнен отдельный native embedded probe:
+`/tmp/pgwire-visibility-native-probe-20261111-9dgdwwfs/`, отдельная полная копия
+проверенного runtime, Engine SHA `ba439210e32962db216a7853c8ff8857c70a77d8dc045e8abda0a7d86d011bf7`.
+`no_usage.sql` SHA `ad0980691ee69a971852e7f3b2edc2bb47c53f4d554e70f12072254c24d4d160`;
+`ltt_cross_schema.sql` SHA `f7b0f1f1e4aa98db222f4e6c0bba0ddfb5979b95599a50d7986fd43856ed14fa`.
+SQL и результаты сохранены в этих файлах, *.log и summary.json; использовался
+native isql из отдельного runtime с его FIREBIRD/FIREBIRD_LOCK/FIREBIRD_TMP.
+
+- MAKE_DBKEY(dynamic name,0) выбирает S1.T при отсутствии USAGE на S1, но настоящий
+  SELECT T отказывается с 28000. `no_usage` exit1 — ожидаемый отказ SELECT после
+  успешного разрешения имени; это не проверка PG visibility.
+- При path S3,S2 создание LTT S3.T меняет runtime DBKEY с persistent на LTT;
+  MON$LOCAL_TEMPORARY_TABLES в прежней transaction остаётся 0 и показывает 1
+  только после COMMIT. Итоговый ltt_cross_schema exit0. Предыдущие попытки
+  остановились на отсутствии CREATE grant и same-schema collision; они сохранены.
+
+Значит, MAKE_DBKEY сам по себе не задаёт effective PG path по USAGE, а monitoring
+snapshot непригоден для live guard наличия temporary tables. Функции visibility/
+temp namespace не добавлять как заглушки. В APP-13 initial path public-first
+нужен также потому, что native qualifyNewName выбирает первую существующую schema
+для CREATE. Полная PG implicit catalog precedence/USAGE/$user остаётся отдельной
+работой. Основания: native исходники MET/Attachment/Monitoring и
+[PG schema search path](https://www.postgresql.org/docs/18/ddl-schemas.html).
+
 ## 11 ноября 2026: pg_class для постоянных таблиц и представлений
 
 [APP-12](1c/CLASS_CATALOG_TASK.md) реализован поверх

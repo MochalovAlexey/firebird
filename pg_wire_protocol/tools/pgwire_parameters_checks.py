@@ -67,7 +67,7 @@ def parameters_client(config, client):
             'SET NAMES UTF8;\nSET ROLE PGWIRE_OBSERVER;\nSET LIST ON;\n' + sql + ';\nROLLBACK;\nQUIT;\n')
 
     def seen(identifier, expected):
-        output = native(f'SELECT ID, NAME, V FROM PARAM_ROWS WHERE ID={identifier}')
+        output = native(f'SELECT "ID", "NAME", "V" FROM "PUBLIC"."PARAM_ROWS" WHERE "ID"={identifier}')
         actual = [re.findall(r'^' + col + r'[ \t]+([^\n]*?)[ \t]*$', output, re.M) for col in ('ID', 'NAME', 'V')]
         require(actual == ([[], [], []] if expected is None else [[str(v)] for v in expected]),
                 'native row differs: ' + repr(actual))
@@ -83,44 +83,40 @@ def parameters_client(config, client):
     params('typed', [None, '7', None, None], prepared=True, rows=[[None, '7', None, None]])
     params('typed', [struct.pack('!h', -7), struct.pack('!q', 78), 'Я🙂', None],
            formats=[1, 1, 1, 1], prepared=True, rows=[['-7', '78', 'Я🙂', None]])
-    prepare('insert_row', 'INSERT INTO PARAM_ROWS VALUES($1,$2,$3)', [23, 1043, 20], [0, 1043, 20])
+    prepare('insert_row', 'INSERT INTO "PUBLIC"."PARAM_ROWS" VALUES($1,$2,$3)', [23, 1043, 20], [0, 1043, 20])
     params('insert_row', ['701', 'Первый', '9000000001'], prepared=True, tag='INSERT 0 1')
     seen(701, [701, 'Первый', 9000000001])
-    params('SELECT ID FROM PARAM_ROWS WHERE NAME=$1', ['Первый'], rows=[['701']])
-    params('SELECT CONTENT_TEXT FROM PARAM_FILES WHERE FILENAME=$1', ['config/Я.xml'], rows=[['synthetic-config']])
-    params('UPDATE PARAM_ROWS SET NAME=$1, V=$2 WHERE ID=$3 RETURNING ID, NAME, V',
+    params('SELECT "ID" FROM "PUBLIC"."PARAM_ROWS" WHERE "NAME"=$1', ['Первый'], rows=[['701']])
+    params('SELECT "CONTENT_TEXT" FROM "PUBLIC"."PARAM_FILES" WHERE "FILENAME"=$1', ['config/Я.xml'], rows=[['synthetic-config']])
+    params('UPDATE "PUBLIC"."PARAM_ROWS" SET "NAME"=$1, "V"=$2 WHERE "ID"=$3 RETURNING "ID", "NAME", "V"',
            ['', '-9000000002', '701'], rows=[['701', '', '-9000000002']])
     seen(701, [701, '', -9000000002])
-    params('UPDATE PARAM_ROWS SET NAME=$1 WHERE ID=$2 RETURNING NAME', [None, '701'], rows=[[None]])
+    params('UPDATE "PUBLIC"."PARAM_ROWS" SET "NAME"=$1 WHERE "ID"=$2 RETURNING "NAME"', [None, '701'], rows=[[None]])
     seen(701, [701, '<null>', -9000000002])
 
     # CTE traversal may differ from source order; unused CTE inputs must remain present.
     for name, sql, values, rows in (
-        ('unused_cte', 'WITH U AS (SELECT CAST($1 AS INTEGER) AS V FROM RDB$DATABASE) '
-         'SELECT CAST($2 AS INTEGER)', ['111', '222'], [['222']]),
-        ('used_cte', 'WITH U AS (SELECT CAST($1 AS INTEGER) AS V FROM RDB$DATABASE) '
-         'SELECT CAST($2 AS INTEGER), U.V FROM U', ['111', '222'], [['222', '111']]),
-        ('subquery', 'SELECT CAST($1 AS INTEGER), (SELECT CAST($2 AS INTEGER) FROM RDB$DATABASE) '
-         'WHERE EXISTS(SELECT 1 FROM RDB$DATABASE WHERE 3=CAST($3 AS INTEGER))', ['11', '22', '3'], [['11', '22']]),
+        ('unused_cte', 'WITH U AS (SELECT CAST($1 AS INTEGER) AS "V" FROM "SYSTEM"."RDB$DATABASE") SELECT CAST($2 AS INTEGER)', ['111', '222'], [['222']]),
+        ('used_cte', 'WITH U AS (SELECT CAST($1 AS INTEGER) AS "V" FROM "SYSTEM"."RDB$DATABASE") SELECT CAST($2 AS INTEGER), U."V" FROM U', ['111', '222'], [['222', '111']]),
+        ('subquery', 'SELECT CAST($1 AS INTEGER), (SELECT CAST($2 AS INTEGER) FROM "SYSTEM"."RDB$DATABASE") '
+         'WHERE EXISTS(SELECT 1 FROM "SYSTEM"."RDB$DATABASE" WHERE 3=CAST($3 AS INTEGER))', ['11', '22', '3'], [['11', '22']]),
     ):
         prepare(name, sql, [23] * len(values))
         params(name, values, prepared=True, rows=rows)
-    merge = ('MERGE INTO PARAM_ROWS T USING (SELECT CAST($1 AS INTEGER) AS ID FROM RDB$DATABASE) S '
-             'ON T.ID=S.ID WHEN MATCHED THEN UPDATE SET NAME=$2 '
-             'WHEN NOT MATCHED THEN INSERT(ID,NAME,V) VALUES(S.ID,$3,$4) RETURNING T.ID,T.NAME,T.V')
+    merge = ('MERGE INTO "PUBLIC"."PARAM_ROWS" "T" USING (SELECT CAST($1 AS INTEGER) AS "ID" FROM "SYSTEM"."RDB$DATABASE") "S" ON "T"."ID"="S"."ID" WHEN MATCHED THEN UPDATE SET "NAME"=$2 WHEN NOT MATCHED THEN INSERT("ID","NAME","V") VALUES("S"."ID",$3,$4) RETURNING "T"."ID","T"."NAME","T"."V"')
     prepare('merge_row', merge, [23, 1043, 1043, 20])
     params('merge_row', ['702', 'unused-update', 'inserted', '987'], prepared=True, rows=[['702', 'inserted', '987']])
     seen(702, [702, 'inserted', 987])
     params('merge_row', ['702', 'updated', 'unused-insert', '654'], prepared=True, rows=[['702', 'updated', '987']])
     seen(702, [702, 'updated', 987])
-    params('DELETE FROM PARAM_ROWS WHERE ID=$1 RETURNING ID, NAME', ['702'], rows=[['702', 'updated']])
+    params('DELETE FROM "PUBLIC"."PARAM_ROWS" WHERE "ID"=$1 RETURNING "ID", "NAME"', ['702'], rows=[['702', 'updated']])
     seen(702, None)
 
-    insert92 = 'INSERT INTO PARAM_92 VALUES(' + ','.join(f'${i}' for i in range(1, 93)) + ')'
+    insert92 = 'INSERT INTO "PUBLIC"."PARAM_92" VALUES(' + ','.join(f'${i}' for i in range(1, 93)) + ')'
     prepare('insert92', insert92, [23] * 92)
     values92 = [str(10000 + i * 37) for i in range(1, 93)]
     params('insert92', values92, prepared=True, tag='INSERT 0 1')
-    output = native('SELECT * FROM PARAM_92')
+    output = native('SELECT * FROM "PUBLIC"."PARAM_92"')
     actual92 = re.findall(r'^C(\d+)\s+(-?\d+)\s*$', output, re.M)
     require(actual92 == [(str(i), v) for i, v in enumerate(values92, 1)], 'native 92-column readback differs')
     report['synthetic_92_values'] = values92
@@ -139,7 +135,7 @@ def parameters_client(config, client):
     params(TYPED, ['42'], rows=[['42']])
 
     # Simple cannot execute an input statement with an implicit NULL.
-    query('INSERT INTO PARAM_ROWS(ID) VALUES($1)', error='0A000')
+    query('INSERT INTO "PUBLIC"."PARAM_ROWS"("ID") VALUES($1)', error='0A000')
     query(TYPED, error='0A000')
     for hints in ((), (23,)):
         params('SELECT $1', ['1'], oids=hints, error='HY004')
@@ -152,25 +148,24 @@ def parameters_client(config, client):
 
     # Native parameter contexts retain their existing metadata/semantics.
     for name, sql, metadata, values, expected in (
-        ('call_native', 'CALL PARAM_PROC(?, ?)', [23], ['41'], [['42']]),
-        ('call_named', 'CALL PARAM_PROC(A => ?, B => ?)', [23], ['44'], [['45']]),
-        ('procedure_native', 'EXECUTE PROCEDURE PARAM_PROC(?)', [23], ['45'], [['46']]),
-        ('block_native', 'EXECUTE BLOCK(A INTEGER=?) RETURNS(B INTEGER) AS BEGIN B=A; SUSPEND; END', [23], ['46'], [['46']]),
+        ('call_native', 'CALL "PUBLIC"."PARAM_PROC"(?, ?)', [23], ['41'], [['42']]),
+        ('call_named', 'CALL "PUBLIC"."PARAM_PROC"("A" => ?, "B" => ?)', [23], ['44'], [['45']]),
+        ('procedure_native', 'EXECUTE PROCEDURE "PUBLIC"."PARAM_PROC"(?)', [23], ['45'], [['46']]),
+        ('block_native', 'EXECUTE BLOCK("A" INTEGER=?) RETURNS("B" INTEGER) AS BEGIN "B"="A"; SUSPEND; END', [23], ['46'], [['46']]),
     ):
         prepare(name, sql, metadata)
         params(name, values, prepared=True, rows=expected)
     # USING is accepted by the native OO API, but remains outside wire execution.
-    params('USING (A INTEGER=?) DO SELECT :A FROM RDB$DATABASE', ['47'], error='0A000')
-    params('UPDATE OR INSERT INTO PARAM_ROWS VALUES(?,?,?) MATCHING(ID)', ['720','native','20'], tag='UPDATE OR INSERT 1')
+    params('USING ("A" INTEGER=?) DO SELECT :"A" FROM "SYSTEM"."RDB$DATABASE"', ['47'], error='0A000')
+    params('UPDATE OR INSERT INTO "PUBLIC"."PARAM_ROWS" VALUES(?,?,?) MATCHING("ID")', ['720','native','20'], tag='UPDATE OR INSERT 1')
     seen(720, [720, 'native', 20])
     # Synthetic local function arguments call make_parameter(), but are not real '?'.
-    query('EXECUTE BLOCK RETURNS(V INTEGER) AS DECLARE FUNCTION F(A INTEGER) RETURNS INTEGER '
-          'AS BEGIN RETURN A; END BEGIN V=F(42); SUSPEND; END', rows=[['42']])
-    query("CREATE PROCEDURE PARAM_LITERAL RETURNS(V VARCHAR(10)) AS BEGIN V='$1'; END")
-    query('EXECUTE PROCEDURE PARAM_LITERAL', rows=[['$1']])
-    query("CREATE TABLE PARAM_LITERAL_TABLE(V VARCHAR(10) DEFAULT '$1')")
-    query('DROP TABLE PARAM_LITERAL_TABLE')
-    query('DROP PROCEDURE PARAM_LITERAL')
+    query('EXECUTE BLOCK RETURNS("V" INTEGER) AS DECLARE FUNCTION "F"("A" INTEGER) RETURNS INTEGER AS BEGIN RETURN "A"; END BEGIN "V"="F"(42); SUSPEND; END', rows=[['42']])
+    query('CREATE PROCEDURE "PUBLIC"."PARAM_LITERAL" RETURNS("V" VARCHAR(10)) AS BEGIN "V"=\'$1\'; END')
+    query('EXECUTE PROCEDURE "PUBLIC"."PARAM_LITERAL"', rows=[['$1']])
+    query('CREATE TABLE "PUBLIC"."PARAM_LITERAL_TABLE"("V" VARCHAR(10) DEFAULT \'$1\')')
+    query('DROP TABLE "PUBLIC"."PARAM_LITERAL_TABLE"')
+    query('DROP PROCEDURE "PUBLIC"."PARAM_LITERAL"')
     report['psycopg3'] = 'available' if importlib.util.find_spec('psycopg') else 'SKIP: not installed; no dependencies added'
     report['scope'] = 'synthetic 06 lookup / 19 92-column shape; not original schema/types or 1C database opening'
     return report
@@ -182,7 +177,7 @@ def parameters_protocols(h):
     try:
         invalid = [
             ('SELECT CAST($1 AS INTEGER), CAST($1 AS INTEGER)', '0A000'),
-            ('INSERT INTO PARAM_ROWS(ID,V) VALUES($1,$1)', '0A000'),
+            ('INSERT INTO "PUBLIC"."PARAM_ROWS"("ID","V") VALUES($1,$1)', '0A000'),
             ('SELECT CAST($1 AS INTEGER), CAST($3 AS INTEGER)', '0A000'),
             ('SELECT CAST($2 AS INTEGER), CAST($1 AS INTEGER)', '0A000'),
             ('SELECT CAST($32767 AS INTEGER)', '0A000'),
@@ -193,21 +188,21 @@ def parameters_protocols(h):
             ('SELECT CAST($32768 AS INTEGER)', '54000'),
             ('SELECT CAST($' + '9' * 200 + ' AS INTEGER)', '54000'),
             *[('SELECT ' + token, '42601') for token in ('$1foo', '$1_foo', '$1$foo', '$', '$-1', '$ 1', '$$text$$')],
-            ('CALL PARAM_PROC($1,$2)', '0A000'),
-            ('CALL PARAM_PROC(B => $1, A => $2)', '0A000'),
-            ('EXECUTE PROCEDURE PARAM_PROC($1)', '0A000'),
-            ('EXECUTE BLOCK(A INTEGER=$1) AS BEGIN END', '0A000'),
-            ('EXECUTE BLOCK RETURNS(B INTEGER) AS BEGIN B=$1; SUSPEND; END', '0A000'),
-            ('USING (A INTEGER=$1) DO SELECT :A FROM RDB$DATABASE', '0A000'),
-            ('CREATE VIEW PARAM_BAD_VIEW AS SELECT CAST($1 AS INTEGER) AS V FROM RDB$DATABASE', '0A000'),
-            ('CREATE PROCEDURE PARAM_BAD_PROC RETURNS(V INTEGER) AS BEGIN V=$1; END', '0A000'),
-            ('UPDATE OR INSERT INTO PARAM_ROWS(ID) VALUES($1) MATCHING(ID)', '0A000'),
-            ('CALL PARAM_PROC($1,)', '42601'),
+            ('CALL "PUBLIC"."PARAM_PROC"($1,$2)', '0A000'),
+            ('CALL "PUBLIC"."PARAM_PROC"("B" => $1, "A" => $2)', '0A000'),
+            ('EXECUTE PROCEDURE "PUBLIC"."PARAM_PROC"($1)', '0A000'),
+            ('EXECUTE BLOCK("A" INTEGER=$1) AS BEGIN END', '0A000'),
+            ('EXECUTE BLOCK RETURNS("B" INTEGER) AS BEGIN "B"=$1; SUSPEND; END', '0A000'),
+            ('USING ("A" INTEGER=$1) DO SELECT :"A" FROM "SYSTEM"."RDB$DATABASE"', '0A000'),
+            ('CREATE VIEW "PUBLIC"."PARAM_BAD_VIEW" AS SELECT CAST($1 AS INTEGER) AS "V" FROM "SYSTEM"."RDB$DATABASE"', '0A000'),
+            ('CREATE PROCEDURE "PUBLIC"."PARAM_BAD_PROC" RETURNS("V" INTEGER) AS BEGIN "V"=$1; END', '0A000'),
+            ('UPDATE OR INSERT INTO "PUBLIC"."PARAM_ROWS"("ID") VALUES($1) MATCHING("ID")', '0A000'),
+            ('CALL "PUBLIC"."PARAM_PROC"($1,)', '42601'),
             ('SELECT CAST($1 AS INTEGER) +', '42601'),
         ]
         for sql, error in invalid:
             # Neither a queued DML Parse nor Execute may run after the first error.
-            raw.exchange(parse('bad', sql) + parse('discarded', 'INSERT INTO PARAM_ROWS(ID) VALUES(799)') +
+            raw.exchange(parse('bad', sql) + parse('discarded', 'INSERT INTO "PUBLIC"."PARAM_ROWS"("ID") VALUES(799)') +
                          bind('ignored', 'discarded') + execute('ignored') + packet(b'S'), b'EZ', error=error)
             raw.exchange(bind('check', 'discarded') + packet(b'S'), b'EZ', error='26000')
             raw.run(TYPED, values=['42'], rows=[['42']], tag='SELECT 1')
@@ -231,14 +226,17 @@ def parameters_protocols(h):
         for mode in ('on','off'):
             raw.exchange(packet(b'Q', ('SET standard_conforming_strings='+mode).encode()+b'\0'), b'CZ', tag='SET')
             raw.run("SELECT '$1', q'{$2}', CAST($1 AS INTEGER) AS \"$3\", 7 AS A$1 "
-                    '/* $4 */ -- $5\nFROM RDB$DATABASE', values=['42'], rows=[['$1','$2','42','7']])
+                    '/* $4 */ -- $5\nFROM "SYSTEM"."RDB$DATABASE"', values=['42'], rows=[['$1','$2','42','7']])
         raw.exchange(close(b'S','numbered') + packet(b'S'), b'3Z')
     finally:
         raw.close()
-    output = h.isql('parameters_rejected_side_effects', 'SET LIST ON;\n'
-        'SELECT COUNT(*) AS N FROM PARAM_ROWS WHERE ID=799;\n'
-        "SELECT COUNT(*) AS N FROM RDB$RELATIONS WHERE RDB$RELATION_NAME='PARAM_BAD_VIEW';\n"
-        "SELECT COUNT(*) AS N FROM RDB$PROCEDURES WHERE RDB$PROCEDURE_NAME='PARAM_BAD_PROC';\nROLLBACK;\nQUIT;\n")
+    output = h.isql('parameters_rejected_side_effects', """SET LIST ON;
+SELECT COUNT(*) AS "N" FROM "PUBLIC"."PARAM_ROWS" WHERE "ID"=799;
+SELECT COUNT(*) AS "N" FROM RDB$RELATIONS WHERE RDB$RELATION_NAME='PARAM_BAD_VIEW';
+SELECT COUNT(*) AS "N" FROM RDB$PROCEDURES WHERE RDB$PROCEDURE_NAME='PARAM_BAD_PROC';
+ROLLBACK;
+QUIT;
+""")
     require(re.findall(r'^N\s+(\d+)\s*$',output,re.M)==['0','0','0'], 'rejected statement had side effects')
     return {'rejected': rejected, 'raw_describe': [23,1043], 'independent_portals': 2,
             'discard_until_sync': True, 'bad_bind_recovery': True, 'leading_zeros': True,

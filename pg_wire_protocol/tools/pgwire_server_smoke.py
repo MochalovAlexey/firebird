@@ -63,7 +63,7 @@ QUIT;
         return result
 
     def attachment_id(self, client):
-        result = self.sql(client, 'SELECT CURRENT_CONNECTION FROM RDB$DATABASE')
+        result = self.sql(client, 'SELECT CURRENT_CONNECTION FROM "SYSTEM"."RDB$DATABASE"')
         return int(result['rows'][0][0])
 
     def fatal(self, client, state):
@@ -84,13 +84,12 @@ QUIT;
         # Synchronize on engine activity, not an assumed execution delay.
         deadline = time.monotonic() + self.timeout
         while True:
-            stats = ('JOIN MON$RECORD_STATS R ON R.MON$STAT_ID=S.MON$STAT_ID '
-                     'AND R.MON$STAT_GROUP=3 ' if lock_wait else '')
+            stats = ('JOIN MON$RECORD_STATS R ON R.MON$STAT_ID="S".MON$STAT_ID AND R.MON$STAT_GROUP=3 ' if lock_wait else '')
             active = self.scalar_native(f'SELECT COUNT(*) AS OBSERVED FROM MON$STATEMENTS S {stats}'
                 f'WHERE S.MON$ATTACHMENT_ID={attachment} AND S.MON$STATE=1' +
                 (' AND R.MON$RECORD_WAITS>0' if lock_wait else ''), 'active_statement')
             entered = guard is None or self.scalar_native(
-                'SELECT GEN_ID(PGWIRE_LONG_GUARD,0) AS OBSERVED FROM RDB$DATABASE') > guard
+                'SELECT GEN_ID("PUBLIC"."PGWIRE_LONG_GUARD",0) AS OBSERVED FROM "SYSTEM"."RDB$DATABASE"') > guard
             if active and entered:
                 return
             require(time.monotonic() < deadline, 'query never reached the expected engine operation')
@@ -101,10 +100,10 @@ QUIT;
             attachment = self.attachment_id(client)
             if explicit:
                 self.sql(client, 'SET TRANSACTION', 'T', 'BEGIN')
-                self.sql(client, 'INSERT INTO PGWIRE_EFFECTS VALUES(603)', 'T', 'INSERT 0 1')
+                self.sql(client, 'INSERT INTO "PUBLIC"."PGWIRE_EFFECTS" VALUES(603)', 'T', 'INSERT 0 1')
             guard = self.scalar_native(
-                'SELECT GEN_ID(PGWIRE_LONG_GUARD,0) AS OBSERVED FROM RDB$DATABASE')
-            client.send(packet(b'Q', f'SELECT V FROM PGWIRE_LONG({marker})\0'.encode()))
+                'SELECT GEN_ID("PUBLIC"."PGWIRE_LONG_GUARD",0) AS OBSERVED FROM "SYSTEM"."RDB$DATABASE"')
+            client.send(packet(b'Q', f'SELECT "V" FROM "PUBLIC"."PGWIRE_LONG"({marker})\0'.encode()))
             self.wait_active(attachment, guard=guard)
             self.isql('cancel_statement', f'DELETE FROM MON$STATEMENTS '
                       f'WHERE MON$ATTACHMENT_ID={attachment} AND MON$STATE=1;\nCOMMIT;\n')
@@ -113,9 +112,9 @@ QUIT;
                     result['command'] is None and result['state'] == ('E' if explicit else 'I'),
                     f'administrative cancellation gave wrong result {result}')
             if explicit:
-                self.sql(client, 'SELECT 1 FROM RDB$DATABASE', 'E', error='25P02')
+                self.sql(client, 'SELECT 1 FROM "SYSTEM"."RDB$DATABASE"', 'E', error='25P02')
                 self.sql(client, 'ROLLBACK', command='ROLLBACK')
-            self.sql(client, 'SELECT 42 FROM RDB$DATABASE', command='SELECT 1')
+            self.sql(client, 'SELECT 42 FROM "SYSTEM"."RDB$DATABASE"', command='SELECT 1')
             client.close()
             self.no_attachments()
             require(self.scalar_native('SELECT COUNT(*) AS OBSERVED FROM PGWIRE_EFFECTS '
@@ -128,10 +127,10 @@ QUIT;
             attachment = self.attachment_id(client)
             if explicit:
                 self.sql(client, 'SET TRANSACTION', 'T', 'BEGIN')
-                self.sql(client, f'INSERT INTO PGWIRE_EFFECTS VALUES({marker})', 'T', 'INSERT 0 1')
+                self.sql(client, f'INSERT INTO "PUBLIC"."PGWIRE_EFFECTS" VALUES({marker})', 'T', 'INSERT 0 1')
             self.isql('kill_attachment', f'DELETE FROM MON$ATTACHMENTS '
                       f'WHERE MON$ATTACHMENT_ID={attachment};\nCOMMIT;\n')
-            client.send(packet(b'Q', b'SELECT 42 FROM RDB$DATABASE\0'))
+            client.send(packet(b'Q', b'SELECT 42 FROM "SYSTEM"."RDB$DATABASE"\0'))
             self.fatal(client, '57P01')
             self.no_attachments()
             require(self.scalar_native('SELECT COUNT(*) AS OBSERVED FROM PGWIRE_EFFECTS '
@@ -150,33 +149,31 @@ QUIT;
     def database_shutdown(self):
         client = TransactionClient(self).login()
         self.sql(client, 'SET TRANSACTION', 'T', 'BEGIN')
-        self.sql(client, 'INSERT INTO PGWIRE_EFFECTS VALUES(621)', 'T', 'INSERT 0 1')
+        self.sql(client, 'INSERT INTO "PUBLIC"."PGWIRE_EFFECTS" VALUES(621)', 'T', 'INSERT 0 1')
         try:
             self.gfix('database_shutdown', '-shut', 'full', '-force', '0')
-            client.send(packet(b'Q', b'SELECT 42 FROM RDB$DATABASE\0'))
+            client.send(packet(b'Q', b'SELECT 42 FROM "SYSTEM"."RDB$DATABASE"\0'))
             self.fatal(client, '57P01')
         finally:
             self.gfix('database_online', '-online', 'normal')
             client.close(terminate=False)
         self.no_attachments()
-        require(self.scalar_native('SELECT COUNT(*) AS OBSERVED FROM PGWIRE_EFFECTS WHERE ID=621') == 0,
+        require(self.scalar_native('SELECT COUNT(*) AS OBSERVED FROM "PUBLIC"."PGWIRE_EFFECTS" WHERE "ID"=621') == 0,
                 'database shutdown committed the open transaction')
         healthy = TransactionClient(self).login()
-        self.sql(healthy, 'SELECT 42 FROM RDB$DATABASE', command='SELECT 1')
+        self.sql(healthy, 'SELECT 42 FROM "SYSTEM"."RDB$DATABASE"', command='SELECT 1')
         healthy.close()
         self.no_attachments()
 
     def resource_batch(self):
         for _ in range(8):
             client = TransactionClient(self).login()
-            self.sql(client, 'SELECT ID FROM PGWIRE_ROWS', command='SELECT 3')
-            self.sql(client, 'SELECT * FROM P6_MISSING_TABLE', error='42P01')
+            self.sql(client, 'SELECT "ID" FROM "PUBLIC"."PGWIRE_ROWS"', command='SELECT 3')
+            self.sql(client, 'SELECT * FROM "PUBLIC"."P6_MISSING_TABLE"', error='42P01')
             self.sql(client, 'SET TRANSACTION', 'T', 'BEGIN')
-            self.sql(client, 'INSERT INTO PGWIRE_EFFECTS VALUES(631)', 'T', 'INSERT 0 1')
+            self.sql(client, 'INSERT INTO "PUBLIC"."PGWIRE_EFFECTS" VALUES(631)', 'T', 'INSERT 0 1')
             self.sql(client, 'ROLLBACK', command='ROLLBACK')
-            require(self.scalar_native('SELECT COUNT(*) AS OBSERVED FROM MON$STATEMENTS S '
-                'JOIN MON$ATTACHMENTS A ON A.MON$ATTACHMENT_ID=S.MON$ATTACHMENT_ID '
-                "WHERE A.MON$REMOTE_VERSION='PgWire'") == 0, 'statement survived Query completion')
+            require(self.scalar_native('SELECT COUNT(*) AS OBSERVED FROM MON$STATEMENTS "S" JOIN MON$ATTACHMENTS "A" ON "A".MON$ATTACHMENT_ID="S".MON$ATTACHMENT_ID WHERE "A".MON$REMOTE_VERSION=\'PgWire\'') == 0, 'statement survived Query completion')
             self.no_transactions()
             client.close()
             self.no_attachments()
@@ -220,11 +217,11 @@ QUIT;
     def shutdown_lock_wait(self):
         locker = TransactionClient(self).login()
         self.sql(locker, 'SET TRANSACTION', 'T', 'BEGIN')
-        self.sql(locker, 'UPDATE PGWIRE_ROWS SET PAYLOAD=999 WHERE ID=1', 'T', 'UPDATE 1')
+        self.sql(locker, 'UPDATE "PUBLIC"."PGWIRE_ROWS" SET "PAYLOAD"=999 WHERE "ID"=1', 'T', 'UPDATE 1')
         blocked = TransactionClient(self).login()
         attachment = self.attachment_id(blocked)
         self.sql(blocked, 'SET TRANSACTION READ COMMITTED WAIT', 'T', 'BEGIN')
-        blocked.send(packet(b'Q', b'UPDATE PGWIRE_ROWS SET PAYLOAD=777 WHERE ID=1\0'))
+        blocked.send(packet(b'Q', b'UPDATE "PUBLIC"."PGWIRE_ROWS" SET "PAYLOAD"=777 WHERE "ID"=1\x00'))
         self.wait_active(attachment, lock_wait=True)
         password = Client(self)
         password.challenge()

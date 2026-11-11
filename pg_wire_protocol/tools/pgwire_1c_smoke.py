@@ -14,6 +14,7 @@ guessed Bind values. No captured SQL, parameter DETAIL or result data is saved.
 --namespaces checks the optional native schema identity registry.
 --namespace-catalog checks its public PG_NAMESPACE projection with native types.
 --class-catalog checks persistent schema-level tables/views in PG_CLASS.
+--pg-names checks PG identifiers, native-safe source and lowercase bootstrap.
 The external subprocess watchdog configures no server timeout.
 """
 import argparse
@@ -33,7 +34,7 @@ from pgwire_startup_smoke import StartupHarness, Client, packet, error_fields
 from wire_host_smoke import require, reserve_ports
 
 
-RECOVERY = 'SELECT CAST(42 AS INTEGER) AS ANSWER FROM RDB$DATABASE'
+RECOVERY = 'SELECT CAST(42 AS INTEGER) AS ANSWER FROM "SYSTEM"."RDB$DATABASE"'
 SELECTS = [
     ('constant', 'SELECT 42 AS ANSWER', ['42'], 23),
     ('where_false', 'SELECT 42 AS ANSWER WHERE 1=0', [], 23),
@@ -44,10 +45,10 @@ SELECTS = [
     ('union', 'SELECT 1 AS ANSWER UNION ALL SELECT 2 ORDER BY 1', ['1', '2'], 23),
     ('cast', "SELECT CAST('42' AS INTEGER) AS ANSWER", ['42'], 23),
     ('group', 'SELECT 7 AS ANSWER GROUP BY 1 HAVING COUNT(*)=1', ['7'], 23),
-    ('old_as', 'SELECT CAST((SELECT 42 FROM RDB$DATABASE) AS INTEGER) AS "AS" FROM RDB$DATABASE', ['42'], 23),
-    ('old_returning_alias', 'SELECT 42 RETURNING FROM RDB$DATABASE', ['42'], 23),
-    ('old_sql_alias', 'SELECT 42 SQL FROM RDB$DATABASE', ['42'], 23),
-    ('old_optimize_alias', 'SELECT 42 OPTIMIZE FROM RDB$DATABASE', ['42'], 23),
+    ('old_as', 'SELECT CAST((SELECT 42 FROM "SYSTEM"."RDB$DATABASE") AS INTEGER) AS "AS" FROM "SYSTEM"."RDB$DATABASE"', ['42'], 23),
+    ('old_returning_alias', 'SELECT 42 RETURNING FROM "SYSTEM"."RDB$DATABASE"', ['42'], 23),
+    ('old_sql_alias', 'SELECT 42 SQL FROM "SYSTEM"."RDB$DATABASE"', ['42'], 23),
+    ('old_optimize_alias', 'SELECT 42 OPTIMIZE FROM "SYSTEM"."RDB$DATABASE"', ['42'], 23),
     ('optimize_clause', 'SELECT 1 OPTIMIZE FOR FIRST ROWS', ['1'], 23),
 ]
 COLUMN_NAMES = {'old_as':'AS', 'old_returning_alias':'RETURNING', 'old_sql_alias':'SQL',
@@ -224,8 +225,8 @@ def settings_client(config, client):
     # Fixed SET failures use the existing abort path and undo earlier mutable SETs.
     for number, invalid in enumerate(('SET escape_string_warning=on', 'SET client_min_messages=notice')):
         first = 513 + 2*number
-        check(f'INSERT INTO WIRE_HOST_ROWS VALUES({first}); SET standard_conforming_strings=off; '+
-              invalid+f'; INSERT INTO WIRE_HOST_ROWS VALUES({first+1})', ['INSERT 0 1','SET'], error='22023')
+        check(f'INSERT INTO "PUBLIC"."WIRE_HOST_ROWS" VALUES({first}); SET standard_conforming_strings=off; '+
+              invalid+f'; INSERT INTO "PUBLIC"."WIRE_HOST_ROWS" VALUES({first+1})', ['INSERT 0 1','SET'], error='22023')
         string_mode('on')
         check('SET TRANSACTION; SET standard_conforming_strings=off', ['BEGIN','SET'], state=2)
         string_mode('off')
@@ -247,12 +248,12 @@ def settings_client(config, client):
             check('ROLLBACK', ['ROLLBACK'])
     check('ALTER SESSION RESET', ['RESET'])
     string_mode('on')
-    result = check("SELECT CAST('Я🙂' AS VARCHAR(10)) FROM RDB$DATABASE", ['SELECT 1'])[0]
+    result = check("SELECT CAST('Я🙂' AS VARCHAR(10)) FROM \"SYSTEM\".\"RDB$DATABASE\"", ['SELECT 1'])[0]
     require(result['rows'] == [['Я🙂']] and result['columns'][0]['oid'] == 1043,
             'UTF8 text changed after SET client_encoding')
-    charset = check('SELECT TRIM(C.RDB$CHARACTER_SET_NAME) FROM MON$ATTACHMENTS A '
-        'JOIN RDB$CHARACTER_SETS C ON C.RDB$CHARACTER_SET_ID=A.MON$CHARACTER_SET_ID '
-        'WHERE A.MON$ATTACHMENT_ID=CURRENT_CONNECTION', ['SELECT 1'])
+    charset = check('SELECT TRIM(C."RDB$CHARACTER_SET_NAME") FROM "SYSTEM"."MON$ATTACHMENTS" A '
+        'JOIN "SYSTEM"."RDB$CHARACTER_SETS" C ON C."RDB$CHARACTER_SET_ID"=A."MON$CHARACTER_SET_ID" '
+        'WHERE A."MON$ATTACHMENT_ID"=CURRENT_CONNECTION', ['SELECT 1'])
     require(charset[0]['rows'] == [['UTF8']], 'SET accepted an attachment without actual UTF8')
     for sql in ("SET client_encoding TO 'LATIN1'", "SET lc_messages TO 'ru_RU.UTF-8'",
                 "SET lc_messages TO ''", "SET client_encoding TO ''"):
@@ -268,14 +269,14 @@ def settings_client(config, client):
     finally:
         client.pq.PQclear(handle)
     client.recover()
-    check('INSERT INTO WIRE_HOST_ROWS VALUES(511); '
-          "SET client_encoding TO 'LATIN1'; INSERT INTO WIRE_HOST_ROWS VALUES(512)",
+    check('INSERT INTO "PUBLIC"."WIRE_HOST_ROWS" VALUES(511); '
+          'SET client_encoding TO \'LATIN1\'; INSERT INTO "PUBLIC"."WIRE_HOST_ROWS" VALUES(512)',
           ['INSERT 0 1'], error='22023')
     check('SET TRANSACTION; ' + "SET client_encoding = 'utf8'", ['BEGIN', 'SET'], state=2)
     check("SET lc_messages TO 'ru_RU.UTF-8'; ROLLBACK", error='22023', state=3)
     check("SET client_encoding = 'utf8'", error='25P02', state=3)
     check("ROLLBACK; SET client_encoding = 'UTF8'", ['ROLLBACK', 'SET'])
-    remaining = check('SELECT COUNT(*) FROM WIRE_HOST_ROWS WHERE ID BETWEEN 511 AND 516', ['SELECT 1'])
+    remaining = check('SELECT COUNT(*) FROM "PUBLIC"."WIRE_HOST_ROWS" WHERE "ID" BETWEEN 511 AND 516', ['SELECT 1'])
     require(remaining[0]['rows'] == [['0']], 'settings error committed or continued script writes')
 
     # This explicit exception accepts scalar syntax but stores/applies no setting.
@@ -355,7 +356,10 @@ def client_child():
     try:
         connection = Libpq(config)
         output = {'libpq_version': connection.pq.PQlibVersion(), 'cases': []}
-        if config.get('class_catalog'):
+        if config.get('pg_names'):
+            from pgwire_names_checks import names_client
+            output['pg_names'] = names_client(config, connection)
+        elif config.get('class_catalog'):
             from pgwire_class_checks import class_catalog_client
             output['class_catalog'] = class_catalog_client(config, connection)
         elif config.get('namespace_catalog'):
@@ -476,7 +480,7 @@ class OneCHarness(StartupHarness):
             require(not before['error'] and before['rows'] == [['42']], 'PG cache warmup failed')
             result = subprocess.run([str(self.runtime/'bin/isql'),'-quiet','-charset','UTF8','-sql_dialect',str(dialect),
                 f'inet://127.0.0.1:{self.native_port}/wire_host'],
-                input='SET LIST ON;\n' + sql + ';\n' + RECOVERY + ';\nROLLBACK;\nQUIT;\n',
+                input='SET LIST ON;\n' + sql + ';\nSELECT 42 AS ANSWER FROM RDB$DATABASE;\nROLLBACK;\nQUIT;\n',
                 capture_output=True,text=True,env=env,cwd=self.temp,timeout=self.timeout)
             output = result.stdout + result.stderr
             (self.work/f'native_dialect_{dialect}.log').write_text(self.redact(output))
@@ -573,7 +577,7 @@ class OneCHarness(StartupHarness):
                       'SELECT 1 AS LC_MESSAGES, 2 AS CLIENT_ENCODING, 3 AS ESCAPE_STRING_WARNING, '
                       '4 AS CLIENT_MIN_MESSAGES, 5 AS ENABLE_MERGEJOIN, 6 AS CPU_OPERATOR_COST, '
                       '7 AS LOCK_TIMEOUT FROM RDB$DATABASE;\n' +
-                      RECOVERY + ';\nROLLBACK;\nQUIT;\n', capture_output=True, text=True,
+                      'SELECT 42 AS ANSWER FROM RDB$DATABASE' + ';\nROLLBACK;\nQUIT;\n', capture_output=True, text=True,
                 env=env, cwd=self.temp, timeout=self.timeout)
             output = result.stdout + result.stderr
             (self.work/f'native_settings_dialect_{dialect}.log').write_text(self.redact(output))
@@ -588,7 +592,7 @@ class OneCHarness(StartupHarness):
                     re.findall(r'^LOCK_TIMEOUT\s+(\S+)\s*$', output, re.MULTILINE) == ['7'],
                     f'native dialect {dialect} SET rejection/recovery differs')
         output = self.isql('settings_rollback_observer', 'SET LIST ON;\nSELECT COUNT(*) AS SETTINGS_ROWS '
-                           'FROM WIRE_HOST_ROWS WHERE ID BETWEEN 511 AND 516;\nROLLBACK;\nQUIT;\n')
+                           'FROM "PUBLIC"."WIRE_HOST_ROWS" WHERE "ID" BETWEEN 511 AND 516;\nROLLBACK;\nQUIT;\n')
         require(re.findall(r'^SETTINGS_ROWS\s+(\S+)\s*$', output, re.MULTILINE) == ['0'],
                 'native observer saw script writes after settings failure')
         self.summary['settings_protocols'] = {'extended_prepare_allowed': True,
@@ -609,7 +613,7 @@ class OneCHarness(StartupHarness):
             ready.close()
         self.native_probe('native_before')
         config = {'port':pg,'password':self.password,'baseline':args.baseline,'settings':args.settings,'strings':args.strings,
-                  'begin':args.begin, 'parameters':args.parameters, 'casts':args.casts, 'limits':args.limits, 'blobs':args.blobs, 'blob_input':args.blob_input, 'namespaces':args.namespaces, 'namespace_catalog':args.namespace_catalog, 'class_catalog':args.class_catalog,
+                  'begin':args.begin, 'parameters':args.parameters, 'casts':args.casts, 'limits':args.limits, 'blobs':args.blobs, 'blob_input':args.blob_input, 'namespaces':args.namespaces, 'namespace_catalog':args.namespace_catalog, 'class_catalog':args.class_catalog, 'pg_names':args.pg_names,
                   'capture_dir':str(args.capture_dir),'libpq':args.libpq, 'native_port':native,
                   'runtime':str(self.runtime),'work':str(self.work),'timeout':self.timeout}
         client_env = {key:value for key,value in self.env.items() if not key.startswith('PG')}
@@ -620,7 +624,7 @@ class OneCHarness(StartupHarness):
         child = json.loads(result.stdout)
         self.summary['client'] = child
         require(result.returncode == 0, 'libpq child failed; see libpq.log')
-        if args.namespace_catalog or args.class_catalog:
+        if args.namespace_catalog or args.class_catalog or args.pg_names:
             pass  # This mode's native/libpq checks run in the child; APP-10 owns restart coverage.
         elif args.namespaces:
             from pgwire_namespace_checks import namespaces_restart
@@ -662,7 +666,7 @@ class OneCHarness(StartupHarness):
                 raw.login()
                 self.native_dialect_isolation(raw)
                 for sql in ('SELECT CAST(? AS INTEGER) AS ANSWER',
-                            'SELECT CAST(? AS INTEGER) AS ANSWER FROM RDB$DATABASE'):
+                            'SELECT CAST(? AS INTEGER) AS ANSWER FROM "SYSTEM"."RDB$DATABASE"'):
                     raw.run(sql, values=['42'], oids=[23], rows=[['42']], tag='SELECT 1')
             finally:
                 raw.close()
@@ -687,6 +691,7 @@ def main():
     mode.add_argument('--parameters',action='store_true',help='test consecutive numbered parameters')
     mode.add_argument('--casts',action='store_true',help='test PG postfix casts through native CastNode')
     mode.add_argument('--limits',action='store_true',help='test PG literal SELECT limits through native RowsClause')
+    mode.add_argument('--pg-names',action='store_true',help='test PG naming, native-safe sources and lowercase bootstrap')
     mode.add_argument('--class-catalog',action='store_true',help='test persistent schema-level PG_CLASS rows with native types')
     mode.add_argument('--namespace-catalog',action='store_true',help='test public namespace view with native BIGINT/VARCHAR types')
     mode.add_argument('--namespaces',action='store_true',help='test optional native schema identity registry')
@@ -710,8 +715,8 @@ def main():
     work.mkdir(mode=0o700)
     harness = OneCHarness(source,work.resolve(),args.timeout)
     harness.summary.pop('passed')
-    harness.summary.update(completed=False, mode='class_catalog' if args.class_catalog else 'namespace_catalog' if args.namespace_catalog else 'namespaces' if args.namespaces else 'blob_input' if args.blob_input else 'blobs' if args.blobs else 'limits' if args.limits else 'casts' if args.casts else 'parameters' if args.parameters else 'begin' if args.begin else 'strings' if args.strings else 'settings' if args.settings else 'baseline' if args.baseline else 'select_without_from',
-        stage='Persistent relation catalog with native IDs and types' if args.class_catalog else 'Public namespace projection with native types' if args.namespace_catalog else 'Native schema identity registry' if args.namespaces else 'Bytea input via native VARCHAR OCTETS' if args.blob_input else 'Binary BLOB output as bytea' if args.blobs else 'PG literal SELECT limits' if args.limits else 'PG postfix casts' if args.casts else 'Consecutive numbered parameters' if args.parameters else 'PG BEGIN / native transactions' if args.begin else 'standard_conforming_strings / revision 2' if args.strings else
+    harness.summary.update(completed=False, mode='pg_names' if args.pg_names else 'class_catalog' if args.class_catalog else 'namespace_catalog' if args.namespace_catalog else 'namespaces' if args.namespaces else 'blob_input' if args.blob_input else 'blobs' if args.blobs else 'limits' if args.limits else 'casts' if args.casts else 'parameters' if args.parameters else 'begin' if args.begin else 'strings' if args.strings else 'settings' if args.settings else 'baseline' if args.baseline else 'select_without_from',
+        stage='PG identifiers and native-safe stored SQL' if args.pg_names else 'Persistent relation catalog with native IDs and types' if args.class_catalog else 'Public namespace projection with native types' if args.namespace_catalog else 'Native schema identity registry' if args.namespaces else 'Bytea input via native VARCHAR OCTETS' if args.blob_input else 'Binary BLOB output as bytea' if args.blobs else 'PG literal SELECT limits' if args.limits else 'PG postfix casts' if args.casts else 'Consecutive numbered parameters' if args.parameters else 'PG BEGIN / native transactions' if args.begin else 'standard_conforming_strings / revision 2' if args.strings else
             'Fixed profiles and syntax-only startup settings' if args.settings else '1C observations / first engine slice',
         capture_dir=str(args.capture_dir), workers=6,
         module_sha256=hashlib.sha256((source/'plugins/libPgWire.so').read_bytes()).hexdigest(),
@@ -723,7 +728,10 @@ def main():
         ['git','diff','HEAD','--','src'],cwd=repo)).hexdigest()
     try:
         harness.prepare()
-        if args.class_catalog:
+        if args.pg_names:
+            from pgwire_names_checks import names_fixture
+            names_fixture(harness)
+        elif args.class_catalog:
             from pgwire_class_checks import class_catalog_fixture
             class_catalog_fixture(harness)
         elif args.namespace_catalog:
@@ -749,21 +757,27 @@ def main():
             parameters_fixture(harness)
         elif args.begin:
             harness.isql('begin_fixture', f"CONNECT '{harness.database}';\n"
-                'CREATE TABLE BEGIN_ROWS(ID INTEGER NOT NULL PRIMARY KEY, V INTEGER);\n'
-                'GRANT SELECT, INSERT, UPDATE, DELETE ON BEGIN_ROWS TO USER WIRE_HOST_TEST;\n'
-                'GRANT CREATE SEQUENCE TO USER WIRE_HOST_TEST;\nCOMMIT;\nQUIT;\n', embedded=True)
+                'CREATE TABLE BEGIN_ROWS("ID" INTEGER NOT NULL PRIMARY KEY, V INTEGER);\n'
+                'GRANT SELECT, INSERT, UPDATE, DELETE ON BEGIN_ROWS TO USER "WIRE_HOST_TEST";\n'
+                'GRANT CREATE SEQUENCE TO USER "WIRE_HOST_TEST";\nCOMMIT;\nQUIT;\n', embedded=True)
         elif args.strings:
-            harness.isql('strings_grants', f"CONNECT '{harness.database}';\nGRANT CREATE PROCEDURE TO USER WIRE_HOST_TEST;\n"
-                         "GRANT CREATE TABLE TO USER WIRE_HOST_TEST;\nCOMMIT;\nQUIT;\n", embedded=True)
+            harness.isql('strings_grants', f'CONNECT \'{harness.database}\';\nGRANT CREATE PROCEDURE TO USER "WIRE_HOST_TEST";\n'
+                         'GRANT CREATE TABLE TO USER "WIRE_HOST_TEST";\nCOMMIT;\nQUIT;\n', embedded=True)
         elif not args.settings and not args.baseline:
             compat = Path(__file__).resolve().parents[1] / '1c/compat.sql'
+            scripts = [compat.parent/'sql/install_namespace_registry.sql', compat,
+                compat.parent/'sql/install_namespace_catalog.sql',
+                compat.parent/'sql/install_class_catalog.sql', compat.parent/'sql/install_pg_names.sql']
             harness.isql('install_compat', f"CONNECT '{harness.database}';\n" +
-                         compat.read_text() + '\nGRANT CREATE TABLE TO USER WIRE_HOST_TEST;\nCOMMIT;\nQUIT;\n',
+                         '\n'.join(script.read_text() for script in scripts) +
+                         '\nGRANT CREATE TABLE ON SCHEMA "public" TO USER "WIRE_HOST_TEST";\nCOMMIT;\nQUIT;\n',
                          embedded=True)
             harness.summary['compat_script_sha256'] = hashlib.sha256(compat.read_bytes()).hexdigest()
         harness.run(args)
         harness.summary['completed'] = True
-        if args.class_catalog:
+        if args.pg_names:
+            harness.summary['pg_names_passed'] = True
+        elif args.class_catalog:
             harness.summary['class_catalog_passed'] = True
         elif args.namespace_catalog:
             harness.summary['namespace_catalog_passed'] = True

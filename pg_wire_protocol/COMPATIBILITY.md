@@ -1,5 +1,43 @@
 # Матрица совместимости PostgreSQL wire plugin
 
+## APP-13: правила имён PG4
+
+Unquoted SQL identifiers в клиентском dialect 4 складывают только ASCII A–Z в
+lowercase: `foo`, `FOO`, `"foo"` обозначают один объект, `"Foo"` и `"FOO"` — разные.
+Quotes сохраняют точные bytes; native dialects 1/2/3 по-прежнему используют uppercase.
+Нет fallback в uppercase. Например, native таблица/колонка доступны через
+`SELECT "V" FROM "PUBLIC"."TTT"`, system table — `"SYSTEM"."RDB$DATABASE"`.
+Database dialect, DPB и SQL_DIALECT_CURRENT остаются 3; startup user/database/password/
+application_name не преобразуются. Для native security identities в SQL нужны quotes.
+
+Native ограничения длины и лексики сохранены: нет усечения до PG 63 bytes, Unicode
+casefold или новых U&-форм. Unquoted Unicode остаётся за native lexical границей (42601). Quoted Unicode, leading spaces и doubled quotes допустимы;
+quoted trailing ASCII space и NUL в PG4 отвергаются до эффектов, поскольку MetaName
+теряет эти различия. Native quoted-name semantics не изменены. Named native charsets
+и collations в SQL требуют точного quoted имени; introducers вроде `_UTF8`, GDSCODE,
+BLOB subtypes, DECFLOAT traps, plugin/algorithm/security-property values сохраняют
+native canonical interpretation. Keywords и builtin ABS/MOD не складываются.
+
+Окончательные grammar actions отмечают реальные identifier spans. Существующий
+transformString объединяет их с literal marks: unquoted `Foo` становится `"foo"`
+в сохранённом native SQL. VIEW, DEFAULT/CHECK/COMPUTED, expression index, PSQL и CTAS
+проверяются через native reprepare. Строки EXECUTE STATEMENT остаются native SQL;
+`$n`/`::`/LIMIT root guards сохраняются, SQL-05 не закрыт. Wire-код исходный SQL
+не переписывает; публичные API/ABI/ODS и codecs не расширены.
+
+После attach до AuthenticationOk PgWire выполняет один фиксированный native3
+`SET SEARCH_PATH TO "public", "pg_catalog", "SYSTEM"` без application transaction
+и wire result. Пользовательский SET не перезаписывается на Query/Parse/Bind/Execute.
+Прямой успешный ALTER SESSION RESET восстанавливает этот путь до объявления успеха;
+ошибка служебного SET после RESET закрывает сессию под fatal guard. Savepoint history
+теперь согласована с PG4: `a` и `"a"` совпадают, `"A"` отличается.
+
+Public-first намеренно задаёт native CREATE target. Implicit pg_catalog priority,
+`$user`, effective path по USAGE, transactional PG SET search_path и hidden RESET
+в PSQL не реализованы. Установка bootstrap обязательна отдельно: успешный SET
+не создаёт schemas. APP-01/03/04/06, regnamespace/oid/name, visibility/temp namespaces
+и исходные selected04/10/11 остаются открытыми; открытие реальной 1С не принято.
+
 Открытые задачи и отложенные части этого контракта собраны в [BACKLOG.md](BACKLOG.md).
 
 Матрица M0–M3 задаёт границы этапов. База — master Firebird 6, SQL dialect 3, UTF8, wire 3.0. Архитектура — [ARCHITECTURE.md](ARCHITECTURE.md), execution contract — [CODEX_CONTEXT.md](CODEX_CONTEXT.md). Предыдущая P5-ревизия прошла целевую Linux/Super loopback приёмку: I/T/E, native transaction/session controls и recovery. В P6 сборка, unit tests и host/startup/Simple Query/transaction/lifecycle/native регрессии прошли. **Известное ограничение native baseline: READ COMMITTED READ CONSISTENCY + AUTO COMMIT не входит в подтверждённую совместимость; SNAPSHOT AUTO COMMIT проверен.** Целевой P6/M1 Linux/Super принят с известными native ограничениями. Shutdown во время ON CONNECT остаётся отдельным исключением: native Debug assertion воспроизводится также без wire endpoints. P7 Extended Query прошёл целевую Linux/Super приёмку: 16 групп. P8 codecs прошли целевую Linux/Super приёмку: восемь групп. P9 прошёл 17 групп с реальными C libpq, raw-wire и ограниченным профилем Psycopg 3; целевой M2 Linux/Super для совместимого SQL и реализованных codecs принят. Следующий этап — P10. Результаты и границы покрытия — в [VALIDATION.md](VALIDATION.md). TLS, Windows и другие server modes требуют отдельной реализации и приёмки.
@@ -11,7 +49,7 @@ PgWire использует клиентский `SQL_DIALECT_PG` (4), сохр�
 сохраняются. Установочный PSQL-скрипт добавляет `pg_catalog.pg_backend_pid()`:
 int4 attachment ID, стабильный и различный у подключений к одной базе, с
 проверяемым переполнением. Это не OS PID, не cluster-wide identity и не
-CancelRequest key. Имя колонки остаётся Firebird `PG_BACKEND_PID`.
+CancelRequest key. Автоматический label функции берётся из engine metadata; lowercase entry point добавлен APP-13.
 
 Контракт, установка и оставшиеся этапы — в [1c/README.md](1c/README.md).
 Последовательные Simple Query скрипты реализованы и проверены 10 ноября 2026 года;

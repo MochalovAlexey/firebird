@@ -19,7 +19,7 @@ from pgwire_startup_smoke import error_fields, packet
 from wire_host_smoke import require, require_closed, reserve_ports
 
 
-ANSWER = 'SELECT CAST(42 AS INTEGER) FROM RDB$DATABASE'
+ANSWER = 'SELECT CAST(42 AS INTEGER) FROM "SYSTEM"."RDB$DATABASE"'
 
 
 class ScriptClient(ExtendedClient):
@@ -53,19 +53,17 @@ def libpq_child():
     client = None
     try:
         client = Libpq(config)
-        results = client.query(ANSWER + '; SELECT CAST(NULL AS INTEGER) FROM RDB$DATABASE', True)
+        results = client.query(ANSWER + '; SELECT CAST(NULL AS INTEGER) FROM "SYSTEM"."RDB$DATABASE"', True)
         require([r['tag'] for r in results] == ['SELECT 1', 'SELECT 1'] and
                 [r['rows'] for r in results] == [[['42']], [[None]]] and
                 all(r['columns'][0]['oid'] == 23 and not r['sqlstate'] for r in results),
                 'libpq did not expose both script results')
-        results = client.query('INSERT INTO P4_EFFECTS VALUES(1091); COMMIT; '
-                               'INSERT INTO P4_EFFECTS VALUES(1092); SELECT (', True)
+        results = client.query('INSERT INTO "PUBLIC"."P4_EFFECTS" VALUES(1091); COMMIT; INSERT INTO "PUBLIC"."P4_EFFECTS" VALUES(1092); SELECT (', True)
         require([r['tag'] for r in results] == ['INSERT 0 1', 'COMMIT', 'INSERT 0 1', ''] and
                 results[-1]['sqlstate'] == '42601' and client.pq.PQtransactionStatus(client.connection) == 0,
                 'libpq sequential syntax failure/result order differs')
         client.recover()
-        results = client.query('SET TRANSACTION; INSERT INTO P4_EFFECTS VALUES(1093); '
-                               'SELECT 1/0 FROM RDB$DATABASE; ROLLBACK')
+        results = client.query('SET TRANSACTION; INSERT INTO "PUBLIC"."P4_EFFECTS" VALUES(1093); SELECT 1/0 FROM "SYSTEM"."RDB$DATABASE"; ROLLBACK')
         require([r['tag'] for r in results] == ['BEGIN', 'INSERT 0 1', ''] and
                 results[-1]['sqlstate'] == '22012' and client.pq.PQtransactionStatus(client.connection) == 3,
                 'libpq did not observe explicit failed state and skipped ROLLBACK')
@@ -86,7 +84,7 @@ def libpq_child():
 
 class ScriptHarness(SimpleHarness):
     def seen(self, identifier, expected):
-        actual = self.scalar_native(f'SELECT COUNT(*) AS OBSERVED FROM P4_EFFECTS WHERE ID={identifier}')
+        actual = self.scalar_native(f'SELECT COUNT(*) AS OBSERVED FROM "PUBLIC"."P4_EFFECTS" WHERE "ID"={identifier}')
         require(actual == expected, f'native visibility for {identifier}: {actual}, expected {expected}')
 
     def finish(self, client):
@@ -96,14 +94,13 @@ class ScriptHarness(SimpleHarness):
 
     def results_and_ddl(self):
         c = ScriptClient(self).login()
-        events = c.script(ANSWER + '; SELECT CAST(NULL AS INTEGER) FROM RDB$DATABASE',
+        events = c.script(ANSWER + '; SELECT CAST(NULL AS INTEGER) FROM "SYSTEM"."RDB$DATABASE"',
                           ['SELECT 1', 'SELECT 1'], rows=[['42'], [None]], oids=[[23], [23]])
         require(b''.join(k for k, _ in events) == b'TDCTDCZ', 'multiple-result message order differs')
-        c.script('CREATE TABLE SCRIPT_ROWS(ID INTEGER); INSERT INTO SCRIPT_ROWS VALUES(7); '
-                 'SELECT ID FROM SCRIPT_ROWS', ['CREATE TABLE', 'INSERT 0 1', 'SELECT 1'], rows=[['7']])
-        require(self.scalar_native('SELECT COUNT(*) AS OBSERVED FROM SCRIPT_ROWS WHERE ID=7') == 1,
+        c.script('CREATE TABLE "PUBLIC"."SCRIPT_ROWS"("ID" INTEGER); INSERT INTO "PUBLIC"."SCRIPT_ROWS" VALUES(7); SELECT "ID" FROM "PUBLIC"."SCRIPT_ROWS"', ['CREATE TABLE', 'INSERT 0 1', 'SELECT 1'], rows=[['7']])
+        require(self.scalar_native('SELECT COUNT(*) AS OBSERVED FROM "PUBLIC"."SCRIPT_ROWS" WHERE "ID"=7') == 1,
                 'script DDL/DML was not committed')
-        c.script('DROP TABLE SCRIPT_ROWS', ['DROP TABLE'])
+        c.script('DROP TABLE "PUBLIC"."SCRIPT_ROWS"', ['DROP TABLE'])
         # Two Query frames prove exactly one Ready belongs to each whole script.
         c.send(packet(b'Q', (ANSWER + '; ' + ANSWER).encode() + b'\0') +
                packet(b'Q', ANSWER.encode() + b'\0'))
@@ -113,11 +110,10 @@ class ScriptHarness(SimpleHarness):
 
     def boundaries(self):
         c = ScriptClient(self).login()
-        c.script("SELECT CAST('a;''b' AS VARCHAR(20)) FROM RDB$DATABASE; /* ; */ "
-                 "SELECT CAST(q'{Я; 'quoted'}' AS VARCHAR(30)) FROM RDB$DATABASE",
+        c.script("SELECT CAST('a;''b' AS VARCHAR(20)) FROM \"SYSTEM\".\"RDB$DATABASE\"; /* ; */ "
+                 "SELECT CAST(q'{Я; 'quoted'}' AS VARCHAR(30)) FROM \"SYSTEM\".\"RDB$DATABASE\"",
                  ['SELECT 1', 'SELECT 1'], rows=[["a;'b"], ["Я; 'quoted'"]])
-        c.script('EXECUTE BLOCK RETURNS(V INTEGER) AS BEGIN V=1; SUSPEND; V=2; SUSPEND; END; '
-                 'SELECT 3 AS "semi;colon" FROM RDB$DATABASE', ['EXECUTE BLOCK', 'SELECT 1'],
+        c.script('EXECUTE BLOCK RETURNS("V" INTEGER) AS BEGIN "V"=1; SUSPEND; "V"=2; SUSPEND; END; SELECT 3 AS "semi;colon" FROM "SYSTEM"."RDB$DATABASE"', ['EXECUTE BLOCK', 'SELECT 1'],
                  rows=[['1'], ['2'], ['3']])
         c.script('-- head\n' + ANSWER + '; /* closed tail */ -- EOF', ['SELECT 1'], rows=[['42']])
         for empty in ('', ' \t\r\n', '/* closed */ -- EOF'):
@@ -129,23 +125,20 @@ class ScriptHarness(SimpleHarness):
 
     def implicit_error(self):
         c = ScriptClient(self).login()
-        guard = self.scalar_native('SELECT GEN_ID(P4_GUARD,0) AS OBSERVED FROM RDB$DATABASE')
-        c.script('INSERT INTO P4_EFFECTS VALUES(1001); SELECT 1/0 FROM RDB$DATABASE; '
-                 'SELECT GEN_ID(P4_GUARD,1) FROM RDB$DATABASE', ['INSERT 0 1'], error='22012')
+        guard = self.scalar_native('SELECT GEN_ID("PUBLIC"."P4_GUARD",0) AS OBSERVED FROM "SYSTEM"."RDB$DATABASE"')
+        c.script('INSERT INTO "PUBLIC"."P4_EFFECTS" VALUES(1001); SELECT 1/0 FROM "SYSTEM"."RDB$DATABASE"; SELECT GEN_ID("PUBLIC"."P4_GUARD",1) FROM "SYSTEM"."RDB$DATABASE"', ['INSERT 0 1'], error='22012')
         self.seen(1001, 0)
-        require(self.scalar_native('SELECT GEN_ID(P4_GUARD,0) AS OBSERVED FROM RDB$DATABASE') == guard,
+        require(self.scalar_native('SELECT GEN_ID("PUBLIC"."P4_GUARD",0) AS OBSERVED FROM "SYSTEM"."RDB$DATABASE"') == guard,
                 'the script continued after failure')
-        c.script('INSERT INTO P4_EFFECTS VALUES(1002); SELECT (', ['INSERT 0 1'], error='42601')
+        c.script('INSERT INTO "PUBLIC"."P4_EFFECTS" VALUES(1002); SELECT (', ['INSERT 0 1'], error='42601')
         self.seen(1002, 0)
-        c.script('INSERT INTO P4_EFFECTS VALUES(1003); SELECT CAST(1 AS DECFLOAT(16)) FROM RDB$DATABASE',
+        c.script('INSERT INTO "PUBLIC"."P4_EFFECTS" VALUES(1003); SELECT CAST(1 AS DECFLOAT(16)) FROM "SYSTEM"."RDB$DATABASE"',
                  ['INSERT 0 1'], error='0A000')
         self.seen(1003, 0)
-        c.script('INSERT INTO P4_EFFECTS VALUES(1004); COMMIT; '
-                 'USING IN AUTONOMOUS TRANSACTION DO INSERT INTO P4_EFFECTS VALUES(GEN_ID(P4_GUARD,1)); '
-                 'INSERT INTO P4_EFFECTS VALUES(1005)', ['INSERT 0 1', 'COMMIT'], error='0A000')
+        c.script('INSERT INTO "PUBLIC"."P4_EFFECTS" VALUES(1004); COMMIT; USING IN AUTONOMOUS TRANSACTION DO INSERT INTO "PUBLIC"."P4_EFFECTS" VALUES(GEN_ID("PUBLIC"."P4_GUARD",1)); INSERT INTO "PUBLIC"."P4_EFFECTS" VALUES(1005)', ['INSERT 0 1', 'COMMIT'], error='0A000')
         self.seen(1004, 1)
         self.seen(1005, 0)
-        require(self.scalar_native('SELECT GEN_ID(P4_GUARD,0) AS OBSERVED FROM RDB$DATABASE') == guard,
+        require(self.scalar_native('SELECT GEN_ID("PUBLIC"."P4_GUARD",0) AS OBSERVED FROM "SYSTEM"."RDB$DATABASE"') == guard,
                 'unsupported wrapper executed before capability rejection')
         c.script(ANSWER, ['SELECT 1'], rows=[['42']])
         self.finish(c)
@@ -153,19 +146,19 @@ class ScriptHarness(SimpleHarness):
     def committed_prefix(self):
         c = ScriptClient(self).login()
         for index, (tail, state) in enumerate([('SELECT (', '42601'),
-                ('SELECT 1/0 FROM RDB$DATABASE', '22012'), ("SELECT 'unterminated", '42601'),
+                ('SELECT 1/0 FROM "SYSTEM"."RDB$DATABASE"', '22012'), ("SELECT 'unterminated", '42601'),
                 ('/* unterminated', '42601')]):
             saved, rolled_back = 1010 + index * 2, 1011 + index * 2
-            c.script(f'INSERT INTO P4_EFFECTS VALUES({saved}); COMMIT; '
-                     f'INSERT INTO P4_EFFECTS VALUES({rolled_back}); {tail}',
+            c.script(f'INSERT INTO "PUBLIC"."P4_EFFECTS" VALUES({saved}); COMMIT; '
+                     f'INSERT INTO "PUBLIC"."P4_EFFECTS" VALUES({rolled_back}); {tail}',
                      ['INSERT 0 1', 'COMMIT', 'INSERT 0 1'], error=state)
             self.seen(saved, 1)
             self.seen(rolled_back, 0)
         # A broken trailing comment must not hide the already-delimited COMMIT.
-        c.script('INSERT INTO P4_EFFECTS VALUES(1018); COMMIT; /* unterminated',
+        c.script('INSERT INTO "PUBLIC"."P4_EFFECTS" VALUES(1018); COMMIT; /* unterminated',
                  ['INSERT 0 1', 'COMMIT'], error='42601')
         self.seen(1018, 1)
-        c.script('INSERT INTO P4_EFFECTS VALUES(1019); ROLLBACK; INSERT INTO P4_EFFECTS VALUES(1020)',
+        c.script('INSERT INTO "PUBLIC"."P4_EFFECTS" VALUES(1019); ROLLBACK; INSERT INTO "PUBLIC"."P4_EFFECTS" VALUES(1020)',
                  ['INSERT 0 1', 'ROLLBACK', 'INSERT 0 1'])
         self.seen(1019, 0)
         self.seen(1020, 1)
@@ -173,35 +166,31 @@ class ScriptHarness(SimpleHarness):
 
     def explicit_states(self):
         c = ScriptClient(self).login()
-        c.script('SET TRANSACTION; INSERT INTO P4_EFFECTS VALUES(1030); '
-                 'SELECT 1/0 FROM RDB$DATABASE; ROLLBACK', ['BEGIN', 'INSERT 0 1'], state='E', error='22012')
+        c.script('SET TRANSACTION; INSERT INTO "PUBLIC"."P4_EFFECTS" VALUES(1030); SELECT 1/0 FROM "SYSTEM"."RDB$DATABASE"; ROLLBACK', ['BEGIN', 'INSERT 0 1'], state='E', error='22012')
         self.seen(1030, 0)
         c.script(ANSWER + '; ROLLBACK', state='E', error='25P02')
         c.script('SELECT (; ROLLBACK', state='E', error='42601')
         c.script('ROLLBACK; ' + ANSWER, ['ROLLBACK', 'SELECT 1'], rows=[['42']])
-        c.script('SET TRANSACTION; INSERT INTO P4_EFFECTS VALUES(1031)', ['BEGIN', 'INSERT 0 1'], state='T')
+        c.script('SET TRANSACTION; INSERT INTO "PUBLIC"."P4_EFFECTS" VALUES(1031)', ['BEGIN', 'INSERT 0 1'], state='T')
         self.seen(1031, 0)
         c.script('COMMIT; ' + ANSWER, ['COMMIT', 'SELECT 1'], rows=[['42']])
         self.seen(1031, 1)
-        c.script('SET TRANSACTION; SELECT 1/0 FROM RDB$DATABASE', ['BEGIN'], state='E', error='22012')
+        c.script('SET TRANSACTION; SELECT 1/0 FROM "SYSTEM"."RDB$DATABASE"', ['BEGIN'], state='E', error='22012')
         c.script('COMMIT; ' + ANSWER, ['ROLLBACK', 'SELECT 1'], rows=[['42']])
         # Native SET TRANSACTION does not promote an existing implicit segment.
-        c.script('INSERT INTO P4_EFFECTS VALUES(1032); SET TRANSACTION; COMMIT',
+        c.script('INSERT INTO "PUBLIC"."P4_EFFECTS" VALUES(1032); SET TRANSACTION; COMMIT',
                  ['INSERT 0 1'], error='25001')
         self.seen(1032, 0)
         self.finish(c)
 
     def native_session_and_retain(self):
         c = ScriptClient(self).login()
-        value = 'SELECT CAST(12.5 AS DOUBLE PRECISION) FROM RDB$DATABASE'
-        c.script('SET BIND OF DOUBLE PRECISION TO VARCHAR(40); SELECT 1/0 FROM RDB$DATABASE',
+        value = 'SELECT CAST(12.5 AS DOUBLE PRECISION) FROM "SYSTEM"."RDB$DATABASE"'
+        c.script('SET BIND OF DOUBLE PRECISION TO VARCHAR(40); SELECT 1/0 FROM "SYSTEM"."RDB$DATABASE"',
                  ['SET'], error='22012')
         c.script(value, ['SELECT 1'], oids=[[1043]])  # Attachment setting survives rollback.
         c.script('ALTER SESSION RESET; ' + value, ['RESET', 'SELECT 1'], oids=[[701]])
-        c.script('SET TRANSACTION; INSERT INTO P4_EFFECTS VALUES(1040); SAVEPOINT S; '
-                 'INSERT INTO P4_EFFECTS VALUES(1041); ROLLBACK TO SAVEPOINT S; '
-                 'RELEASE SAVEPOINT S; COMMIT RETAIN; INSERT INTO P4_EFFECTS VALUES(1042); '
-                 'ROLLBACK RETAIN; SELECT COUNT(*) FROM P4_EFFECTS WHERE ID=1040',
+        c.script('SET TRANSACTION; INSERT INTO "PUBLIC"."P4_EFFECTS" VALUES(1040); SAVEPOINT "S"; INSERT INTO "PUBLIC"."P4_EFFECTS" VALUES(1041); ROLLBACK TO SAVEPOINT "S"; RELEASE SAVEPOINT "S"; COMMIT RETAIN; INSERT INTO "PUBLIC"."P4_EFFECTS" VALUES(1042); ROLLBACK RETAIN; SELECT COUNT(*) FROM "PUBLIC"."P4_EFFECTS" WHERE "ID"=1040',
                  ['BEGIN', 'INSERT 0 1', 'SAVEPOINT', 'INSERT 0 1', 'ROLLBACK', 'RELEASE',
                   'COMMIT', 'INSERT 0 1', 'ROLLBACK', 'SELECT 1'], state='T', rows=[['1']])
         self.seen(1040, 1)
@@ -212,7 +201,7 @@ class ScriptHarness(SimpleHarness):
 
     def commit_error(self):
         c = ScriptClient(self).login()
-        c.send(packet(b'Q', (ANSWER + '; SELECT V FROM P4_COMMIT_ERROR').encode() + b'\0'))
+        c.send(packet(b'Q', (ANSWER + '; SELECT "V" FROM "PUBLIC"."P4_COMMIT_ERROR"').encode() + b'\0'))
         events = c.events(end=b'E')
         require(b''.join(k for k, _ in events) == b'TDCTDE', 'final commit failure emitted success/Ready')
         diagnostic = error_fields(events[-1][1])

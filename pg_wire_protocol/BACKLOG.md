@@ -1,6 +1,6 @@
 # Незавершённые задачи PgWire и профиля 1С
 
-Актуализировано 11 ноября 2026 года: APP-11 прошёл review в `a3e3c80123`; APP-12 реализован и оставлен на review.
+Актуализировано 11 ноября 2026 года: APP-12 принят в `13f64d0e00`; пользователь выбрал PG-правила имён, APP-13 реализован в рабочем diff и ожидает review.
 Это единый список незакрытых работ и ограничений. [PLAN](PLAN.md) задаёт порядок,
 [COMPATIBILITY](COMPATIBILITY.md) — действующий контракт,
 [VALIDATION](VALIDATION.md) — доказательства. Подробности профиля — в [1c/README](1c/README.md).
@@ -63,13 +63,16 @@
 | APP-09 | Открыто | Входные BLOB больше 65533 decoded bytes: выбрать отдельный native путь с корректным transaction/portal lifetime и bounded memory. Не повышать общие лимиты вместо решения. APP-08 этого не закрывает; выходной предел APP-07 остаётся общим DataRow budget. | [BINARY_BLOB_INPUT_TASK](1c/BINARY_BLOB_INPUT_TASK.md) |
 | APP-10 | Закрыто, 11.11.2026 | `5bbdaa763d`: private namespace IDs в PGWIRE_COMPAT, одноразовый SQL installer, sequence/read-only view/definer hook. Review без замечаний, независимые native/libpq, права, rollback, concurrency/restart PASS. Native DDL под user savepoint запрещён (0A000): refusal/recovery проверены, положительный schema-DDL undo через ROLLBACK TO не заявлен. C++/API прежние; APP-01 и selected04 не закрыты. | [NAMESPACE_REGISTRY_TASK](1c/NAMESPACE_REGISTRY_TASK.md), [review](VALIDATION.md#11-ноября-2026-архитектурный-review-namespace-registry) |
 | APP-11 | Закрыто, 11.11.2026 | `a3e3c80123`: SQL-only PG_NAMESPACE над APP-10, точные IDs/native имена, read-only/atomic install. Review без замечаний; независимый PASS: 6 групп установки, 4 native/libpq группы, 128 results и normal shutdown. Native BIGINT/VARCHAR, wire20/1043; PG oid/name/regnamespace и nspowner/nspacl не добавлены. | [NAMESPACE_CATALOG_TASK](1c/NAMESPACE_CATALOG_TASK.md), [review](VALIDATION.md#11-ноября-2026-архитектурный-review-публичного-namespace-catalog) |
-| APP-12 | Реализовано, на review | SQL-only PG_CLASS(OID, RELNAME, RELNAMESPACE, RELKIND) для schema-level persistent tables/views. Native relation ID+1, JOIN PG_NAMESPACE, wire20/1043/20/1043, без нового allocator/hook. PASS: 5 групп установки, 4 native/libpq группы, 228 results, exclusions/права/lifecycle и normal shutdown. Reuse ID допустим, restore не проверен; полный catalog/visibility/temp и selected04/10/11 открыты. | [CLASS_CATALOG_TASK](1c/CLASS_CATALOG_TASK.md), [проверки](VALIDATION.md#11-ноября-2026-pg_class-для-постоянных-таблиц-и-представлений) |
+| APP-12 | Закрыто, 11.11.2026 | `13f64d0e00`: SQL-only PG_CLASS для schema-level persistent tables/views, native ID+1, JOIN PG_NAMESPACE, wire20/1043/20/1043. Review без замечаний; независимый PASS: 5 групп установки, 4 native/libpq группы, 228 results и normal shutdown. Reuse допустим, restore не проверен; полный catalog/visibility/temp и selected04/10/11 открыты. | [CLASS_CATALOG_TASK](1c/CLASS_CATALOG_TASK.md), [review](VALIDATION.md#11-ноября-2026-архитектурный-review-pg_class) |
+| APP-13 | Реализовано, на review | PG4 lowercase unquoted/exact quoted identifiers, native-safe stored SQL, lowercase bootstrap/catalog labels, initial path/RESET/savepoint history и реальный DDL/DML/native readback. Пользователь явно разрешил изменение прежнего PG4 naming contract; native1/2/3 сохраняются. Без нового API/ODS/codecs/dependencies. | [PG_IDENTIFIER_NAMES_TASK](1c/PG_IDENTIFIER_NAMES_TASK.md) |
 
 Для APP-01 исследование выявило отдельные архитектурные вопросы: RDB$SCHEMAS
 не содержит числового schema ID; простое LOWER(native name) неоднозначно при
 совместном существовании quoted/unquoted имён. Native default collation label
 также не является PostgreSQL LC_COLLATE. Стабильные native namespace IDs приняты в APP-10; правила PG имён
-и collation contract нужно решить до объявления совместимости catalog queries.
+и collation contract нужны для совместимости catalog queries. Решение о регистре
+принято пользователем: PG4 переходит на PG naming в APP-13, native1/2/3 прежние;
+реализация ещё впереди. Catalog values не приводятся к LOWER.
 Ограниченный публичный view реализован в APP-11 с точными native именами
 и native metadata, без заявления полной PG-совместимости. Остаются PG/native
 name resolution/column labels, SQL/wire types oid/name/regnamespace, nspowner/nspacl,
@@ -92,6 +95,15 @@ visibility и temporary schemas остаются APP-01/04. Эти ограни�
 успехом чтения четырёх полей постоянных tables/views.
 Будущие indexes/sequences внутри PG_CLASS требуют непересекающихся с native
 relation mapping ключей; их native ID сам по себе может не быть глобально уникальным.
+
+После APP-13 остаются полная PG search_path semantics (implicit pg_catalog priority,
+$user, filtering по USAGE, transactional SET), regnamespace/type semantics и
+visibility/temp namespace. Native MAKE_DBKEY не фильтрует schemas по USAGE;
+MON$LOCAL_TEMPORARY_TABLES — transaction snapshot и не live guard. Эти препятствия
+подтверждены отдельным [probe](VALIDATION.md#11-ноября-2026-архитектурный-review-pg_class).
+Начальный public-first path APP-13 — ограниченный native контракт. Native длины
+имён, непредставимые quoted формы, U&-identifiers и computed default labels также
+не считать полной PG lexical compatibility; точные границы зафиксированы в COMPATIBILITY и APP-13 validation.
 
 ## Драйверы, wire и платформы
 

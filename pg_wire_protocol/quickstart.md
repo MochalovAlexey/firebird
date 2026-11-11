@@ -61,13 +61,31 @@ psql -X 'postgresql://sysdba:masterkey@127.0.0.1:15432/pgwire_test?sslmode=disab
 Replace `sysdba:masterkey` with your Firebird credentials. `-X` skips psql startup
 files. Use the configured database alias, not a file path, in the connection URI.
 
+## SQL names and application bootstrap
+
+PG4 folds unquoted ASCII names to lowercase; quoted names are exact. Native dialects
+1/2/3 still use uppercase. Existing employee objects therefore require quoted native
+schema/table/column names. There is no uppercase fallback and no automatic migration.
+
+Before unqualified CREATE or unquoted catalog queries, install the five SQL scripts
+in the [application bootstrap order](1c/README.md#app-13-имена-и-установка-lowercase-профиля)
+on a separate test database. An intact APP-10/11/12+compat.sql database only needs
+`1c/sql/install_pg_names.sql`. Use the owner/admin; credentials stay outside SQL.
+The installer refuses an existing lowercase pg_catalog and preserves an existing
+lowercase public and its data. Application CREATE/DML grants are separate.
+
+PgWire sets `"public", "pg_catalog", "SYSTEM"` before successful startup and after
+direct ALTER SESSION RESET. User SET SEARCH_PATH persists between commands.
+This is a public-first native profile; implicit PG catalog priority, `$user`, full
+USAGE/path semantics and transactional SET search_path are not implemented.
+
 ## Run SQL
 
 At the psql prompt, use Firebird SQL and finish a query with `;`:
 
 ```sql
-SELECT CAST(42 AS INTEGER) AS "answer" FROM RDB$DATABASE;
-SELECT * FROM country;
+SELECT CAST(42 AS INTEGER) AS "answer" FROM "SYSTEM"."RDB$DATABASE";
+SELECT * FROM "PUBLIC"."COUNTRY";
 ```
 
 The first query returns 42; the second reads the employee sample database.

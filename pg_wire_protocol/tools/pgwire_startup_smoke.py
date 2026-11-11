@@ -196,14 +196,14 @@ class Client:
                 raise RuntimeError(f"unexpected Query response {kind!r}")
         raise RuntimeError("Query response exceeded message bound")
 
-    def query_integer(self, text=b'SELECT CAST(6 * 7 AS INTEGER) AS "answer" FROM RDB$DATABASE', expected=42):
+    def query_integer(self, text=b'SELECT CAST(6 * 7 AS INTEGER) AS "answer" FROM "SYSTEM"."RDB$DATABASE"', expected=42):
         result = self.query(text)
         require(result["error"] is None and result["rows"] == [[str(expected)]] and result["command"] == "SELECT 1",
                 "computed integer SELECT returned an unexpected result")
         require(result["columns"] == [{"name": "answer", "table": 0, "attribute": 0, "oid": 23,
                                        "size": 4, "modifier": -1, "format": 0}], "integer RowDescription mismatch")
 
-    def query_error(self, text=b"SELECT CAST(1 AS DECFLOAT(16)) FROM RDB$DATABASE", expected="0A000"):
+    def query_error(self, text=b"SELECT CAST(1 AS DECFLOAT(16)) FROM \"SYSTEM\".\"RDB$DATABASE\"", expected="0A000"):
         result = self.query(text)
         require(result["error"] is not None and result["error"]["C"] == expected,
                 f"Query did not return expected SQLSTATE {expected}")
@@ -251,7 +251,7 @@ def libpq_child():
     try:
         require(library.PQstatus(connection) == 0, "libpq startup failed")
         require(library.PQprotocolVersion(connection) == 3, "libpq protocol version mismatch")
-        for sql in (b'SELECT CAST(6 * 7 AS INTEGER) AS "answer" FROM RDB$DATABASE', b"BEGIN READ ONLY", b"not SQL"):
+        for sql in (b'SELECT CAST(6 * 7 AS INTEGER) AS "answer" FROM "SYSTEM"."RDB$DATABASE"', b"BEGIN READ ONLY", b"not SQL"):
             result = library.PQexec(connection, sql)
             require(result, "libpq did not allocate a result")
             try:
@@ -459,11 +459,11 @@ QUIT;
                 "plaintext PG connection reported encryption")
         self.native_probe("native_with_pg_identities")
         first.query_integer()
-        for text in (b"BEGIN READ ONLY", b"not SQL", b"SELECT $1foo FROM RDB$DATABASE"):
+        for text in (b"BEGIN READ ONLY", b"not SQL", b"SELECT $1foo FROM \"SYSTEM\".\"RDB$DATABASE\""):
             first.query_error(text, "42601")
             first.query_integer()
-        second.send(packet(b"Q", b"SELECT CAST(1 AS INTEGER) FROM RDB$DATABASE\0") +
-                    packet(b"Q", b"SELECT CAST(2 AS INTEGER) FROM RDB$DATABASE\0"))
+        second.send(packet(b"Q", b"SELECT CAST(1 AS INTEGER) FROM \"SYSTEM\".\"RDB$DATABASE\"\0") +
+                    packet(b"Q", b"SELECT CAST(2 AS INTEGER) FROM \"SYSTEM\".\"RDB$DATABASE\"\0"))
         for expected in ("1", "2"):
             result = second.query_response()
             require(result["error"] is None and result["rows"] == [[expected]], "coalesced SELECT results mismatch")

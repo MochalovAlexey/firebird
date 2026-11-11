@@ -45,7 +45,7 @@ static void sql_error(PGconn* connection, const char* sql, const char* state)
     require(actual && strcmp(actual, state) == 0, "SQL error state differs");
     require(PQtransactionStatus(connection) == PQTRANS_IDLE, "failed implicit query retained a transaction");
     PQclear(result);
-    result = query(connection, "SELECT CAST(42 AS INTEGER) FROM RDB$DATABASE", PGRES_TUPLES_OK, "SELECT 1", 1, 1);
+    result = query(connection, "SELECT CAST(42 AS INTEGER) FROM \"SYSTEM\".\"RDB$DATABASE\"", PGRES_TUPLES_OK, "SELECT 1", 1, 1);
     require(strcmp(PQgetvalue(result, 0, 0), "42") == 0, "connection did not recover after SQL error");
     PQclear(result);
 }
@@ -59,7 +59,7 @@ int main(void)
         "SELECT TRUE, FALSE, CAST(NULL AS BOOLEAN), CAST('Я' AS CHAR(4)), CAST('Я🙂 ' AS VARCHAR(10)), "
         "CAST('' AS VARCHAR(4)), CAST(NULL AS VARCHAR(4)), "
         "CAST('-92233720368547758.08' AS NUMERIC(18,2)), CAST(12 AS NUMERIC(9,0)), "
-        "CAST(NULL AS NUMERIC(18,2)) FROM RDB$DATABASE", PGRES_TUPLES_OK, "SELECT 1", 1, 10);
+        "CAST(NULL AS NUMERIC(18,2)) FROM \"SYSTEM\".\"RDB$DATABASE\"", PGRES_TUPLES_OK, "SELECT 1", 1, 10);
     const Oid oids[] = {16, 16, 16, 1042, 1043, 1043, 1043, 1700, 1700, 1700};
     const char* values[] = {"t", "f", NULL, "Я   ", "Я🙂 ", "", NULL, "-92233720368547758.08", "12", NULL};
     for (int column = 0; column < 10; ++column)
@@ -79,41 +79,41 @@ int main(void)
     }
     PQclear(result);
 
-    command(connection, "CREATE TABLE P4_C_TABLE(ID INTEGER PRIMARY KEY, V NUMERIC(18,2), B BOOLEAN, T CHAR(4))", "CREATE TABLE");
-    command(connection, "CREATE INDEX P4_C_INDEX ON P4_C_TABLE(V)", "CREATE INDEX");
-    command(connection, "ALTER INDEX P4_C_INDEX INACTIVE", "ALTER INDEX");
-    result = query(connection, "INSERT INTO P4_C_TABLE VALUES(1,-123.40,FALSE,'Я') RETURNING ID,V,B,T",
+    command(connection, "CREATE TABLE \"PUBLIC\".\"P4_C_TABLE\"(\"ID\" INTEGER PRIMARY KEY, \"V\" NUMERIC(18,2), \"B\" BOOLEAN, \"T\" CHAR(4))", "CREATE TABLE");
+    command(connection, "CREATE INDEX \"PUBLIC\".\"P4_C_INDEX\" ON \"PUBLIC\".\"P4_C_TABLE\"(\"V\")", "CREATE INDEX");
+    command(connection, "ALTER INDEX \"PUBLIC\".\"P4_C_INDEX\" INACTIVE", "ALTER INDEX");
+    result = query(connection, "INSERT INTO \"PUBLIC\".\"P4_C_TABLE\" VALUES(1,-123.40,FALSE,'Я') RETURNING \"ID\",\"V\",\"B\",\"T\"",
         PGRES_TUPLES_OK, "INSERT 0 1", 1, 4);
     require(strcmp(PQcmdTuples(result), "1") == 0, "libpq INSERT affected count differs");
     require(strcmp(PQgetvalue(result, 0, 1), "-123.40") == 0 && strcmp(PQgetvalue(result, 0, 3), "Я   ") == 0,
         "singleton RETURNING types differ");
     PQclear(result);
-    result = query(connection, "INSERT INTO P4_C_TABLE(ID,V) SELECT 2,20 FROM RDB$DATABASE "
-        "UNION ALL SELECT 3,30 FROM RDB$DATABASE RETURNING ID", PGRES_TUPLES_OK, "INSERT 0 2", 2, 1);
+    result = query(connection, "INSERT INTO \"PUBLIC\".\"P4_C_TABLE\"(\"ID\",\"V\") SELECT 2,20 FROM \"SYSTEM\".\"RDB$DATABASE\" "
+        "UNION ALL SELECT 3,30 FROM \"SYSTEM\".\"RDB$DATABASE\" RETURNING \"ID\"", PGRES_TUPLES_OK, "INSERT 0 2", 2, 1);
     require(strcmp(PQcmdTuples(result), "2") == 0, "INSERT SELECT affected count differs");
     PQclear(result);
-    result = query(connection, "UPDATE P4_C_TABLE SET V=12.30 WHERE ID>1 RETURNING V",
+    result = query(connection, "UPDATE \"PUBLIC\".\"P4_C_TABLE\" SET \"V\"=12.30 WHERE \"ID\">1 RETURNING \"V\"",
         PGRES_TUPLES_OK, "UPDATE 2", 2, 1);
     require(strcmp(PQcmdTuples(result), "2") == 0 && strcmp(PQgetvalue(result, 1, 0), "12.30") == 0,
         "UPDATE RETURNING value/count differs");
     PQclear(result);
-    result = query(connection, "UPDATE P4_C_TABLE SET V=0 WHERE ID<0 RETURNING ID",
+    result = query(connection, "UPDATE \"PUBLIC\".\"P4_C_TABLE\" SET \"V\"=0 WHERE \"ID\"<0 RETURNING \"ID\"",
         PGRES_TUPLES_OK, "UPDATE 0", 0, 1);
     require(strcmp(PQcmdTuples(result), "0") == 0, "zero-row UPDATE count differs");
     PQclear(result);
-    result = query(connection, "DELETE FROM P4_C_TABLE WHERE ID>1 RETURNING ID", PGRES_TUPLES_OK, "DELETE 2", 2, 1);
+    result = query(connection, "DELETE FROM \"PUBLIC\".\"P4_C_TABLE\" WHERE \"ID\">1 RETURNING \"ID\"", PGRES_TUPLES_OK, "DELETE 2", 2, 1);
     require(strcmp(PQcmdTuples(result), "2") == 0, "DELETE count differs");
     PQclear(result);
-    result = query(connection, "MERGE INTO P4_C_TABLE T USING (SELECT 1 AS ID FROM RDB$DATABASE "
-        "UNION ALL SELECT 4 FROM RDB$DATABASE) S ON T.ID=S.ID "
-        "WHEN MATCHED THEN UPDATE SET T.V=1 WHEN NOT MATCHED THEN INSERT(ID,V) VALUES(S.ID,4) RETURNING T.ID",
+    result = query(connection, "MERGE INTO \"PUBLIC\".\"P4_C_TABLE\" \"T\" USING (SELECT 1 AS \"ID\" FROM \"SYSTEM\".\"RDB$DATABASE\" "
+        "UNION ALL SELECT 4 FROM \"SYSTEM\".\"RDB$DATABASE\") \"S\" ON \"T\".\"ID\"=\"S\".\"ID\" "
+        "WHEN MATCHED THEN UPDATE SET \"T\".\"V\"=1 WHEN NOT MATCHED THEN INSERT(\"ID\",\"V\") VALUES(\"S\".\"ID\",4) RETURNING \"T\".\"ID\"",
         PGRES_TUPLES_OK, "MERGE 2", 2, 1);
     /* Older libpq versions need not parse MERGE/custom tags in PQcmdTuples. */
     PQclear(result);
-    command(connection, "UPDATE OR INSERT INTO P4_C_TABLE(ID,V) VALUES(4,42) MATCHING(ID)", "UPDATE OR INSERT 1");
-    sql_error(connection, "INSERT INTO P4_C_TABLE(ID) VALUES(1)", "23505");
-    command(connection, "DROP INDEX P4_C_INDEX", "DROP INDEX");
-    command(connection, "DROP TABLE P4_C_TABLE", "DROP TABLE");
+    command(connection, "UPDATE OR INSERT INTO \"PUBLIC\".\"P4_C_TABLE\"(\"ID\",\"V\") VALUES(4,42) MATCHING(\"ID\")", "UPDATE OR INSERT 1");
+    sql_error(connection, "INSERT INTO \"PUBLIC\".\"P4_C_TABLE\"(\"ID\") VALUES(1)", "23505");
+    command(connection, "DROP INDEX \"PUBLIC\".\"P4_C_INDEX\"", "DROP INDEX");
+    command(connection, "DROP TABLE \"PUBLIC\".\"P4_C_TABLE\"", "DROP TABLE");
 
     const char* empty[] = {"", " \t\r\n", "/* comment only */", "-- comment only"};
     for (unsigned i = 0; i < sizeof(empty) / sizeof(empty[0]); ++i)

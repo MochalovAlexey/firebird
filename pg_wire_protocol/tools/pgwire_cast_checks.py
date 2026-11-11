@@ -64,7 +64,7 @@ def casts_client(config, client):
             'SET ROLE PGWIRE_OBSERVER;\nSET LIST ON;\n'+sql+';\nROLLBACK;\nQUIT;\n')
 
     def seen(identifier, expected):
-        output = native(f'SELECT V FROM CAST_ROWS WHERE ID={identifier}')
+        output = native(f'SELECT "V" FROM "PUBLIC"."CAST_ROWS" WHERE "ID"={identifier}')
         require(re.findall(r'^V[ \t]+(-?\d+)[ \t]*$',output,re.M) ==
                 ([] if expected is None else [str(expected)]), 'native row differs: '+output)
 
@@ -89,25 +89,25 @@ def casts_client(config, client):
         ("'123'::INTEGER::VARCHAR(2)", "CAST(CAST('123' AS INTEGER) AS VARCHAR(2))", '22001', None, None),
         ("'a' || 12::VARCHAR(2)", "'a' || CAST(12 AS VARCHAR(2))", '', [['a12']], 1043),
         ("('a' || 'b')::VARCHAR(2)", "CAST('a' || 'b' AS VARCHAR(2))", '', [['ab']], 1043),
-        ("'a'::VARCHAR(3) COLLATE UNICODE_CI = 'A'", "CAST('a' AS VARCHAR(3)) COLLATE UNICODE_CI = 'A'", '', [['t']], 16),
-        ("'a'||'b'::VARCHAR(3) COLLATE UNICODE_CI = 'AB'", "'a'||CAST('b' AS VARCHAR(3)) COLLATE UNICODE_CI = 'AB'", '', [['f']], 16),
-        ("('a' COLLATE UNICODE_CI)::VARCHAR(3) = 'A'", "CAST('a' COLLATE UNICODE_CI AS VARCHAR(3)) = 'A'", '', [['f']], 16),
-        ("'a'::VARCHAR(3) CHARACTER SET UTF8 COLLATE UNICODE_CI = 'A'", "CAST('a' AS VARCHAR(3) CHARACTER SET UTF8 COLLATE UNICODE_CI) = 'A'", '', [['t']], 16),
-        ("'a'::VARCHAR(3) COLLATE UNICODE_CI COLLATE UNICODE = 'A'", "CAST('a' AS VARCHAR(3)) COLLATE UNICODE_CI COLLATE UNICODE = 'A'", '', [['f']], 16),
+        ("'a'::VARCHAR(3) COLLATE \"UNICODE_CI\" = 'A'", "CAST('a' AS VARCHAR(3)) COLLATE \"UNICODE_CI\" = 'A'", '', [['t']], 16),
+        ("'a'||'b'::VARCHAR(3) COLLATE \"UNICODE_CI\" = 'AB'", "'a'||CAST('b' AS VARCHAR(3)) COLLATE \"UNICODE_CI\" = 'AB'", '', [['f']], 16),
+        ("('a' COLLATE \"UNICODE_CI\")::VARCHAR(3) = 'A'", "CAST('a' COLLATE \"UNICODE_CI\" AS VARCHAR(3)) = 'A'", '', [['f']], 16),
+        ("'a'::VARCHAR(3) CHARACTER SET \"UTF8\" COLLATE \"UNICODE_CI\" = 'A'", "CAST('a' AS VARCHAR(3) CHARACTER SET \"UTF8\" COLLATE \"UNICODE_CI\") = 'A'", '', [['t']], 16),
+        ("'a'::VARCHAR(3) COLLATE \"UNICODE_CI\" COLLATE \"UNICODE\" = 'A'", "CAST('a' AS VARCHAR(3)) COLLATE \"UNICODE_CI\" COLLATE \"UNICODE\" = 'A'", '', [['f']], 16),
         ("(TIMESTAMP '2001-02-03 04:05:06'::TIMESTAMP AT TIME ZONE 'UTC')::VARCHAR(50)",
          "CAST(CAST(TIMESTAMP '2001-02-03 04:05:06' AS TIMESTAMP) AT TIME ZONE 'UTC' AS VARCHAR(50))", '', None, 1043),
         ("(TIMESTAMP '2001-02-03 04:05:06'::TIMESTAMP WITH TIME ZONE AT TIME ZONE 'UTC')::VARCHAR(50)",
          "CAST(CAST(TIMESTAMP '2001-02-03 04:05:06' AS TIMESTAMP WITH TIME ZONE) AT TIME ZONE 'UTC' AS VARCHAR(50))", '', None, 1043),
         ("EXTRACT(HOUR FROM TIME '04:05:06'::TIME WITH TIME ZONE AT TIME ZONE 'UTC'::VARCHAR(10))",
          "EXTRACT(HOUR FROM CAST(TIME '04:05:06' AS TIME WITH TIME ZONE) AT TIME ZONE CAST('UTC' AS VARCHAR(10)))", '', None, None),
-        ("OCTET_LENGTH('abc'::BLOB SUB_TYPE TEXT SEGMENT SIZE 80 CHARACTER SET UTF8)",
-         "OCTET_LENGTH(CAST('abc' AS BLOB SUB_TYPE TEXT SEGMENT SIZE 80 CHARACTER SET UTF8))", '', [['3']], 20),
+        ("OCTET_LENGTH('abc'::BLOB SUB_TYPE TEXT SEGMENT SIZE 80 CHARACTER SET \"UTF8\")",
+         "OCTET_LENGTH(CAST('abc' AS BLOB SUB_TYPE TEXT SEGMENT SIZE 80 CHARACTER SET \"UTF8\"))", '', [['3']], 20),
         ('1.25::NUMERIC', 'CAST(1.25 AS NUMERIC)', '', None, None),
         ("'abc'::VARCHAR", "CAST('abc' AS VARCHAR)", '', [['abc']], 1043),
         ("'2000-01-01'::DATE", "CAST('2000-01-01' AS DATE)", '', [['2000-01-01']], 1082),
     ]
     for postfix, explicit, error, rows, oid in pairs:
-        results = [query('SELECT '+expr+' AS V', error=error, rows=rows,
+        results = [query('SELECT '+expr+' AS "V"', error=error, rows=rows,
                          oids=None if oid is None else [oid]) for expr in (postfix, explicit)]
         require(results[0] == results[1], 'postfix/native CAST mismatch: '+repr((postfix,results)))
         report['equivalence'].append({'postfix':postfix, 'native':explicit, 'result':results[0]})
@@ -117,13 +117,14 @@ def casts_client(config, client):
         actual=query(f'SELECT {value}::{target} WITH LOCK', error='42000')
         expected=query(f'SELECT CAST({value} AS {target}) WITH LOCK', error='42000')
         require(actual == expected, 'WITH LOCK was consumed as a cast type clause')
-    query('SELECT INT8, "INT8" FROM (SELECT 42 AS INT8 FROM RDB$DATABASE)', rows=[['42','42']], oids=[23,23])
-    query("SELECT CAST('domain' AS INT8), CAST('quoted' AS \"INT8\")", rows=[['domain','quoted']], oids=[1043,1043])
-    query('SELECT ID::bigint FROM CAST_ROWS WHERE ID=1', rows=[['1']], oids=[20])
-    query('WITH C AS (SELECT 41::BIGINT AS V FROM RDB$DATABASE) SELECT (SELECT V+1 FROM C)::INTEGER', rows=[['42']], oids=[23])
+    query('SELECT INT8, "int8" FROM (SELECT 42 AS INT8 FROM "SYSTEM"."RDB$DATABASE")', rows=[['42','42']], oids=[23,23])
+    query("SELECT CAST('domain' AS \"PUBLIC\".\"INT8\"), CAST('quoted' AS \"PUBLIC\".\"INT8\")",
+          rows=[['domain','quoted']], oids=[1043,1043])
+    query('SELECT "ID"::bigint FROM "PUBLIC"."CAST_ROWS" WHERE "ID"=1', rows=[['1']], oids=[20])
+    query('WITH "C" AS (SELECT 41::BIGINT AS "V" FROM "SYSTEM"."RDB$DATABASE") SELECT (SELECT "V"+1 FROM "C")::INTEGER', rows=[['42']], oids=[23])
     # Resolve optional BLOB clauses versus implicit aliases through native backtracking.
     for alias in ('SUB_TYPE', 'SEGMENT'):
-        query(f"SELECT OCTET_LENGTH({alias}) FROM (SELECT 'abc'::BLOB {alias} FROM RDB$DATABASE)", rows=[['3']], oids=[20])
+        query(f"SELECT OCTET_LENGTH({alias}) FROM (SELECT 'abc'::BLOB {alias} FROM \"SYSTEM\".\"RDB$DATABASE\")", rows=[['3']], oids=[20])
 
     for hints in ((), (0,), (23,)):
         params('SELECT $1::INTEGER', ['42'], hints=hints, rows=[['42']], oids=[23])
@@ -143,46 +144,45 @@ def casts_client(config, client):
     params('SELECT $1::INTEGER', ['42'], hints=[1043], error='0A000')
     params('SELECT $1', ['42'], hints=[23], error='HY004')
 
-    params('INSERT INTO CAST_ROWS(ID,V,TXT) VALUES($1::INTEGER,$2::BIGINT,$3::VARCHAR(40)) RETURNING ID::BIGINT,V,TXT',
+    params('INSERT INTO "PUBLIC"."CAST_ROWS"("ID","V","TXT") VALUES($1::INTEGER,$2::BIGINT,$3::VARCHAR(40)) RETURNING "ID"::BIGINT,"V","TXT"',
            ['810','9876543210','Я'], rows=[['810','9876543210','Я']]); seen(810,9876543210)
-    params('UPDATE CAST_ROWS SET V=$1::BIGINT WHERE ID=$2 RETURNING V::VARCHAR(20)', ['-321','810'], rows=[['-321']]); seen(810,-321)
-    merge = ('MERGE INTO CAST_ROWS T USING (SELECT $1::INTEGER AS ID FROM RDB$DATABASE) S ON T.ID=S.ID '
-             'WHEN MATCHED THEN UPDATE SET V=$2::BIGINT WHEN NOT MATCHED THEN INSERT(ID,V) VALUES(S.ID,$3::BIGINT) RETURNING T.V::BIGINT')
+    params('UPDATE "PUBLIC"."CAST_ROWS" SET "V"=$1::BIGINT WHERE "ID"=$2 RETURNING "V"::VARCHAR(20)', ['-321','810'], rows=[['-321']]); seen(810,-321)
+    merge = ('MERGE INTO "PUBLIC"."CAST_ROWS" "T" USING (SELECT $1::INTEGER AS "ID" FROM "SYSTEM"."RDB$DATABASE") "S" ON "T"."ID"="S"."ID" WHEN MATCHED THEN UPDATE SET "V"=$2::BIGINT WHEN NOT MATCHED THEN INSERT("ID","V") VALUES("S"."ID",$3::BIGINT) RETURNING "T"."V"::BIGINT')
     params(merge, ['811','111','222'], rows=[['222']]); seen(811,222)
     params(merge, ['811','333','444'], rows=[['333']]); seen(811,333)
-    params('DELETE FROM CAST_ROWS WHERE ID=$1::INTEGER RETURNING V::VARCHAR(20)', ['811'], rows=[['333']]); seen(811,None)
+    params('DELETE FROM "PUBLIC"."CAST_ROWS" WHERE "ID"=$1::INTEGER RETURNING "V"::VARCHAR(20)', ['811'], rows=[['333']]); seen(811,None)
     for identifier, control in ((812,'COMMIT'),(813,'ROLLBACK')):
         query('BEGIN', state=2)
-        params('INSERT INTO CAST_ROWS(ID,V) VALUES($1::INTEGER,$2::INT8)', [str(identifier),'77'], state=2)
+        params('INSERT INTO "PUBLIC"."CAST_ROWS"("ID","V") VALUES($1::INTEGER,$2::INT8)', [str(identifier),'77'], state=2)
         seen(identifier,None); query(control); seen(identifier,77 if control=='COMMIT' else None)
     query('BEGIN', state=2)
-    params('INSERT INTO CAST_ROWS(ID,V) VALUES($1::INTEGER,$2::BIGINT)', ['814','88'], state=2)
+    params('INSERT INTO "PUBLIC"."CAST_ROWS"("ID","V") VALUES($1::INTEGER,$2::BIGINT)', ['814','88'], state=2)
     params('SELECT $1::VARCHAR(12)::INTEGER', ['bad'], error='22018', state=3)
     query('SELECT 42::INT8', error='25P02', state=3)
     query('ROLLBACK'); seen(814,None)
     params('chain',['42'],prepared=True,rows=[['42']])
-    results=client.query("INSERT INTO CAST_ROWS(ID,V) VALUES(815,1); SELECT 'bad'::INTEGER; INSERT INTO CAST_ROWS(ID,V) VALUES(816,2)", True)
+    results=client.query('INSERT INTO "PUBLIC"."CAST_ROWS"("ID","V") VALUES(815,1); SELECT \'bad\'::INTEGER; INSERT INTO "PUBLIC"."CAST_ROWS"("ID","V") VALUES(816,2)', True)
     require([r['sqlstate'] for r in results]==['','22018'], 'Simple script continued after cast error')
     seen(815,None); seen(816,None)
     query('SELECT 42::INT8', rows=[['42']])
     for mode in ('on','off'):
         query('SET standard_conforming_strings='+mode)
-        query("SELECT '::', q'{::INT8}', 7 AS \"::\" /* ::INT8 */ -- ::INTEGER\nFROM RDB$DATABASE", rows=[['::','::INT8','7']])
+        query("SELECT '::', q'{::INT8}', 7 AS \"::\" /* ::INT8 */ -- ::INTEGER\nFROM \"SYSTEM\".\"RDB$DATABASE\"", rows=[['::','::INT8','7']])
         query("SELECT '\\x34\\x32'::INTEGER" if mode=='off' else "SELECT '42'::INTEGER", rows=[['42']])
     query('SET standard_conforming_strings=on')
 
     # Ordinary CAST and literal :: remain valid in excluded root contexts.
-    for sql in ('CREATE TABLE CAST_OK AS SELECT CAST(42 AS INTEGER) AS V FROM RDB$DATABASE WITH DATA',
-                'CREATE VIEW CAST_OK_VIEW AS SELECT CAST(42 AS INTEGER) AS V FROM RDB$DATABASE',
-                "CREATE PROCEDURE CAST_OK_PROC RETURNS(V VARCHAR(8)) AS BEGIN V=CAST('::' AS VARCHAR(8)); END"):
+    for sql in ('CREATE TABLE "PUBLIC"."CAST_OK" AS SELECT CAST(42 AS INTEGER) AS "V" FROM "SYSTEM"."RDB$DATABASE" WITH DATA',
+                'CREATE VIEW "PUBLIC"."CAST_OK_VIEW" AS SELECT CAST(42 AS INTEGER) AS "V" FROM "SYSTEM"."RDB$DATABASE"',
+                'CREATE PROCEDURE "PUBLIC"."CAST_OK_PROC" RETURNS("V" VARCHAR(8)) AS BEGIN "V"=CAST(\'::\' AS VARCHAR(8)); END'):
         query(sql)
-    query('SELECT V FROM CAST_OK', rows=[['42']]); query('SELECT V FROM CAST_OK_VIEW', rows=[['42']])
-    query('EXECUTE PROCEDURE CAST_OK_PROC', rows=[['::']])
-    query('EXECUTE BLOCK RETURNS(V INTEGER) AS BEGIN V=CAST(42 AS INTEGER); SUSPEND; END', rows=[['42']])
-    query('CALL CAST_PROC(CAST(41 AS INTEGER), ?)', rows=[['42']])
-    query('EXECUTE PROCEDURE CAST_PROC(CAST(41 AS INTEGER))', rows=[['42']])
-    query('UPDATE OR INSERT INTO CAST_ROWS(ID,V) VALUES(817,CAST(42 AS INTEGER)) MATCHING(ID)'); seen(817,42)
-    query('DROP TABLE CAST_OK'); query('DROP VIEW CAST_OK_VIEW'); query('DROP PROCEDURE CAST_OK_PROC')
+    query('SELECT "V" FROM "PUBLIC"."CAST_OK"', rows=[['42']]); query('SELECT "V" FROM "PUBLIC"."CAST_OK_VIEW"', rows=[['42']])
+    query('EXECUTE PROCEDURE "PUBLIC"."CAST_OK_PROC"', rows=[['::']])
+    query('EXECUTE BLOCK RETURNS("V" INTEGER) AS BEGIN "V"=CAST(42 AS INTEGER); SUSPEND; END', rows=[['42']])
+    query('CALL "PUBLIC"."CAST_PROC"(CAST(41 AS INTEGER), ?)', rows=[['42']])
+    query('EXECUTE PROCEDURE "PUBLIC"."CAST_PROC"(CAST(41 AS INTEGER))', rows=[['42']])
+    query('UPDATE OR INSERT INTO "PUBLIC"."CAST_ROWS"("ID","V") VALUES(817,CAST(42 AS INTEGER)) MATCHING("ID")'); seen(817,42)
+    query('DROP TABLE "PUBLIC"."CAST_OK"'); query('DROP VIEW "PUBLIC"."CAST_OK_VIEW"'); query('DROP PROCEDURE "PUBLIC"."CAST_OK_PROC"')
     report['psycopg3']='available' if importlib.util.find_spec('psycopg') else 'SKIP: not installed; no dependencies added'
     report['scope']='synthetic cast semantics, not original selected 04/08/10/11 queries or 1C opening'
     return report
@@ -197,21 +197,21 @@ def casts_protocols(h):
             ('SELECT $1::INTEGER+$1::INTEGER','0A000'), ('SELECT $2::INTEGER','0A000'),
             ('SELECT $1::INTEGER,$3::INTEGER','0A000'), ('SELECT $2::INTEGER,$1::INTEGER','0A000'),
             ('SELECT ?::INTEGER,$1::INTEGER','0A000'), ('SELECT $1::INTEGER,?::INTEGER','0A000'),
-            ('CREATE TABLE CAST_BAD_CTAS AS SELECT 1::INT8 AS V FROM RDB$DATABASE WITH DATA','0A000'),
-            ('CREATE TABLE CAST_BAD_CTE AS WITH C AS (SELECT 1::INTEGER AS V FROM RDB$DATABASE) SELECT V FROM C WITH DATA','0A000'),
-            ('CREATE TABLE CAST_BAD_CHECK(V INTEGER CHECK(V>1::INTEGER))','0A000'),
-            ('CREATE VIEW CAST_BAD_VIEW AS SELECT (SELECT 1::INT8 FROM RDB$DATABASE) AS V FROM RDB$DATABASE','0A000'),
-            ('CREATE PROCEDURE CAST_BAD_PROC RETURNS(V INTEGER) AS BEGIN V=1::INTEGER; END','0A000'),
-            ('EXECUTE BLOCK RETURNS(V INTEGER) AS BEGIN V=1::INTEGER; SUSPEND; END','0A000'),
-            ('EXECUTE BLOCK AS DECLARE FUNCTION F(A INTEGER) RETURNS INTEGER AS BEGIN RETURN A::INTEGER; END BEGIN END','0A000'),
-            ('CALL CAST_PROC(1::INTEGER,?)','0A000'), ('EXECUTE PROCEDURE CAST_PROC(1::INTEGER)','0A000'),
-            ('USING(A INTEGER=?) DO SELECT :A::BIGINT FROM RDB$DATABASE','0A000'),
-            ('UPDATE OR INSERT INTO CAST_ROWS(ID,V) VALUES(899,1::INT8) MATCHING(ID)','0A000'),
-            ('CREATE VIEW CAST_BAD_SYNTAX AS SELECT 1::','42601'),
+            ('CREATE TABLE "PUBLIC"."CAST_BAD_CTAS" AS SELECT 1::INT8 AS "V" FROM "SYSTEM"."RDB$DATABASE" WITH DATA','0A000'),
+            ('CREATE TABLE "PUBLIC"."CAST_BAD_CTE" AS WITH "C" AS (SELECT 1::INTEGER AS "V" FROM "SYSTEM"."RDB$DATABASE") SELECT "V" FROM "C" WITH DATA','0A000'),
+            ('CREATE TABLE "PUBLIC"."CAST_BAD_CHECK"("V" INTEGER CHECK("V">1::INTEGER))','0A000'),
+            ('CREATE VIEW "PUBLIC"."CAST_BAD_VIEW" AS SELECT (SELECT 1::INT8 FROM "SYSTEM"."RDB$DATABASE") AS "V" FROM "SYSTEM"."RDB$DATABASE"','0A000'),
+            ('CREATE PROCEDURE "PUBLIC"."CAST_BAD_PROC" RETURNS("V" INTEGER) AS BEGIN "V"=1::INTEGER; END','0A000'),
+            ('EXECUTE BLOCK RETURNS("V" INTEGER) AS BEGIN "V"=1::INTEGER; SUSPEND; END','0A000'),
+            ('EXECUTE BLOCK AS DECLARE FUNCTION "F"("A" INTEGER) RETURNS INTEGER AS BEGIN RETURN "A"::INTEGER; END BEGIN END','0A000'),
+            ('CALL "PUBLIC"."CAST_PROC"(1::INTEGER,?)','0A000'), ('EXECUTE PROCEDURE "PUBLIC"."CAST_PROC"(1::INTEGER)','0A000'),
+            ('USING("A" INTEGER=?) DO SELECT :"A"::BIGINT FROM "SYSTEM"."RDB$DATABASE"','0A000'),
+            ('UPDATE OR INSERT INTO "PUBLIC"."CAST_ROWS"("ID","V") VALUES(899,1::INT8) MATCHING("ID")','0A000'),
+            ('CREATE VIEW "PUBLIC"."CAST_BAD_SYNTAX" AS SELECT 1::','42601'),
             ('SELECT 1::BLOB SUB_TYPE TEXT','0A000'),  # Non-binary BLOB output remains unsupported.
         ]
         for sql,error in invalid:
-            raw.exchange(parse('bad',sql)+parse('discarded','INSERT INTO CAST_ROWS(ID,V) VALUES(899,999)')+
+            raw.exchange(parse('bad',sql)+parse('discarded','INSERT INTO "PUBLIC"."CAST_ROWS"("ID","V") VALUES(899,999)')+
                          bind('discarded','discarded')+execute('discarded')+packet(b'S'), b'EZ', error=error)
             raw.exchange(bind('missing','discarded')+packet(b'S'),b'EZ',error='26000')
             raw.run('SELECT $1::INTEGER::VARCHAR(12)',values=['42'],rows=[['42']],tag='SELECT 1')
@@ -225,10 +225,13 @@ def casts_protocols(h):
         raw.exchange(packet(b'Q',b'SELECT $1::INTEGER\0'),b'EZ',error='0A000')
     finally:
         raw.close()
-    output=h.isql('casts_no_side_effects','SET LIST ON;\n'
-        "SELECT COUNT(*) AS N FROM RDB$RELATIONS WHERE RDB$RELATION_NAME STARTING WITH 'CAST_BAD';\n"
-        "SELECT COUNT(*) AS N FROM RDB$PROCEDURES WHERE RDB$PROCEDURE_NAME STARTING WITH 'CAST_BAD';\n"
-        'SELECT COUNT(*) AS N FROM CAST_ROWS WHERE ID=899;\nROLLBACK;\nQUIT;\n')
+    output=h.isql('casts_no_side_effects',"""SET LIST ON;
+SELECT COUNT(*) AS "N" FROM RDB$RELATIONS WHERE RDB$RELATION_NAME STARTING WITH 'CAST_BAD';
+SELECT COUNT(*) AS "N" FROM RDB$PROCEDURES WHERE RDB$PROCEDURE_NAME STARTING WITH 'CAST_BAD';
+SELECT COUNT(*) AS "N" FROM "PUBLIC"."CAST_ROWS" WHERE "ID"=899;
+ROLLBACK;
+QUIT;
+""")
     require(re.findall(r'^N\s+(\d+)\s*$',output,re.M)==['0','0','0'], 'cast guard/discard left effects')
     env=h.env.copy();env.update(ISC_USER='WIRE_HOST_TEST',ISC_PASSWORD=h.password)
     for dialect in (1,2,3):

@@ -54,6 +54,7 @@ Parser::Parser(thread_db* tdbb, MemoryPool& pool, MemoryPool* aStatementPool, Ds
 	  requireSemicolon(aRequireSemicolon),
 	  transformedString(pool),
 	  strMarks(pool),
+	  identifierMarks(pool),
 	  stmt_ambiguous(false)
 {
 	charSet = INTL_charset_lookup(tdbb, charSetId);
@@ -171,7 +172,29 @@ dsql_fld* Parser::makeBigIntField()
 }
 
 
-// Preserve introduced and PG-decoded strings in native, ASCII SQL notation.
+// Called only by final identifier grammar actions, never by speculative paths.
+MetaName* Parser::makeIdentifier(MetaName* name, const Position& position)
+{
+	if (!pgDialect || *position.firstPos == '"')
+		return name;
+
+	string folded(name->c_str(), name->length());
+	for (auto& c : folded)
+	{
+		if (c >= 'A' && c <= 'Z')
+			c += 'a' - 'A';
+	}
+
+	StrMark mark;
+	mark.identifier = true;
+	mark.pos = position.firstPos - lex.start;
+	mark.length = position.lastPos - position.firstPos;
+	identifierMarks.add(mark);
+	return newNode<MetaName>(folded);
+}
+
+
+// Preserve literals and actual PG identifiers for internal native reprepare.
 void Parser::transformString(const char* start, unsigned length, string& dest)
 {
 	const static char HEX_DIGITS[] = {'0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
@@ -181,7 +204,7 @@ void Parser::transformString(const char* start, unsigned length, string& dest)
 	HalfStaticArray<char, 256> buffer;
 	const char* pos = start;
 
-	// Collect marked strings within this source range, in source order.
+	// Merge non-overlapping marks by original offsets, including partial captures.
 
 	SortedArray<StrMark> introducedMarks;
 
@@ -189,7 +212,12 @@ void Parser::transformString(const char* start, unsigned length, string& dest)
 	for (bool found = accessor.getFirst(); found; found = accessor.getNext())
 	{
 		const StrMark& mark = accessor.current()->second;
-		if ((mark.introduced || mark.escaped) && mark.pos >= fromBegin && mark.pos < fromBegin + length)
+		if ((mark.introduced || mark.escaped) && mark.pos >= fromBegin && mark.pos + mark.length <= fromBegin + length)
+			introducedMarks.add(mark);
+	}
+	for (const auto& mark : identifierMarks)
+	{
+		if (mark.pos >= fromBegin && mark.pos + mark.length <= fromBegin + length)
 			introducedMarks.add(mark);
 	}
 
@@ -198,7 +226,18 @@ void Parser::transformString(const char* start, unsigned length, string& dest)
 		const StrMark& mark = introducedMarks[i];
 
 		const char* s = lex.start + mark.pos;
+		fb_assert(s >= pos);
 		buffer.add(pos, s - pos);
+		if (mark.identifier)
+		{
+			buffer.add('"');
+			// Preserve the original client charset bytes; only ASCII is folded.
+			for (const char* p = s; p < s + mark.length; ++p)
+				buffer.add(*p >= 'A' && *p <= 'Z' ? *p + ('a' - 'A') : *p);
+			buffer.add('"');
+			pos = s + mark.length;
+			continue;
+		}
 
 		if (s > pos && !fb_utils::isspace(s[-1]))
 			buffer.add(' ');	// fix _charset'' becoming invalid syntax _charsetX''
@@ -747,6 +786,15 @@ int Parser::yylexAux()
 			}
 			else if (client_dialect >= SQL_DIALECT_V6)
 			{
+				// MetaName strips trailing ASCII spaces. Reject before constructing it
+				// rather than silently merging distinct PG quoted identifiers.
+				if (pgDialect && p > buffer && (p[-1] == ' ' || memchr(buffer, 0, p - buffer)))
+				{
+					if (buffer != string)
+						gds__free(buffer);
+					yyabandon(yyposn, -104, Arg::Gds(isc_random) <<
+						"PG quoted identifiers cannot contain NUL or end in a space");
+				}
 				if (p - buffer >= MAX_TOKEN_LEN)
 				{
 					if (buffer != string)

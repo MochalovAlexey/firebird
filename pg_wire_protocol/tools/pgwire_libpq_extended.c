@@ -111,7 +111,7 @@ static PGresult* send_params(PGconn* c, const char* sql, int count, const char* 
 
 static void asynchronous(PGconn* c, const char* sql, const Oid* types, const char** values)
 {
-    const char* scalar = "SELECT CAST(? AS INTEGER) FROM RDB$DATABASE";
+    const char* scalar = "SELECT CAST(? AS INTEGER) FROM \"SYSTEM\".\"RDB$DATABASE\"";
     PGresult* r;
     require(PQsetnonblocking(c, 1) == 0, "PQsetnonblocking failed");
 
@@ -154,13 +154,13 @@ static void asynchronous(PGconn* c, const char* sql, const Oid* types, const cha
 
     /* Parse, Bind and Execute errors are distinct server paths. Each libpq
        command supplies Sync; collect_single must reach NULL before reuse. */
-    error(c, send_params(c, "SELECT $1 FROM RDB$DATABASE", 1, &values[1]), "HY004", PQTRANS_IDLE);
+    error(c, send_params(c, "SELECT $1 FROM \"SYSTEM\".\"RDB$DATABASE\"", 1, &values[1]), "HY004", PQTRANS_IDLE);
     values[1] = "2147483648";
     require(PQsendQueryPrepared(c, "c_async_values", 6, values, NULL, NULL, 0),
         "async invalid Bind send failed");
     error(c, collect_single(c), "22003", PQTRANS_IDLE);
     const char* divisor = "0";
-    error(c, send_params(c, "SELECT 1 / CAST(? AS INTEGER) FROM RDB$DATABASE", 1, &divisor),
+    error(c, send_params(c, "SELECT 1 / CAST(? AS INTEGER) FROM \"SYSTEM\".\"RDB$DATABASE\"", 1, &divisor),
         "22012", PQTRANS_IDLE);
     values[1] = "49";
     require(PQsendQueryPrepared(c, "c_async_values", 6, values, NULL, NULL, 0),
@@ -171,10 +171,10 @@ static void asynchronous(PGconn* c, const char* sql, const Oid* types, const cha
     r = checked(c, send_params(c, "SET TRANSACTION READ WRITE READ COMMITTED NO WAIT", 0, NULL),
         PGRES_COMMAND_OK, "BEGIN"); PQclear(r);
     require(PQtransactionStatus(c) == PQTRANS_INTRANS, "async native transaction did not start");
-    r = checked(c, send_params(c, "INSERT INTO P7_EFFECTS(ID) VALUES(901)", 0, NULL),
+    r = checked(c, send_params(c, "INSERT INTO \"PUBLIC\".\"P7_EFFECTS\"(\"ID\") VALUES(901)", 0, NULL),
         PGRES_COMMAND_OK, "INSERT 0 1"); PQclear(r);
     require(PQtransactionStatus(c) == PQTRANS_INTRANS, "async Sync committed explicit transaction");
-    error(c, send_params(c, "SELECT 1 / CAST(? AS INTEGER) FROM RDB$DATABASE", 1, &divisor),
+    error(c, send_params(c, "SELECT 1 / CAST(? AS INTEGER) FROM \"SYSTEM\".\"RDB$DATABASE\"", 1, &divisor),
         "22012", PQTRANS_INERROR);
     require(PQsendQueryPrepared(c, "c_async_values", 6, values, NULL, NULL, 0),
         "async failed transaction query send failed");
@@ -182,7 +182,7 @@ static void asynchronous(PGconn* c, const char* sql, const Oid* types, const cha
     r = checked(c, send_params(c, "ROLLBACK", 0, NULL), PGRES_COMMAND_OK, "ROLLBACK"); PQclear(r);
     require(PQtransactionStatus(c) == PQTRANS_IDLE, "async rollback did not leave failed transaction");
     r = checked(c, send_params(c,
-        "SELECT CAST(COUNT(*) AS INTEGER) FROM P7_EFFECTS WHERE ID=901", 0, NULL),
+        "SELECT CAST(COUNT(*) AS INTEGER) FROM \"PUBLIC\".\"P7_EFFECTS\" WHERE \"ID\"=901", 0, NULL),
         PGRES_TUPLES_OK, "SELECT 1");
     value(r, 0, "0", 23); PQclear(r);
     values[1] = "50";
@@ -202,11 +202,11 @@ int main(void)
     require(PQprotocolVersion(c) == 3, "libpq did not negotiate protocol 3");
     require(PQpipelineStatus(c) == PQ_PIPELINE_OFF, "P9 fixture must not use pipeline mode");
     const char* sql = "SELECT CAST(? AS SMALLINT),CAST(? AS INTEGER),CAST(? AS BIGINT),"
-        "CAST(? AS VARCHAR(20)),CAST(? AS BOOLEAN),CAST(? AS INTEGER) FROM RDB$DATABASE";
+        "CAST(? AS VARCHAR(20)),CAST(? AS BOOLEAN),CAST(? AS INTEGER) FROM \"SYSTEM\".\"RDB$DATABASE\"";
     const char* values[] = {"-32768", "2147483647", "-9223372036854775808", "Я x ", "true", NULL};
     const Oid inferred[] = {0,0,0,0,0,0};
     const Oid explicit_types[] = {21,23,20,1043,16,23};
-    PGresult* r = checked(c, PQexecParams(c, "SELECT CAST(42 AS INTEGER) FROM RDB$DATABASE",
+    PGresult* r = checked(c, PQexecParams(c, "SELECT CAST(42 AS INTEGER) FROM \"SYSTEM\".\"RDB$DATABASE\"",
         0, NULL, NULL, NULL, NULL, 0), PGRES_TUPLES_OK, "SELECT 1");
     value(r, 0, "42", 23); PQclear(r);
     r = checked(c, PQexecParams(c, sql, 6, inferred, values, NULL, NULL, 0), PGRES_TUPLES_OK, "SELECT 1");
@@ -235,7 +235,7 @@ int main(void)
         value(r, 1, values[1], 23); PQclear(r);
         require(PQtransactionStatus(c) == PQTRANS_IDLE, "sync unnamed reuse left a transaction");
     }
-    r = checked(c, PQprepare(c, "", "SELECT CAST(? AS INTEGER) FROM RDB$DATABASE", 0, NULL),
+    r = checked(c, PQprepare(c, "", "SELECT CAST(? AS INTEGER) FROM \"SYSTEM\".\"RDB$DATABASE\"", 0, NULL),
         PGRES_COMMAND_OK, NULL); PQclear(r);
     r = checked(c, PQdescribePrepared(c, ""), PGRES_COMMAND_OK, NULL);
     require(PQnparams(r) == 1 && PQparamtype(r, 0) == 23 && PQnfields(r) == 1,
@@ -262,10 +262,10 @@ int main(void)
     }
     PQclear(r);
     asynchronous(c, sql, explicit_types, values);
-    r = checked(c, PQexecParams(c,"SELECT CAST($1 AS INTEGER) FROM RDB$DATABASE",
+    r = checked(c, PQexecParams(c,"SELECT CAST($1 AS INTEGER) FROM \"SYSTEM\".\"RDB$DATABASE\"",
         1,NULL,&values[1],NULL,NULL,0), PGRES_TUPLES_OK,"SELECT 1");
     value(r, 0, values[1], 23); PQclear(r);
-    error(c,PQexecParams(c,"SELECT $1 FROM RDB$DATABASE",1,NULL,&values[1],NULL,NULL,0),"HY004",PQTRANS_IDLE);
+    error(c,PQexecParams(c,"SELECT $1 FROM \"SYSTEM\".\"RDB$DATABASE\"",1,NULL,&values[1],NULL,NULL,0),"HY004",PQTRANS_IDLE);
     r = checked(c,PQexecParams(c,"BEGIN",0,NULL,NULL,NULL,NULL,0),PGRES_COMMAND_OK,"BEGIN"); PQclear(r);
     require(PQtransactionStatus(c) == PQTRANS_INTRANS, "Extended BEGIN did not open a block");
     r = checked(c,PQexec(c,"ROLLBACK"),PGRES_COMMAND_OK,"ROLLBACK"); PQclear(r);

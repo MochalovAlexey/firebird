@@ -20,7 +20,7 @@ from pgwire_transaction_smoke import TransactionClient
 from wire_host_smoke import field, require, require_closed, reserve_ports
 
 
-ANSWER = 'SELECT CAST(42 AS INTEGER) FROM RDB$DATABASE'
+ANSWER = 'SELECT CAST(42 AS INTEGER) FROM "SYSTEM"."RDB$DATABASE"'
 
 
 def string(value):
@@ -180,8 +180,8 @@ QUIT;
 
         if getattr(self.args, 'psycopg3_python', None):
             self.isql('psycopg3_fixtures', f"CONNECT '{self.database}';\n"
-                'CREATE TABLE P9_ROWS (ID INTEGER NOT NULL PRIMARY KEY, V INTEGER);\n'
-                'GRANT SELECT, INSERT, UPDATE, DELETE ON P9_ROWS TO USER WIRE_HOST_TEST;\n'
+                'CREATE TABLE "PUBLIC"."P9_ROWS" ("ID" INTEGER NOT NULL PRIMARY KEY, "V" INTEGER);\n'
+                'GRANT SELECT, INSERT, UPDATE, DELETE ON "PUBLIC"."P9_ROWS" TO USER WIRE_HOST_TEST;\n'
                 'COMMIT;\nQUIT;\n', embedded=True)
 
     def psycopg3(self):
@@ -196,9 +196,9 @@ QUIT;
         require(result.returncode == 0, 'Psycopg3 profile failed; see psycopg3.log')
         self.summary['psycopg3'] = json.loads(result.stdout)
         self.summary['psycopg3_source_sha256'] = hashlib.sha256(script.read_bytes()).hexdigest()
-        require(self.scalar_native('SELECT COUNT(*) AS OBSERVED FROM P9_ROWS '
-                'WHERE (ID=9301 AND V=11) OR (ID=9303 AND V=33)') == 2 and
-                self.scalar_native('SELECT COUNT(*) AS OBSERVED FROM P9_ROWS') == 2,
+        require(self.scalar_native('SELECT COUNT(*) AS OBSERVED FROM "PUBLIC"."P9_ROWS" '
+                'WHERE ("ID"=9301 AND "V"=11) OR ("ID"=9303 AND "V"=33)') == 2 and
+                self.scalar_native('SELECT COUNT(*) AS OBSERVED FROM "PUBLIC"."P9_ROWS"') == 2,
                 'native observer did not see exact Psycopg3 commit/rollback effects')
         self.summary['psycopg3_native_visibility'] = True
         self.no_attachments()
@@ -231,7 +231,7 @@ QUIT;
 
     def descriptions_and_lifetimes(self):
         c = ExtendedClient(self).login()
-        sql = 'SELECT CAST(? AS INTEGER) AS "answer" FROM RDB$DATABASE'
+        sql = 'SELECT CAST(? AS INTEGER) AS "answer" FROM "SYSTEM"."RDB$DATABASE"'
         events = c.exchange(parse('named', sql, [0]) + describe(b'S', 'named') + packet(b'H'), b'1tT', end=b'T')
         require(events[1][1] == struct.pack('!HI', 1, 23), 'ParameterDescription did not infer integer')
         require(columns(events[2][1]) == [{'name': 'answer', 'table': 0, 'attribute': 0,
@@ -242,18 +242,18 @@ QUIT;
         c.exchange(bind('p', 'named', ['43']) + execute('p') + packet(b'S'), b'2DCZ', rows=[['43']], tag='SELECT 1')
         c.exchange(describe(b'P', 'p') + packet(b'S'), b'EZ', error='34000')
         c.exchange(parse('named', sql) + packet(b'S'), b'EZ', error='42P05')
-        c.exchange(parse('', ANSWER) + parse('', 'SELECT CAST(43 AS INTEGER) FROM RDB$DATABASE') +
+        c.exchange(parse('', ANSWER) + parse('', 'SELECT CAST(43 AS INTEGER) FROM "SYSTEM"."RDB$DATABASE"') +
                    bind() + execute() + packet(b'S'), b'112DCZ', rows=[['43']], tag='SELECT 1')
         c.exchange(parse('keep', ANSWER) + bind('keep', 'keep') + close(b'S', 'keep') +
                    execute('keep') + packet(b'S'), b'123DCZ', rows=[['42']], tag='SELECT 1')
         c.exchange(parse('', ANSWER) + bind('old_unnamed', '') +
-                   parse('', 'SELECT CAST(44 AS INTEGER) FROM RDB$DATABASE') + bind('new_unnamed', '') +
+                   parse('', 'SELECT CAST(44 AS INTEGER) FROM "SYSTEM"."RDB$DATABASE"') + bind('new_unnamed', '') +
                    execute('old_unnamed') + execute('new_unnamed') + packet(b'S'),
                    b'1212DCDCZ', rows=[['42'], ['44']])
         c.exchange(bind('', 'named', ['45']) + bind('', 'named', ['46']) + execute() + packet(b'S'),
                    b'22DCZ', rows=[['46']], tag='SELECT 1')
         c.exchange(close(b'S', 'missing') + close(b'P', 'missing') + packet(b'S'), b'33Z')
-        c.exchange(parse('dml', 'INSERT INTO P7_EFFECTS VALUES(?)', [23]) + describe(b'S', 'dml') +
+        c.exchange(parse('dml', 'INSERT INTO "PUBLIC"."P7_EFFECTS" VALUES(?)', [23]) + describe(b'S', 'dml') +
                    packet(b'S'), b'1tnZ')
         c.exchange(close(b'S', 'named') + describe(b'S', 'named') + packet(b'S'), b'3EZ', error='26000')
         c.exchange(parse('', ANSWER) + packet(b'S'), b'1Z')
@@ -265,18 +265,18 @@ QUIT;
         c = ExtendedClient(self).login()
         sql = ('SELECT CAST(? AS SMALLINT),CAST(? AS INTEGER),CAST(? AS BIGINT),'
                'CAST(? AS BOOLEAN),CAST(? AS VARCHAR(10)),CAST(? AS CHAR(4)),'
-               'CAST(? AS NUMERIC(18,2)),CAST(? AS INTEGER) FROM RDB$DATABASE')
+               'CAST(? AS NUMERIC(18,2)),CAST(? AS INTEGER) FROM "SYSTEM"."RDB$DATABASE"')
         values = ['-32768', '2147483647', '-9223372036854775808', 'true', 'Я ', 'Я', '-123.45', None]
         events = c.run(sql, values, rows=[['-32768', '2147483647', '-9223372036854775808', 't',
                                          'Я ', 'Я   ', '-123.45', None]], tag='SELECT 1')
         require([x['oid'] for x in columns(events[2][1])] == [21, 23, 20, 16, 1043, 1042, 1700, 23],
                 'scalar input/output OID inference differs')
-        sql = 'SELECT CAST(? AS INTEGER),CAST(? AS BOOLEAN),CAST(? AS VARCHAR(10)) FROM RDB$DATABASE'
+        sql = 'SELECT CAST(? AS INTEGER),CAST(? AS BOOLEAN),CAST(? AS VARCHAR(10)) FROM "SYSTEM"."RDB$DATABASE"'
         values = [struct.pack('!i', -42), 'false', 'Я '.encode()]
         events = c.run(sql, values, [23, 16, 25], [1, 0, 1], [1, 0, 1],
                        rows=[[struct.pack('!i', -42), 'f', 'Я ']], tag='SELECT 1')
         require([x['format'] for x in columns(events[2][1])] == [1, 0, 1], 'mixed result formats differ')
-        c.run('SELECT CAST(? AS INTEGER),CAST(? AS INTEGER) FROM RDB$DATABASE',
+        c.run('SELECT CAST(? AS INTEGER),CAST(? AS INTEGER) FROM "SYSTEM"."RDB$DATABASE"',
               ['1', '2'], formats=[0], results=[1], rows=[[struct.pack('!i', 1), struct.pack('!i', 2)]],
               tag='SELECT 1')
         self.finish(c)
@@ -284,7 +284,7 @@ QUIT;
     def portals(self):
         c = ExtendedClient(self).login()
         # Native prepare needs the parameter itself typed; an outer CAST returns HY004.
-        sql = 'SELECT CAST(ID + CAST(? AS INTEGER) AS INTEGER) FROM P7_ROWS ORDER BY ID'
+        sql = 'SELECT CAST("ID" + CAST(? AS INTEGER) AS INTEGER) FROM "PUBLIC"."P7_ROWS" ORDER BY "ID"'
         c.exchange(parse('rows', sql) + bind('left', 'rows', ['0']) + bind('right', 'rows', ['10']) +
                    execute('left', 2) + packet(b'H'), b'122DDs', end=b's', rows=[['1'], ['2']])
         self.transaction_count(1)
@@ -300,7 +300,7 @@ QUIT;
 
     def cycle_boundaries(self):
         c = ExtendedClient(self).login()
-        c.exchange(parse('write', 'INSERT INTO P7_EFFECTS VALUES(?)') + bind('write1', 'write', ['101']) +
+        c.exchange(parse('write', 'INSERT INTO "PUBLIC"."P7_EFFECTS" VALUES(?)') + bind('write1', 'write', ['101']) +
                    execute('write1') + packet(b'H'), b'12C', end=b'C', tag='INSERT 0 1')
         self.seen(101, 0)
         self.transaction_count(1)
@@ -310,7 +310,7 @@ QUIT;
         c.exchange(bind('write2', 'write', ['102']) + execute('write2') + packet(b'H'),
                    b'2C', end=b'C', tag='INSERT 0 1')
         # Failure rolls back the whole implicit cycle, including prior completed Execute.
-        c.exchange(parse('bad', 'SELECT CAST(1/0 AS INTEGER) FROM RDB$DATABASE') + bind('bad', 'bad') +
+        c.exchange(parse('bad', 'SELECT CAST(1/0 AS INTEGER) FROM "SYSTEM"."RDB$DATABASE"') + bind('bad', 'bad') +
                    execute('bad') + bind('ignored', 'write', ['103']) + execute('ignored') + packet(b'H') +
                    packet(b'S'), b'12EZ', error='22012')
         self.seen(102, 0)
@@ -337,15 +337,15 @@ QUIT;
 
     def discard_and_recovery(self):
         c = ExtendedClient(self).login()
-        guard = self.scalar_native('SELECT GEN_ID(P7_GUARD,0) AS OBSERVED FROM RDB$DATABASE')
-        ignored = parse('ignored', 'SELECT GEN_ID(P7_GUARD,1) FROM RDB$DATABASE') + bind('ignored', 'ignored') + execute('ignored')
-        for sql in ('SELECT $1foo FROM RDB$DATABASE', 'BEGIN READ ONLY', 'SELECT', ';',
-                    'SELECT GEN_ID(P7_GUARD,1) FROM RDB$DATABASE; SELECT 42 FROM RDB$DATABASE'):
+        guard = self.scalar_native('SELECT GEN_ID("PUBLIC"."P7_GUARD",0) AS OBSERVED FROM "SYSTEM"."RDB$DATABASE"')
+        ignored = parse('ignored', 'SELECT GEN_ID("PUBLIC"."P7_GUARD",1) FROM "SYSTEM"."RDB$DATABASE"') + bind('ignored', 'ignored') + execute('ignored')
+        for sql in ('SELECT $1foo FROM "SYSTEM"."RDB$DATABASE"', 'BEGIN READ ONLY', 'SELECT', ';',
+                    'SELECT GEN_ID("PUBLIC"."P7_GUARD",1) FROM "SYSTEM"."RDB$DATABASE"; SELECT 42 FROM "SYSTEM"."RDB$DATABASE"'):
             c.exchange(parse('invalid', sql) + ignored + packet(b'H') + packet(b'S'), b'EZ', error='42601')
             c.run(ANSWER, rows=[['42']], tag='SELECT 1')
-        require(self.scalar_native('SELECT GEN_ID(P7_GUARD,0) AS OBSERVED FROM RDB$DATABASE') == guard,
+        require(self.scalar_native('SELECT GEN_ID("PUBLIC"."P7_GUARD",0) AS OBSERVED FROM "SYSTEM"."RDB$DATABASE"') == guard,
                 'discarded or multi-statement SQL produced an irreversible effect')
-        c.exchange(parse('param', 'SELECT CAST(? AS INTEGER) FROM RDB$DATABASE') + packet(b'S'), b'1Z')
+        c.exchange(parse('param', 'SELECT CAST(? AS INTEGER) FROM "SYSTEM"."RDB$DATABASE"') + packet(b'S'), b'1Z')
         for bad_bind in (bind('p', 'param'), bind('p', 'param', ['1'], [0, 0]),
                          bind('p', 'param', ['1'], results=[0, 0]), bind('p', 'param', ['1'], [2])):
             c.exchange(bad_bind + ignored + packet(b'S'), b'EZ', error='08P01')
@@ -355,21 +355,21 @@ QUIT;
         # SQL/body contents; their framing and the final Sync still matter.
         c.exchange(execute('missing') + packet(b'Q', b'\xffwithout-nul') + packet(b'H', b'ignored') +
                    packet(b'P', b'ignored') + ignored + packet(b'S'), b'EZ', error='34000')
-        require(self.scalar_native('SELECT GEN_ID(P7_GUARD,0) AS OBSERVED FROM RDB$DATABASE') == guard,
+        require(self.scalar_native('SELECT GEN_ID("PUBLIC"."P7_GUARD",0) AS OBSERVED FROM "SYSTEM"."RDB$DATABASE"') == guard,
                 'discarded messages after Bind/Execute failure executed')
         c.exchange(bind('negative_rows', 'param', ['1']) + execute('negative_rows', 0xFFFFFFFF) +
                    packet(b'S'), b'2EZ', error='08P01')
-        c.run('SELECT CAST(? AS INTEGER) FROM RDB$DATABASE', ['9'], rows=[['9']], tag='SELECT 1')
+        c.run('SELECT CAST(? AS INTEGER) FROM "SYSTEM"."RDB$DATABASE"', ['9'], rows=[['9']], tag='SELECT 1')
         self.finish(c)
 
     def explicit_transactions(self):
         c = ExtendedClient(self).login()
         self.simple(c, 'SET TRANSACTION READ WRITE READ COMMITTED NO WAIT', 'BEGIN', 'T')
-        c.exchange(parse('rows', 'SELECT ID FROM P7_ROWS ORDER BY ID') + bind('hold', 'rows') + execute('hold', 1) +
+        c.exchange(parse('rows', 'SELECT "ID" FROM "PUBLIC"."P7_ROWS" ORDER BY "ID"') + bind('hold', 'rows') + execute('hold', 1) +
                    packet(b'S'), b'12DsZ', state='T', rows=[['1']])
         self.transaction_count(1)
         c.exchange(execute('hold') + packet(b'S'), b'DDCZ', state='T', rows=[['2'], ['3']], tag='SELECT 3')
-        c.exchange(parse('ins', 'INSERT INTO P7_EFFECTS VALUES(?)') + bind('ins', 'ins', ['201']) +
+        c.exchange(parse('ins', 'INSERT INTO "PUBLIC"."P7_EFFECTS" VALUES(?)') + bind('ins', 'ins', ['201']) +
                    execute('ins') + packet(b'S'), b'12CZ', state='T', tag='INSERT 0 1')
         self.seen(201, 0)
         self.simple(c, 'COMMIT', 'COMMIT')
@@ -399,10 +399,10 @@ QUIT;
         command('COMMIT', 'COMMIT')
         command('ROLLBACK', 'ROLLBACK')
         command('SET TRANSACTION READ WRITE READ COMMITTED NO WAIT', 'BEGIN', 'T')
-        command('INSERT INTO P7_EFFECTS VALUES(601)', 'INSERT 0 1', 'T')
+        command('INSERT INTO "PUBLIC"."P7_EFFECTS" VALUES(601)', 'INSERT 0 1', 'T')
         command('SAVEPOINT P7_EXT_SAVE', 'SAVEPOINT', 'T')
-        command('INSERT INTO P7_EFFECTS VALUES(602)', 'INSERT 0 1', 'T')
-        command('INSERT INTO P7_EFFECTS VALUES(601)', None, 'E', '23505')
+        command('INSERT INTO "PUBLIC"."P7_EFFECTS" VALUES(602)', 'INSERT 0 1', 'T')
+        command('INSERT INTO "PUBLIC"."P7_EFFECTS" VALUES(601)', None, 'E', '23505')
         command('ROLLBACK TO SAVEPOINT P7_EXT_SAVE', 'ROLLBACK', 'T')
         command('RELEASE SAVEPOINT P7_EXT_SAVE', 'RELEASE', 'T')
         self.seen(601, 0)
@@ -410,19 +410,19 @@ QUIT;
         self.seen(601, 1)
         self.seen(602, 0)
         command('SET TRANSACTION', 'BEGIN', 'T')
-        command('INSERT INTO P7_EFFECTS VALUES(603)', 'INSERT 0 1', 'T')
+        command('INSERT INTO "PUBLIC"."P7_EFFECTS" VALUES(603)', 'INSERT 0 1', 'T')
         command('ROLLBACK', 'ROLLBACK')
         self.seen(603, 0)
         command('SET TRANSACTION', 'BEGIN', 'T')
-        command('INSERT INTO P7_EFFECTS VALUES(604)', 'INSERT 0 1', 'T')
-        command('INSERT INTO P7_EFFECTS VALUES(601)', None, 'E', '23505')
+        command('INSERT INTO "PUBLIC"."P7_EFFECTS" VALUES(604)', 'INSERT 0 1', 'T')
+        command('INSERT INTO "PUBLIC"."P7_EFFECTS" VALUES(601)', None, 'E', '23505')
         command('COMMIT', 'ROLLBACK')
         self.seen(604, 0)
         command('SET TRANSACTION', 'BEGIN', 'T')
-        command('INSERT INTO P7_EFFECTS VALUES(605)', 'INSERT 0 1', 'T')
+        command('INSERT INTO "PUBLIC"."P7_EFFECTS" VALUES(605)', 'INSERT 0 1', 'T')
         command('COMMIT RETAIN SNAPSHOT', 'COMMIT', 'T')
         self.seen(605, 1)
-        command('INSERT INTO P7_EFFECTS VALUES(606)', 'INSERT 0 1', 'T')
+        command('INSERT INTO "PUBLIC"."P7_EFFECTS" VALUES(606)', 'INSERT 0 1', 'T')
         command('ROLLBACK RETAIN', 'ROLLBACK', 'T')
         command('ROLLBACK', 'ROLLBACK')
         self.seen(606, 0)
@@ -430,9 +430,9 @@ QUIT;
 
     def bind_guards_before_effects(self):
         c = ExtendedClient(self).login()
-        before = self.scalar_native('SELECT GEN_ID(P7_GUARD,0) AS OBSERVED FROM RDB$DATABASE')
-        sql = ('SELECT CAST(? AS INTEGER),CAST(GEN_ID(P7_GUARD,1) AS NUMERIC(18,2)) '
-               'FROM RDB$DATABASE')
+        before = self.scalar_native('SELECT GEN_ID("PUBLIC"."P7_GUARD",0) AS OBSERVED FROM "SYSTEM"."RDB$DATABASE"')
+        sql = ('SELECT CAST(? AS INTEGER),CAST(GEN_ID("PUBLIC"."P7_GUARD",1) AS NUMERIC(18,2)) '
+               'FROM "SYSTEM"."RDB$DATABASE"')
         c.exchange(parse('guard', sql) + packet(b'S'), b'1Z')
         for values, formats, results, expected in (
             (['not an integer'], (), (), '22P02'),
@@ -441,13 +441,13 @@ QUIT;
             ([None], [2], (), '08P01')):
             c.exchange(bind('guard', 'guard', values, formats, results) + execute('guard') + packet(b'S'),
                        b'EZ', error=expected)
-            actual = self.scalar_native('SELECT GEN_ID(P7_GUARD,0) AS OBSERVED FROM RDB$DATABASE')
+            actual = self.scalar_native('SELECT GEN_ID("PUBLIC"."P7_GUARD",0) AS OBSERVED FROM "SYSTEM"."RDB$DATABASE"')
             require(actual == before, f'Bind failure {expected} executed irreversible GEN_ID effect')
             self.transaction_count(0)
         # Prove the same prepared SQL has an observable effect when validly bound.
         c.exchange(bind('guard', 'guard', ['7']) + execute('guard') + packet(b'S'), b'2DCZ',
                    rows=[['7', f'{before + 1}.00']], tag='SELECT 1')
-        require(self.scalar_native('SELECT GEN_ID(P7_GUARD,0) AS OBSERVED FROM RDB$DATABASE') == before + 1,
+        require(self.scalar_native('SELECT GEN_ID("PUBLIC"."P7_GUARD",0) AS OBSERVED FROM "SYSTEM"."RDB$DATABASE"') == before + 1,
                 'positive control did not execute the sequence effect')
         self.finish(c)
 
@@ -461,9 +461,9 @@ QUIT;
                        describe(b'S', 'two') + packet(b'S'), b'1tT1tTZ', state=state)
             self.transaction_count(int(explicit))
             if explicit:
-                c.exchange(parse('many', 'SELECT ID FROM P7_ROWS ORDER BY ID') + bind('suspended', 'many') +
+                c.exchange(parse('many', 'SELECT "ID" FROM "PUBLIC"."P7_ROWS" ORDER BY "ID"') + bind('suspended', 'many') +
                            execute('suspended', 1) + packet(b'H'), b'12Ds', end=b's', rows=[['1']])
-                self.simple(c, 'INSERT INTO P7_EFFECTS VALUES(301)', 'INSERT 0 1', 'T')
+                self.simple(c, 'INSERT INTO "PUBLIC"."P7_EFFECTS" VALUES(301)', 'INSERT 0 1', 'T')
             c.exchange(parse('reset', 'ALTER SESSION RESET') + bind('reset', 'reset') + execute('reset') +
                        packet(b'S'), b'12CZ', state=state, tag='RESET')
             self.transaction_count(int(explicit))
@@ -524,12 +524,12 @@ QUIT;
             ('BOOLEAN', b'\x02', [1], '22P03'),
             ('VARCHAR(10)', b'\xff', (), '22021'),
             ('NUMERIC(18,2)', b'\x00' * 7, [1], '22P03')):
-            sql = f'SELECT CAST(? AS {cast}) FROM RDB$DATABASE'
+            sql = f'SELECT CAST(? AS {cast}) FROM "SYSTEM"."RDB$DATABASE"'
             c.exchange(parse('', sql) + bind(values=[value], formats=formats) + execute() + packet(b'S'),
                        b'1EZ', error=expected)
-        c.exchange(parse('', 'SELECT CAST(? AS INTEGER) FROM RDB$DATABASE', [20]) + packet(b'S'),
+        c.exchange(parse('', 'SELECT CAST(? AS INTEGER) FROM "SYSTEM"."RDB$DATABASE"', [20]) + packet(b'S'),
                    b'EZ', error='0A000')
-        c.exchange(parse('', 'SELECT CAST(1 AS NUMERIC(18,2)) FROM RDB$DATABASE') +
+        c.exchange(parse('', 'SELECT CAST(1 AS NUMERIC(18,2)) FROM "SYSTEM"."RDB$DATABASE"') +
                    bind(results=[1]) + execute() + packet(b'S'), b'12DCZ',
                    rows=[[bytes.fromhex('00010000000000020001')]], tag='SELECT 1')
         c.run(ANSWER, rows=[['42']], tag='SELECT 1')
@@ -554,20 +554,20 @@ QUIT;
     def disconnect_and_shutdown(self):
         for identifier, terminate in ((401, True), (402, False)):
             c = ExtendedClient(self).login()
-            c.exchange(parse('stream', 'SELECT V FROM P7_STREAM(?)') + bind('stream', 'stream', [str(identifier)]) +
+            c.exchange(parse('stream', 'SELECT "V" FROM "PUBLIC"."P7_STREAM"(?)') + bind('stream', 'stream', [str(identifier)]) +
                        execute('stream', 1) + packet(b'H'), b'12Ds', end=b's', rows=[['1']])
             self.transaction_count(1)
             self.finish(c, terminate)
             self.seen(identifier, 0)
         c = ExtendedClient(self).login()
-        c.exchange(parse('stream', 'SELECT V FROM P7_STREAM(403)') + bind('stream', 'stream') +
+        c.exchange(parse('stream', 'SELECT "V" FROM "PUBLIC"."P7_STREAM"(403)') + bind('stream', 'stream') +
                    execute('stream', 1) + packet(b'H'), b'12Ds', end=b's', rows=[['1']])
         self.native_probe('native_while_portal_suspended')
         self.stop()
         require_closed(c.connection)
         c.close(terminate=False)
         output = self.isql('shutdown_portal_rollback', f"CONNECT '{self.database}';\nSET LIST ON;\n"
-            'SELECT COUNT(*) AS OBSERVED FROM P7_EFFECTS WHERE ID=403;\nCOMMIT;\nQUIT;\n', embedded=True)
+            'SELECT COUNT(*) AS OBSERVED FROM "PUBLIC"."P7_EFFECTS" WHERE "ID"=403;\nCOMMIT;\nQUIT;\n', embedded=True)
         require(field(output, 'OBSERVED') == '0', 'server shutdown committed suspended portal work')
 
     def build_c_driver(self):

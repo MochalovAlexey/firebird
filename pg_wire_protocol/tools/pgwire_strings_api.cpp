@@ -16,6 +16,24 @@ static void require(bool ok, const char* reason)
 	++checks;
 }
 
+// The old native test templates use the system table in dialects 1/2/3.
+// PG4 must reference that same uppercase native object explicitly. This changes
+// only the test template, not user SQL or the production execution path.
+static std::string systemTable(std::string sql, unsigned dialect)
+{
+	if (dialect == SQL_DIALECT_PG)
+	{
+		const std::string from = "FROM RDB$DATABASE";
+		for (auto pos = sql.find(from); pos != std::string::npos; pos = sql.find(from, pos))
+		{
+			const std::string quoted = "FROM \"SYSTEM\".\"RDB$DATABASE\"";
+			sql.replace(pos, from.size(), quoted);
+			pos += quoted.size();
+		}
+	}
+	return sql;
+}
+
 int main(int argc, char** argv)
 {
 	if (argc != 2 || std::filesystem::exists(argv[1]) || std::filesystem::is_symlink(argv[1]))
@@ -65,7 +83,8 @@ int main(int argc, char** argv)
 		const auto query = [&](unsigned dialect, unsigned flags, const std::string& sql, const std::string& value)
 		{
 			const auto before = mode();
-			statement = attachment->prepare(&status, nullptr, sql.size(), sql.data(), dialect, flags);
+			const auto text = systemTable(sql, dialect);
+			statement = attachment->prepare(&status, nullptr, text.size(), text.data(), dialect, flags);
 			require(mode() == before, "Prepare override changed the attachment");
 			metadata = statement->getOutputMetadata(&status);
 			const auto length = metadata->getLength(&status, 0);
@@ -91,7 +110,8 @@ int main(int argc, char** argv)
 			unsigned line = 0, unsigned column = 0)
 		{
 			expected.init();
-			statement = attachment->prepare(&expected, nullptr, sql.size(), sql.data(), dialect, flags);
+			const auto text = systemTable(sql, dialect);
+			statement = attachment->prepare(&expected, nullptr, text.size(), text.data(), dialect, flags);
 			if (statement || !(expected.getState() & IStatus::STATE_ERRORS))
 				std::fprintf(stderr, "Unexpected prepare success dialect=%u flags=%u: %s\n", dialect, flags, sql.c_str());
 			require(!statement && (expected.getState() & IStatus::STATE_ERRORS), "Prepare unexpectedly accepted SQL");
@@ -117,17 +137,36 @@ int main(int argc, char** argv)
 		const std::string sql = "SELECT '\\n' FROM RDB$DATABASE";
 		const std::string cast = "SELECT CAST('\\n' AS VARCHAR(8)) FROM RDB$DATABASE";
 		attach("UTF8", true);
+		reject(std::string("SELECT 1 AS \"a") + char(0) + "b\"", 4, 0, "42000");
 		require(mode(), "Initial mode is not on");
 		// Same attachment/cache: PG numbered inputs must never enter native prepares.
 		const auto input = [&](const char* text, unsigned dialect)
 		{
-			statement = attachment->prepare(&status, nullptr, 0, text, dialect, 0);
+			const auto sql = systemTable(text, dialect);
+			statement = attachment->prepare(&status, nullptr, sql.size(), sql.data(), dialect, 0);
 			metadata = statement->getInputMetadata(&status);
 			require(metadata->getCount(&status) == 1 &&
 				(metadata->getType(&status, 0) & ~1u) == SQL_LONG, "Input metadata changed");
 			metadata->release(); metadata = nullptr;
 			statement->free(&status); statement = nullptr;
 		};
+		// Same SQL text, attachment and DSQL cache; native dialects retain uppercase
+		// lookup while PG4 uses lowercase. Both rows are real, distinct objects.
+		for (const char* ddl : {"CREATE TABLE PUBLIC.NAMES_CACHE(VAL VARCHAR(10))",
+			"CREATE TABLE PUBLIC.\"names_cache\"(\"val\" VARCHAR(10))",
+			"INSERT INTO PUBLIC.NAMES_CACHE VALUES('native')",
+			"INSERT INTO PUBLIC.\"names_cache\" VALUES('pg')"})
+		{
+			transaction = attachment->startTransaction(&status, 0, nullptr);
+			attachment->execute(&status, transaction, 0, ddl, 3, nullptr, nullptr, nullptr, nullptr);
+			transaction->commit(&status); transaction = nullptr;
+		}
+		for (unsigned dialect : {1u, 2u, 3u})
+		{
+			query(4, 0, "SELECT VAL FROM NAMES_CACHE", "pg");
+			query(dialect, 0, "SELECT VAL FROM NAMES_CACHE", "native");
+			query(4, 0, "SELECT VAL FROM NAMES_CACHE", "pg");
+		}
 		const char* numbered = "SELECT CAST($1 AS INTEGER) FROM RDB$DATABASE";
 		for (unsigned dialect : {1u, 2u, 3u})
 		{
@@ -168,7 +207,9 @@ int main(int argc, char** argv)
 		transaction->commit(&status); transaction = nullptr;
 		for (unsigned dialect : {1u, 2u, 3u, 4u})
 		{
-			query(dialect, 0, "SELECT CAST('domain' AS INT8) FROM RDB$DATABASE", "domain");
+			query(dialect, 0, dialect == SQL_DIALECT_PG ?
+				"SELECT CAST('domain' AS \"INT8\") FROM RDB$DATABASE" :
+				"SELECT CAST('domain' AS INT8) FROM RDB$DATABASE", "domain");
 			if (dialect >= SQL_DIALECT_V6)
 				query(dialect, 0, "SELECT CAST('quoted' AS \"INT8\") FROM RDB$DATABASE", "quoted");
 			query(dialect, 0, "SELECT INT8 FROM (SELECT 42 AS INT8 FROM RDB$DATABASE)", "42");

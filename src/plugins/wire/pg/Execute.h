@@ -41,6 +41,7 @@ public:
 	bool discarding() const noexcept;
 	char transactionState() const noexcept { return state; }
 	void reportStrings(Protocol& protocol);
+	void initializeSearchPath();
 
 private:
 	struct Objects;
