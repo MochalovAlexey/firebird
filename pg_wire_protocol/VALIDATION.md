@@ -1,5 +1,150 @@
 # Проверки реализации
 
+## 11 ноября 2026: literal LIMIT в PG4
+
+[Задание SQL-01](1c/LIMIT_TASK.md) реализовано поверх
+`9f94454527e0ce12f1b9d2a811d353aac80bd865`, ветка `pg_wire_protocol`.
+Результат — незакоммиченный diff для review пользователя; git add/commit/amend/
+reset/checkout не выполнялись. Исходные изменения документов сохранены.
+Production ограничен Parser.cpp, Parser.h и parse.y: PG-only reserved token,
+подтверждённый flag/root guard, RowsClause в select_expr и query_primary с
+прежним DFLAG_BODY_WRAPPER. API/plugin/codecs/optimizer/streams не менялись.
+SHA256 `git diff HEAD -- src`:
+`077cb5380bac50d0be324fcec46f9914b6542a973c92b4810a76db4d451c8105`.
+
+Перед правкой на отдельном runtime `/tmp/firebird-pgwire-limit-baseline-01`
+подтверждены `SELECT 42 LIMIT 1` → 42601, `SELECT FIRST 1 42` и
+`SELECT 42 ROWS 1` → строка 42, OID 23, SELECT 1. Старый `SELECT 1 LIMIT`
+принимался как alias; новый контракт его отвергает. Baseline probe:
+`python3 -B /tmp/firebird-pgwire-limit-baseline.py`; исходный summary сохранён
+(поля `postfix` / `native_cast` унаследованы от probe предыдущего этапа, фактические
+SQL приведены в скрипте). Baseline engine SHA
+`f19fefaf762406c3629a793c650ffededd91b65293abf72ce2673554ee5dd009`.
+
+Сборка Debug/Linux/Super — `/tmp/firebird-pgwire-1c-build`, команды из этого каталога:
+
+```sh
+make -j2
+make -C gen -j2 TARGET=Debug pgwire_tests
+LD_LIBRARY_PATH=gen/Debug/firebird/lib gen/Debug/firebird/tests/pgwire_sql_test
+LD_LIBRARY_PATH=gen/Debug/firebird/lib gen/Debug/firebird/tests/pgwire_session_test
+LD_LIBRARY_PATH=gen/Debug/firebird/lib gen/Debug/firebird/tests/isql_test --log_level=message
+```
+
+Логи: `limit-build-01.log`, `limit-unit-build.log`, `limit-{sql,session,isql}-unit.log`.
+Итоговый engine SHA256
+`36de1e2dcf6320439195e79efa153b4f18acace6a1b1326ab46e0ec4d3bf4cb9`;
+PgWire SHA256 остался прежним:
+`56302018b7cec2c643d90e99570f56bbdee1c795b8bfcd730ae07a2830244ced`.
+
+Standalone btyacc до/после: `python3 /tmp/limit-grammar.py baseline` и
+`python3 /tmp/limit-grammar.py 01`, отчёты
+`/tmp/firebird-pgwire-limit-grammar-{baseline,01}/{generate.log,y.output}`.
+Оба результата — **158 shift/reduce, 11 reduce/reduce**. После удаления номеров
+states/rules и подстановки текста правил все 169 конфликтов совпадают по
+типу, rule и lookahead token; новых/исчезнувших нет. Нормализованный multiset —
+`/tmp/firebird-pgwire-limit-conflicts.json`. В generated
+`temp/Debug/dsql/parse.cpp` action `pgLimit = true` находится под `if (!yytrial)`.
+Ожидаемое количество конфликтов не менялось.
+
+| Проверка | Результат |
+|---|---|
+| Build и SQL/session/isql units | PASS: 575 / 5 / 13 |
+| `--limits`, финальный `limits-04` | PASS: 112 libpq checks, пять сравнений LIMIT/FIRST/ROWS, 9 native observations, 44 raw refusals + discard/recovery |
+| LIMIT область действия | PASS: 0/1/2/100001/MAX, integer spellings, ORDER/DISTINCT/GROUP/CTE/derived/scalar, UNION/UNION ALL и скобки |
+| LIMIT DML/Extended | PASS: INSERT SELECT commit/rollback; UPDATE/DELETE/MERGE subqueries; PQexecParams/prepare/Describe/execPrepared, NULL/text/binary, maxRows/suspension и независимые portals |
+| LIMIT границы | PASS: unsupported count/overflow/mixing/roots, отсутствие объектов/строк, Simple rollback, T→E/25P02, native1/2/3/AUTOTERM и preserved FIRST/ROWS/OFFSET…FETCH |
+| `--parameters` | PASS: 73 checks, 29 raw refusals/recovery, 13 native observations, прежний 92-input fixture |
+| `--casts` | PASS: 129 checks, 35 raw refusals/recovery, 13 native observations |
+| `--strings`, финальный `strings-02` | PASS: 156 queries, stored source/raw/native/cache, 1126 OO checks, включая LIMIT dialect/cache/quoted identifiers/on/off/offsets |
+| Simple / Extended | PASS: 12 / 16 групп, прямой C libpq, psycopg2 и raw protocol |
+
+TCP-команды из корня репозитория (все каталоги перед запуском новые):
+
+```sh
+python3 -B pg_wire_protocol/tools/pgwire_1c_smoke.py --limits --firebird-dir /tmp/firebird-pgwire-1c-build/gen/Debug/firebird --work-dir /tmp/firebird-pgwire-limit-limits-04 --libpq /lib/x86_64-linux-gnu/libpq.so.5 --timeout 120
+python3 -B pg_wire_protocol/tools/pgwire_1c_smoke.py --parameters --firebird-dir /tmp/firebird-pgwire-1c-build/gen/Debug/firebird --work-dir /tmp/firebird-pgwire-limit-parameters-01 --libpq /lib/x86_64-linux-gnu/libpq.so.5 --timeout 120
+python3 -B pg_wire_protocol/tools/pgwire_1c_smoke.py --casts --firebird-dir /tmp/firebird-pgwire-1c-build/gen/Debug/firebird --work-dir /tmp/firebird-pgwire-limit-casts-01 --libpq /lib/x86_64-linux-gnu/libpq.so.5 --timeout 120
+python3 -B pg_wire_protocol/tools/pgwire_1c_smoke.py --strings --firebird-dir /tmp/firebird-pgwire-1c-build/gen/Debug/firebird --work-dir /tmp/firebird-pgwire-limit-strings-02 --libpq /lib/x86_64-linux-gnu/libpq.so.5 --timeout 120
+python3 -B pg_wire_protocol/tools/pgwire_simple_query_smoke.py --firebird-dir /tmp/firebird-pgwire-1c-build/gen/Debug/firebird --work-dir /tmp/firebird-pgwire-limit-simple-01 --libpq-include-dir /tmp/firebird-pgwire-1c-deps/libpq-dev/usr/include/postgresql --libpq-library /lib/x86_64-linux-gnu/libpq.so.5 --driver-python /usr/bin/python3 --timeout 120
+python3 -B pg_wire_protocol/tools/pgwire_extended_query_smoke.py --firebird-dir /tmp/firebird-pgwire-1c-build/gen/Debug/firebird --work-dir /tmp/firebird-pgwire-limit-extended-01 --libpq-include-dir /tmp/firebird-pgwire-1c-deps/libpq-dev/usr/include/postgresql --libpq-library /lib/x86_64-linux-gnu/libpq.so.5 --timeout 120
+```
+
+В каждом каталоге сохранены summary.json и логи; libpq 14.24, psycopg2 из
+`/usr/bin/python3`. Итоговый 1c tool SHA256
+`fb5f22c9a73c4a1725916f1a787df058783e88ea9ce6e843e02c70df33a71df9`;
+новый `pgwire_limit_checks.py` SHA256
+`166bdefc3644e0d304d081bea866f05cc354eca92e6f5731e12c92a6435ac5ec`.
+Серверы всех перечисленных запусков, baseline и промежуточных попыток завершились
+с `exit_code=0`, `forced_kill=false`; Simple/Extended содержат по два запуска.
+Использованы собственные /tmp runtime/security DB/test DB и свободные loopback
+порты. Сервер пользователя, employee, pgwire_test и база 1С не затрагивались.
+
+Промежуточные FAIL сохранены и относятся к ожиданиям новых тестов:
+`limits-01` использовал ORDER BY ID у UNION, где native требует позицию;
+`strings-01` ожидал колонку 33 вместо фактической 35 для последней `1`;
+`limits-03` не задал alias вычисленному столбцу внутри body wrapper.
+Последнее отдельно воспроизведено embedded isql с native FETCH FIRST:
+42000 / «no column name specified … in derived table»; с `AS V` возвращается 99.
+Финальные тесты проверяют обе native границы рядом с LIMIT и используют нужные
+aliases/позиции для положительных случаев. `limits-02` также прошёл, затем
+добавлены проверки scalar/parenthesized LIMIT 0 и сравнения с native границами;
+окончательный полный набор — `limits-04`. Production после первой сборки
+для этих корректировок тестов не менялся.
+
+Psycopg 3 live — SKIP (не установлен; новые зависимости не добавлялись).
+Остальные suites вне требуемых регрессий повторно не запускались; known native
+crash repro исключены. Исторический **P3 VARCHAR FAIL** остаётся ниже без
+переоценки или модернизации P3. SQL-01 закрыт по реализации с ожиданием review;
+SQL-02 остаётся открытым. Полные selected 04/17 требуют каталогов/custom types;
+синтетические LIMIT cases не подтверждают их приёмку, открытие базы или нагрузку 1С.
+
+## 11 ноября 2026: архитектурный review postfix casts
+
+Проверен результат [POSTFIX_CAST_TASK](1c/POSTFIX_CAST_TASK.md), вошедший в
+`9f94454527e0ce12f1b9d2a811d353aac80bd865`. Замечаний к ограниченному контракту
+не обнаружено. Проверены PG-only tokens, INT8/domain isolation, общий BIGINT
+descriptor helper, precedence, подтверждённые parser actions и root guard.
+Четыре новых shift/reduce conflicts соответствуют описанным ниже продолжениям
+TIME/TIMESTAMP и BLOB; анализ и проверки обеих трактовок согласованы с diff.
+
+Review начат на незакоммиченном изменении поверх `df37bb11fa`; во время проверки
+появился commit `9f94454527`. SHA256 его production diff совпадает с рассмотренным:
+`2a8d8675f0138b80f25e4d9d63dadb3f6cca9a5359578d531fb322449f398f04`.
+Использована существующая Debug/Linux/Super сборка
+`/tmp/firebird-pgwire-1c-build/gen/Debug/firebird`, без новой сборки. SHA engine
+`f19fefaf762406c3629a793c650ffededd91b65293abf72ce2673554ee5dd009`
+и PgWire `56302018b7cec2c643d90e99570f56bbdee1c795b8bfcd730ae07a2830244ced`
+совпадают с отчётом реализации.
+
+Независимо повторены:
+
+| Проверка | Результат |
+|---|---|
+| SQL/session/isql units | PASS: 575 / 5 / 13 |
+| `--casts` | PASS: 129 libpq checks, 32 пары выражений + две пары WITH LOCK, 13 native observations, 35 raw rejections/recovery |
+| `--strings` | PASS: 156 запросов, raw/stored source/native/cache и 873 OO checks |
+
+Units запускались из tests/ указанной сборки с LD_LIBRARY_PATH на её lib/;
+TCP-команды из корня репозитория:
+
+```sh
+python3 -B pg_wire_protocol/tools/pgwire_1c_smoke.py --casts --firebird-dir /tmp/firebird-pgwire-1c-build/gen/Debug/firebird --work-dir /tmp/firebird-pgwire-cast-review-20261111-tcp --libpq /lib/x86_64-linux-gnu/libpq.so.5 --timeout 120
+python3 -B pg_wire_protocol/tools/pgwire_1c_smoke.py --strings --firebird-dir /tmp/firebird-pgwire-1c-build/gen/Debug/firebird --work-dir /tmp/firebird-pgwire-cast-strings-review-20261111-tcp --libpq /lib/x86_64-linux-gnu/libpq.so.5 --timeout 120
+```
+
+Оба summary.json: completed=true, соответствующий passed=true, exit_code=0,
+forced_kill=false, revision=9f94454527 и пустой production diff. Исходные попытки
+в каталогах с теми же именами без `-tcp` остановились до запуска сервера:
+sandbox запретил socket (PermissionError, runs=[]). Повтор с разрешённым локальным
+TCP прошёл; исходные отчёты сохранены. Рабочие серверы/базы пользователя не трогались.
+
+Psycopg 3 остаётся SKIP, полного запуска 1С нет. Остальные ранее записанные suites
+в этом review заново не запускались. Ограничения native type semantics, root
+contexts и исторического P3 сохраняются. Подготовлено отдельное
+[задание LIMIT](1c/LIMIT_TASK.md); в архитектурном диалоге изменена только
+документация, реализация следующего этапа и git commit не выполнялись.
+
 ## 10 ноября 2026: postfix casts, реализация для review
 
 Реализован ограниченный PG4 `expression::type` через прежний CastNode.

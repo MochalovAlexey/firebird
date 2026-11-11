@@ -1,5 +1,7 @@
 # Матрица совместимости PostgreSQL wire plugin
 
+Открытые задачи и отложенные части этого контракта собраны в [BACKLOG.md](BACKLOG.md).
+
 Матрица M0–M3 задаёт границы этапов. База — master Firebird 6, SQL dialect 3, UTF8, wire 3.0. Архитектура — [ARCHITECTURE.md](ARCHITECTURE.md), execution contract — [CODEX_CONTEXT.md](CODEX_CONTEXT.md). Предыдущая P5-ревизия прошла целевую Linux/Super loopback приёмку: I/T/E, native transaction/session controls и recovery. В P6 сборка, unit tests и host/startup/Simple Query/transaction/lifecycle/native регрессии прошли. **Известное ограничение native baseline: READ COMMITTED READ CONSISTENCY + AUTO COMMIT не входит в подтверждённую совместимость; SNAPSHOT AUTO COMMIT проверен.** Целевой P6/M1 Linux/Super принят с известными native ограничениями. Shutdown во время ON CONNECT остаётся отдельным исключением: native Debug assertion воспроизводится также без wire endpoints. P7 Extended Query прошёл целевую Linux/Super приёмку: 16 групп. P8 codecs прошли целевую Linux/Super приёмку: восемь групп. P9 прошёл 17 групп с реальными C libpq, raw-wire и ограниченным профилем Psycopg 3; целевой M2 Linux/Super для совместимого SQL и реализованных codecs принят. Следующий этап — P10. Результаты и границы покрытия — в [VALIDATION.md](VALIDATION.md). TLS, Windows и другие server modes требуют отдельной реализации и приёмки.
 
 ## Срезы записанного профиля 1С
@@ -44,7 +46,31 @@ Native1/2/3/AUTOTERM, PSQL и DDL START WITH сохранены. Нет ново
 psycopg2 transactional mode и connection context. Контракт и границы — в
 [1c/README.md](1c/README.md); результаты — в [VALIDATION.md](VALIDATION.md).
 Это не полная PG transaction compatibility или запуск 1С; остальные options,
-default_transaction_*, произвольные `$n`, custom cast targets, LIMIT и каталоги остаются за границей.
+default_transaction_*, произвольные `$n`, custom cast targets, общий LIMIT/OFFSET и каталоги остаются за границей.
+
+## Literal LIMIT в PG4
+
+`SELECT … [ORDER BY …] LIMIT n` поддержан для integer literal 0…2147483647
+через штатный NUMBER32BIT (включая 0x/0o/0b, `_` и ведущие нули). RowsClause
+ограничивает готовый результат своего SELECT уровня: DISTINCT/GROUP/ORDER,
+весь внешний UNION либо отдельный operand/subquery в скобках. Native UNION
+сортируется по позиции колонки. LIMIT 0 сохраняет metadata и tag `SELECT 0`.
+Extended maxRows/suspension не сбрасывает SQL count; portals независимы.
+
+Count ALL/NULL/параметры/выражения/скобки/знаки/decimal/exponent, PG OFFSET,
+`LIMIT offset,count` и выход за диапазон — parser error. FIRST/SKIP+LIMIT
+на одном уровне — прежняя native ошибка, на разных — разрешены. ROWS и
+OFFSET…FETCH отдельно работают, смешение с LIMIT на одном уровне не добавлено.
+LIMIT reserved только в PG4; native1/2/3 сохраняют имя LIMIT, quoted `"LIMIT"`
+остаётся идентификатором в dialect3/4.
+
+Разрешены только корневые SELECT/INSERT/UPDATE/DELETE/MERGE с SELECT subqueries/CTE;
+UPDATE/DELETE suffix LIMIT отсутствует. Исключённые roots (DDL/CTAS/VIEW/PSQL,
+BLOCK/CALL/PROCEDURE/USING/UPDATE OR INSERT) с распознанным LIMIT — 0A000 до DSQL.
+Неверная грамматика — syntax error; текст LIMIT в strings/comments/quoted identifiers
+guard не включает. API, plugin, codecs, optimizer и native stream не менялись.
+Точный контракт — [1c/README](1c/README.md), проверки — [VALIDATION](VALIDATION.md).
+SQL-01 закрыт по реализации; SQL-02, полные selected 04/17 и запуск 1С остаются открыты.
 
 ## Postfix casts в PG4
 
@@ -216,6 +242,7 @@ EMPTY определяется ограниченным lexer только дл�
 | Named/unnamed statements и portals | Нет | Нет | Да, с лимитами и проверенным lifetime | Да |
 | Bind с native `?` либо zero parameters | Нет | Нет | Да, по engine metadata | Да |
 | Postfix casts `::` | Исторически parser error | Исторически parser error | PG4: native non-array builtin targets + postfix-only INT8, только корневые SELECT/DML | Custom targets/сохранённый SQL требуют отдельного этапа |
+| Literal `LIMIT n` | Исторически parser error | Исторически parser error | PG4 SELECT tail, integer 0…2147483647 в корневых SELECT/DML; native RowsClause | Общий LIMIT/OFFSET и сохранённый SQL требуют отдельного этапа |
 | SQL `$n` | Исторически parser error | Исторически parser error | PG4: только последовательные уникальные inputs в SELECT/INSERT/UPDATE/DELETE/MERGE | Произвольная нумерация требует отдельного этапа |
 | I/T/E, native SET TRANSACTION/COMMIT/ROLLBACK | Implicit Query transaction | Да, plugin-local controls после engine prepare | Да, включая implicit cycle до Sync | Да |
 | Native SAVEPOINT/ROLLBACK TO/RELEASE и RETAIN | Не критерий smoke | Реальный effect и state policy | Тот же контракт | Тот же контракт |

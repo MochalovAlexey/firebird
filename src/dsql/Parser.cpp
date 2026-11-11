@@ -130,13 +130,14 @@ DsqlStatement* Parser::parse()
 	}
 
 	// Check the original root before DSQL rewrites parameters or reparses stored SQL.
-	if ((numberedParameters || postfixCasts) && !(nodeIs<SelectNode>(parsedDmlNode) ||
+	if ((numberedParameters || postfixCasts || pgLimit) && !(nodeIs<SelectNode>(parsedDmlNode) ||
 		nodeIs<StoreNode>(parsedDmlNode) || nodeIs<ModifyNode>(parsedDmlNode) ||
 		nodeIs<EraseNode>(parsedDmlNode) || nodeIs<MergeNode>(parsedDmlNode)))
 	{
 		ERRD_post(Arg::Gds(isc_wish_list) << Arg::Gds(isc_random) <<
 			(numberedParameters ? "Numbered parameters require SELECT, INSERT, UPDATE, DELETE or MERGE" :
-				"Postfix casts require SELECT, INSERT, UPDATE, DELETE or MERGE"));
+				postfixCasts ? "Postfix casts require SELECT, INSERT, UPDATE, DELETE or MERGE" :
+				"LIMIT requires SELECT, INSERT, UPDATE, DELETE or MERGE"));
 	}
 
 	transformString(lex.start, lex.end - lex.start, transformedString);
@@ -1450,7 +1451,9 @@ int Parser::yylexAux()
 		lex.last_token_bk = lex.last_token;
 		lex.line_start_bk = lex.line_start;
 		lex.lines_bk = lex.lines;
-		// INT8 remains an identifier everywhere except the PG postfix cast target.
+		// LIMIT is reserved only in PG; INT8 remains a non-reserved postfix type alias.
+		if (pgDialect && str == "LIMIT")
+			return TOK_LIMIT;
 		return pgDialect && str == "INT8" ? TOK_INT8 : TOK_SYMBOL;
 	}
 

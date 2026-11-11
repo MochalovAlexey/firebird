@@ -149,6 +149,18 @@ int main(int argc, char** argv)
 				"SELECT 42 FROM RDB$DATABASE INTO :V; SUSPEND; END", "42");
 			query(4, 0, postfix, "42");
 		}
+		const char* limited = "SELECT 42 FROM RDB$DATABASE LIMIT 1";
+		for (unsigned dialect : {1u, 2u, 3u})
+		{
+			query(4, 0, limited, "42");
+			reject(limited, dialect, 0, "42000", 1, std::strlen(limited));
+			query(dialect, 0, "SELECT FIRST 1 42 AS LIMIT FROM RDB$DATABASE", "42");
+			query(dialect, 0, "SELECT LIMIT FROM (SELECT 42 AS LIMIT FROM RDB$DATABASE) ROWS 1", "42");
+			query(4, 0, limited, "42");
+		}
+		for (unsigned dialect : {3u, 4u})
+			query(dialect, 0, "SELECT \"LIMIT\" FROM (SELECT 42 AS \"LIMIT\" FROM RDB$DATABASE)", "42");
+		input("USING (A INTEGER=?) DO SELECT FIRST 1 :A FROM RDB$DATABASE", SQL_DIALECT_PG);
 		// The alias applies only after ::; ordinary CAST still resolves a domain.
 		transaction = attachment->startTransaction(&status, 0, nullptr);
 		attachment->execute(&status, transaction, 0, "CREATE DOMAIN INT8 AS VARCHAR(8)", 3,
@@ -169,6 +181,12 @@ int main(int argc, char** argv)
 			"Postfix changed the native VARCHAR default length");
 		for (unsigned flags : {ON, OFF})
 		{
+			reject("SELECT 42 FROM RDB$DATABASE LIMIT\n  -1", 4, flags, "42000", 2, 3);
+			reject("SELECT 42 FROM RDB$DATABASE LIMIT 1\n  @", 4, flags, "42000", 2, 3);
+			reject("SELECT 'LIMIT 1', q'{LIMIT 1}' FROM RDB$DATABASE LIMIT 1\n  @", 4, flags, "42000", 2, 3);
+			query(4, flags, "SELECT q'{LIMIT 1}' AS \"LIMIT\" /* LIMIT 1 */ FROM RDB$DATABASE", "LIMIT 1");
+			query(4, flags, "EXECUTE BLOCK RETURNS(V VARCHAR(8)) AS BEGIN "
+				"V='LIMIT 1'; /* LIMIT 1 */ SUSPEND; END", "LIMIT 1");
 			reject("SELECT\n CAST($1foo AS INTEGER) FROM RDB$DATABASE", 4, flags, "42000", 2, 7);
 			reject("SELECT\n CAST($0 AS INTEGER) FROM RDB$DATABASE", 4, flags, "42P02", 2, 7);
 			reject("SELECT\n CAST($32768 AS INTEGER) FROM RDB$DATABASE", 4, flags, "54000", 2, 7);

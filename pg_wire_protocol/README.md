@@ -1,5 +1,8 @@
 # Wire-протоколы через плагины Firebird 6
 
+Что ещё нужно доделать и проверить: [единый BACKLOG](BACKLOG.md).
+Порядок этапов — [PLAN](PLAN.md), фактические проверки — [VALIDATION](VALIDATION.md).
+
 Цель — подключать PostgreSQL-драйверы, включая libpq, по TCP непосредственно к процессу `firebird`. Запросы выполняет локальный движок Firebird. Родной сетевой протокол сохраняет существующую реализацию и работает независимо от дополнительных протоколов.
 
 Дополнительные протоколы реализуются загружаемыми библиотеками `.so`/`.dll`; первый плагин — `PgWire`. Ядро управляет listeners, соединениями, workers, authentication и локальным attachment. Плагин реализует framing, сообщения, состояние своего протокола и codecs. Архитектура и конфигурация определены в [ARCHITECTURE.md](ARCHITECTURE.md).
@@ -56,6 +59,17 @@ SQL использует штатные engine timeouts: в firebird.conf Statem
 EMPTY определяется ограниченным lexer только для нулевой строки, whitespace и полностью закрытых comments без SQL tokens. Даже такой текст передаётся в обычный engine prepare неизменённым. Только сочетание этого признака с engine syntax error 42601 после успешного cleanup преобразуется в EmptyQueryResponse; permission, cancellation, resource и другие ошибки не маскируются. Незаконченные строка/comment/statement и отдельный `;` остаются parser errors. Native parser diagnostics и `isql -autoterm` не меняются.
 
 P8 добавляет точные text/binary NUMERIC до native INT128 (NUMERIC/DECIMAL до 38 цифр), IEEE FLOAT/DOUBLE и даты/время без TZ. Binary NUMERIC использует base-10000, даты — дни от 2000-01-01, время/timestamp — микросекунды; native bytes не передаются напрямую. Даты ограничены 0001..9999, время имеет точность 100 мкс; непредставимый ввод получает 22008. `integer_datetimes=on`, TimeZone не объявляется. Подробные диапазоны — в [COMPATIBILITY.md](COMPATIBILITY.md).
+
+PG4 также поддерживает `SELECT … [ORDER BY …] LIMIT n`: только integer literal
+0…2147483647 со штатными integer spellings. Используется RowsClause и native
+исполнение с правильными уровнями UNION/subqueries; LIMIT 0 сохраняет metadata.
+Корневые операторы — SELECT/INSERT/UPDATE/DELETE/MERGE; в последних LIMIT допустим
+только внутри SELECT. LIMIT reserved только в PG4. ALL/NULL/count-параметры,
+выражения/знаки, PG OFFSET и смешение с ROWS/OFFSET…FETCH не добавлены;
+FIRST/SKIP+LIMIT на одном уровне получает прежнюю native ошибку.
+DDL/PSQL и прочие исключённые roots с настоящим LIMIT дают 0A000 до DSQL.
+Точный контракт и проверки — [1c/README](1c/README.md) и [VALIDATION](VALIDATION.md).
+SQL-01 закрыт по реализации и оставлен на review; SQL-02 остаётся открытым.
 
 ## Extended Query P7
 

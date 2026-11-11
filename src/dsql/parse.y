@@ -745,6 +745,7 @@ using namespace Firebird;
 %token <uintVal> NUMBERED_PARAMETER
 %token DOUBLE_COLON
 %token <metaNamePtr> INT8
+%token LIMIT
 
 // precedence declarations for expression evaluation
 
@@ -6830,7 +6831,7 @@ optimize_mode
 
 %type <selectExprNode> select_expr
 select_expr
-	: with_clause select_expr_body order_clause_opt rows_clause
+	: with_clause select_expr_body order_clause_opt select_rows_clause
 		{
 			SelectExprNode* node = $$ = newNode<SelectExprNode>();
 			node->querySpec = $2;
@@ -6838,21 +6839,37 @@ select_expr
 			node->rowsClause = $4;
 			node->withClause = $1;
 		}
-	| with_clause select_expr_body order_clause_opt result_offset_clause fetch_first_clause
+	;
+
+%type <rowsClause> select_rows_clause
+select_rows_clause
+	: rows_clause
+	| query_limit_clause
+	;
+
+// Also used by parenthesized query_primary; native ROWS remains separate.
+%type <rowsClause> query_limit_clause
+query_limit_clause
+	: result_offset_clause fetch_first_clause
 		{
-			SelectExprNode* node = $$ = newNode<SelectExprNode>();
-			node->querySpec = $2;
-			node->orderClause = $3;
-
-			if ($4 || $5)
+			$$ = nullptr;
+			if ($1 || $2)
 			{
-				RowsClause* rowsNode = newNode<RowsClause>();
-				rowsNode->skip = $4;
-				rowsNode->length = $5;
-				node->rowsClause = rowsNode;
+				$$ = newNode<RowsClause>();
+				$$->skip = $1;
+				$$->length = $2;
 			}
+		}
+	| pg_limit_clause
+	;
 
-			node->withClause = $1;
+%type <rowsClause> pg_limit_clause
+pg_limit_clause
+	: LIMIT long_integer
+		{
+			pgLimit = true;
+			$$ = newNode<RowsClause>();
+			$$->length = MAKE_const_slong($2);
 		}
 	;
 
@@ -6952,22 +6969,16 @@ query_term
 query_primary
 	: query_spec
 		{ $$ = $1; }
-	| '(' select_expr_body order_clause_opt result_offset_clause fetch_first_clause ')'
+	| '(' select_expr_body order_clause_opt query_limit_clause ')'
 		{
-			if ($3 || $4 || $5)
+			if ($3 || $4)
 			{
 				const auto selectExpr = newNode<SelectExprNode>();
 				selectExpr->dsqlFlags |= RecordSourceNode::DFLAG_DERIVED;
 				selectExpr->querySpec = $2;
 				selectExpr->orderClause = $3;
 
-				if ($4 || $5)
-				{
-					const auto rowsNode = newNode<RowsClause>();
-					rowsNode->skip = $4;
-					rowsNode->length = $5;
-					selectExpr->rowsClause = rowsNode;
-				}
+				selectExpr->rowsClause = $4;
 
 				const auto rse = newNode<RseNode>();
 				rse->dsqlFlags |= RecordSourceNode::DFLAG_BODY_WRAPPER;

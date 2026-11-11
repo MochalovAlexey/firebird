@@ -1,5 +1,8 @@
 # Записанный профиль 1С: этапы совместимости
 
+Незавершённые этапы, ограничения частичных реализаций и пробелы приёмки ведутся
+в общем [BACKLOG](../BACKLOG.md). Обновлять его после каждого этапа и review.
+
 Задание: `/home/aleksey/dev/1c/CODEX_PGWIRE_1C_TASK.md`, 9 ноября 2026 года.
 Исходная ревизия: `0e505759d0deb1693d912bbc9fee978a55d1e1f0`.
 Корпус: `/home/aleksey/dev/1c/captures/20261109T105635Z`, 24 selected examples
@@ -38,7 +41,7 @@ context keys, счётчиков и реестров нет. Добавлена 
 PgWire выбирает dialect 4 при Simple Query, Extended Parse и повторной подготовке
 portal. Этот режим включает PG-дополнения грамматики; типы и арифметика сохраняют семантику dialect 3. Обычные одинарные строки учитывают новую настройку; native Q-строки и двойные кавычки сохраняются. Поддержаны `SELECT` без `FROM` и описанный ниже
 фиксированный профиль `lc_messages`/`client_encoding`, а также изменяемый `standard_conforming_strings`. Последовательные типизированные `$1` … `$n` поддержаны в ограниченном контракте ниже;
-Postfix `::` поддержан в ограниченном контракте ниже; LIMIT пока отвергается; формы PG BEGIN без опций поддержаны отдельно ниже.
+Postfix `::`, literal `LIMIT n` и PG BEGIN без опций поддержаны в ограниченных контрактах ниже.
 
 Ключ штатного statement cache содержит исходный клиентский dialect и эффективный режим строк: PG и
 native планы не смешиваются. Обычные native dialects 1/2/3 по-прежнему требуют
@@ -151,6 +154,57 @@ Native dialects 1/2/3 не принимают `::`, но сохраняют CAST
 [precedence](https://www.postgresql.org/docs/18/sql-syntax-lexical.html#SQL-PRECEDENCE),
 [integer aliases](https://www.postgresql.org/docs/18/datatype-numeric.html#DATATYPE-INT).
 
+## LIMIT с целочисленным литералом: первый срез
+
+По [LIMIT_TASK](LIMIT_TASK.md), 11 ноября 2026 года, PG4 принимает SELECT-tail
+`LIMIT n` после необязательного ORDER BY. Count — только `long_integer` /
+NUMBER32BIT, значение 0…2147483647. Сохраняются штатные integer spellings:
+ведущие нули, 0x/0o/0b и `_`; отдельного scanner или narrowing нет.
+
+```sql
+SELECT 42 LIMIT 0;
+SELECT ID FROM LIMIT_ROWS ORDER BY ID LIMIT 2;
+SELECT FILENAME FROM LIMIT_FILES WHERE FILENAME=$1 LIMIT 1;
+INSERT INTO LIMIT_COPY(ID) SELECT ID FROM LIMIT_ROWS ORDER BY ID LIMIT 2;
+```
+
+Ограничивается готовый результат своего SELECT уровня после DISTINCT/GROUP/ORDER.
+Внешний LIMIT относится ко всему UNION/UNION ALL, внутренний в скобках — только
+к своему operand/subquery. Native правила UNION ORDER BY сохраняются: позиция
+колонки, например `ORDER BY 1`; вычисленным столбцам в body wrapper нужны aliases.
+Без ORDER BY конкретные строки/порядок не обещаются.
+LIMIT 0 сохраняет metadata, не выдаёт DataRow и завершает `SELECT 0`.
+Обычные Bind-параметры вне count работают по прежнему контракту. Execute maxRows
+приостанавливает курсор; SQL LIMIT сохраняется между Execute, счётчики разных
+portals независимы.
+
+LIMIT — reserved keyword только в PG4: `SELECT 1 LIMIT` является ошибкой.
+Native1/2/3 сохраняют идентификатор LIMIT; quoted `"LIMIT"` работает в dialect3/4.
+ALL/NULL, `$n`/`?` в count, выражения/скобки/знаки, decimal/exponent literals,
+числа вне диапазона, PG OFFSET и `LIMIT offset,count` отвергаются parser.
+FIRST/SKIP с LIMIT на одном уровне получает прежний `isc_dsql_firstskip_rows`;
+разные уровни допустимы. Native ROWS и OFFSET…FETCH отдельно сохраняются,
+их смешение с LIMIT на одном уровне — syntax error.
+
+Корневые операторы — SELECT/INSERT/UPDATE/DELETE/MERGE с SELECT subqueries/CTE.
+Суффикс LIMIT у UPDATE/DELETE не добавлен. DDL/CTAS/VIEW/stored PSQL/BLOCK,
+CALL/PROCEDURE/USING/UPDATE OR INSERT с распознанным LIMIT получают 0A000
+до DSQL; неверная грамматика остаётся syntax error. Строки/Q-strings/comments
+и quoted identifiers guard не включают; native FIRST/ROWS в сохранённом SQL
+продолжают работать.
+
+Production изменён только в Parser.cpp/h и parse.y: PG token, подтверждённый
+parser flag, прежний root guard и RowsClause на обоих путях SELECT, включая
+DFLAG_BODY_WRAPPER у query_primary. Исполнение использует прежние PASS1_limit,
+rse_first и FirstRowsStream; plugin, API, metadata, codecs и optimizer не менялись.
+`pgwire_1c_smoke.py --limits`, OO helper в `--strings` и обязательные регрессии
+прошли; команды и evidence — в [VALIDATION](../VALIDATION.md).
+
+SQL-01 закрывает только этот literal-срез; SQL-02 остаётся открытым. NULL count
+нельзя просто передать native stream: там он означает ноль строк. Исходные
+selected 04/17 ещё требуют каталогов/custom types; их полная приёмка и открытие
+базы 1С не заявляются.
+
 ## Установка на отдельной тестовой базе
 
 1. Пересобрать сервер и плагины текущей ветки вместе. Использовать отдельную
@@ -194,7 +248,13 @@ review и повторную целевую приёмку, см. VALIDATION.
 Реализован [postfix cast expression::type](POSTFIX_CAST_TASK.md) через
 существующий CastNode и native types, с INT8 → BIGINT только в postfix target.
 Первый срез ограничивается SELECT/DML без сохранения PG SQL в metadata.
-Изменения и целевые проверки оставлены на review; контракт описан выше.
+Ревизия `9f94454527` прошла архитектурный review и повторную целевую приёмку;
+контракт описан выше, результаты — в VALIDATION.
+
+Реализован [LIMIT с целочисленным литералом](LIMIT_TASK.md) через RowsClause и
+штатное исполнение: count 0…2147483647, без PG OFFSET/ALL/NULL/count-параметров.
+SQL-01 закрыт по проверкам реализации, изменения ожидают review пользователя;
+расширенный LIMIT/OFFSET остаётся открытым SQL-02 в [BACKLOG](../BACKLOG.md).
 
 Срез [фиксированной диагностики](FIXED_DIAGNOSTICS_TASK.md) реализован через
 существующий SetPgSessionNode: только `escape_string_warning=off` и
@@ -204,7 +264,7 @@ review и повторную целевую приёмку, см. VALIDATION.
 | Группа исходного задания | Текущее состояние / что требуется |
 |---|---|
 | 1. Начало сессии | SELECT без FROM, ограниченная identity-функция, последовательные скрипты и все семь startup SET принимаются; реальные эффекты enable_mergejoin, cpu_operator_cost и lock_timeout отложены |
-| 2. SQL и параметры | Simple Query выполняет скрипты совместимого SQL; PG BEGIN без опций и последовательные типизированные `$n` поддержаны; postfix `::` добавлен для native builtin types; произвольная нумерация и LIMIT ещё не реализованы |
+| 2. SQL и параметры | Simple Query выполняет скрипты совместимого SQL; PG BEGIN без опций и последовательные типизированные `$n` поддержаны; postfix `::` добавлен для native builtin types; literal LIMIT 0…2147483647 поддержан; произвольная нумерация и общий LIMIT/OFFSET ещё не реализованы |
 | 3. Открытие базы | pg_class/pg_database/visibility и служебные таблицы 1С ещё не реализованы; нужны настоящие metadata и данные |
 | 4. Типы и функции | bytea, mchar/mvarchar и BINROWVER ещё не реализованы; сначала измерить форматы/семантику, затем использовать BLOB API, intl/collations и SQL/PSQL |
 | 5. Транзакции/конкуренция | PG BEGIN без опций использует реальные READ CONSISTENCY транзакции; native controls сохраняются; advisory locks и PG timeout semantics ещё не реализованы |
@@ -264,7 +324,7 @@ off и автоматический BEGIN psycopg2. Результаты и ог
 Это ограниченный контракт [BEGIN](https://www.postgresql.org/docs/18/sql-begin.html)
 и [transaction flow](https://www.postgresql.org/docs/18/protocol-flow.html#PROTOCOL-FLOW-MULTI-STATEMENT).
 Полная эквивалентность конкурентного DML PostgreSQL не заявляется. Произвольные `$n`, custom cast targets,
-LIMIT, PG transaction options/default_transaction_*, каталоги и запуск 1С
+общий LIMIT/OFFSET, PG transaction options/default_transaction_*, каталоги и запуск 1С
 остаются отдельными задачами. Whole-query preparse отложен: ранний COMMIT
 сохраняется при поздней syntax error. Прежние native defects не исправлялись.
 
@@ -487,7 +547,7 @@ assertion на текущей и предыдущей сборках; прове
 сериализации и описан в архитектурном review в VALIDATION.
 
 Не реализованы E-literals, dollar quoting, SET LOCAL/SESSION, DEFAULT, SHOW,
-RESET parameter, новые startup options, произвольные $n, custom cast targets и LIMIT. Whole-query preparse
+RESET parameter, новые startup options, произвольные $n, custom cast targets и общий LIMIT/OFFSET. Whole-query preparse
 по-прежнему отложен. Полный startup batch и запуск 1С/Гилёва этим срезом не доказаны.
 
 ## Решение от 9 ноября 2026: последовательные скрипты, остановка на ошибке

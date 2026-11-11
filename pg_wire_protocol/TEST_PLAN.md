@@ -4,6 +4,40 @@
 
 Python scaffold мигрирован под текущий контракт: 58 live cases прошли в P6. Начальные host tests расположены в src/common/tests/WireProtocolConfigTest.cpp, src/remote/server/wire/tests и isolated tools harness. P2/P3/P4 приёмка сохранена в VALIDATION. Предыдущая P5-ревизия прошла целевую Linux/Super приёмку с native ограничением READ CONSISTENCY + AUTO COMMIT; P6 повторил сборку, unit tests и целевые регрессии по [VALIDATION.md](VALIDATION.md). Целевой P6/M1 Linux/Super принят с известными native ограничениями, включая отдельно исключённый ON CONNECT shutdown. P7 Extended Query прошёл целевую Linux/Super приёмку: 16 групп. P8 codecs прошли целевую Linux/Super приёмку: восемь групп. P9 прошёл 17 групп с реальными C libpq, raw-wire и ограниченным профилем Psycopg 3; целевой M2 Linux/Super для совместимого SQL и реализованных codecs принят. Следующий этап — P10. PASS относится к зафиксированным cases/fixtures, а наличие строки в полной матрице не означает её прохождения.
 
+## Подэтап 1С: literal LIMIT
+
+`pgwire_1c_smoke.py --limits` / `pgwire_limit_checks.py` расширяют существующий
+libpq/raw/native harness, OO checks — в прежнем `--strings`. Fixtures: четыре
+строки и отдельная таблица для DML; большие count не требуют больших данных.
+
+- Simple 0/1/2/100001/MAX: точные rows/OIDs/tags как FIRST/ROWS, no-FROM/empty,
+  leading zero, decimal/non-decimal integer spellings и `_`.
+- ORDER по уникальному ID, DISTINCT, GROUP/aggregate, CTE, derived/scalar; внешний
+  UNION/UNION ALL limit и parenthesized operands с различимыми результатами,
+  включая LIMIT 0 без ORDER. Native UNION ORDER BY position сохраняется.
+- INSERT SELECT с commit/rollback, SELECT LIMIT внутри UPDATE/DELETE/MERGE,
+  значения и число строк проверяет отдельный native observer.
+- PQexecParams, PQprepare/Describe/execPrepared: WHERE `$1` + literal LIMIT,
+  повторный Bind, NULL/text/binary, прежний `?` и сочетание `$1::INTEGER`.
+  Raw maxRows < SQL count, suspension/resume, независимые portals и LIMIT 0 T/C.
+- Неподдержанные counts, overflow/non-decimal boundary/огромное число, incomplete
+  и repeated LIMIT, `SELECT 1 LIMIT`, PG OFFSET и ROWS/OFFSET…FETCH mixing;
+  FIRST/SKIP на том же/разных уровнях, запрет UPDATE/DELETE suffix LIMIT.
+  После каждого raw отказа queued DML отбрасывается до Sync, SELECT работает.
+  Simple прекращает скрипт и откатывает текущий implicit сегмент; explicit T→E.
+- CTAS/CTE/VIEW/PROCEDURE/BLOCK/local function/CALL/PROCEDURE/USING/UPDATE OR INSERT
+  с LIMIT дают 0A000 до эффектов; observer проверяет отсутствие объектов/строк.
+  Native FIRST/ROWS и текст LIMIT в stored source сохраняются.
+- Native1/2/3 identifier LIMIT, AUTOTERM recovery и прежние row limits;
+  quoted LIMIT в 3/4, PG→native→PG на одном attachment/cache, strings/Q/comments
+  при on/off и исходные offsets. LIMIT flag устанавливается только под !yytrial.
+
+Baseline 158 shift/reduce + 11 reduce/reduce; после изменения те же конфликтующие
+правила/токены и количество. Обязательные регрессии: SQL/session/isql units,
+--parameters, --casts, --strings, Simple/Extended. Known native crash repro не
+запускать. SQL-02, полный selected 04/17 и открытие 1С этим не принимаются;
+исторический P3 VARCHAR FAIL сохраняется. Результаты — в VALIDATION.
+
 ## Подэтап 1С: postfix casts
 
 `pgwire_1c_smoke.py --casts` / `pgwire_cast_checks.py` используют прежний

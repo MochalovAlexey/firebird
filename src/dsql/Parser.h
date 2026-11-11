@@ -407,6 +407,7 @@ private:
 	bool anonymousParameters = false;
 	bool numberedParameters = false;
 	bool postfixCasts = false;
+	bool pgLimit = false;
 
 	dsql_fld* makeBigIntField();
 
