@@ -125,8 +125,27 @@ DISTINCT запрещает DML даже владельцу; PUBLIC получа
 Metadata остаётся BIGINT/VARCHAR (wire20/1043), binary ID — 8 bytes, labels —
 OID/NSPNAME. Все registry rows доступны независимо от USAGE их схем.
 PG oid/name/regnamespace, PG/native name resolution, nspowner/nspacl,
-pg_class/visibility/temp namespace и selected04 остаются открытыми.
-APP-11 оставлен на review; [установка и проверки](1c/README.md#публичное-представление-namespace-ids-app-11).
+полный pg_class/visibility/temp namespace и selected04 остаются открытыми.
+APP-11 прошёл review и независимую приёмку в `a3e3c80123`;
+[установка и проверки](1c/README.md#публичное-представление-namespace-ids-app-11).
+
+## Постоянные таблицы и views в PG_CLASS
+
+[APP-12](1c/CLASS_CATALOG_TASK.md) реализован и оставлен на review:
+[отдельный SQL installer](1c/sql/install_class_catalog.sql) создаёт read-only
+PG_CATALOG.PG_CLASS(OID, RELNAME, RELNAMESPACE, RELKIND) над RDB$RELATIONS и
+PG_NAMESPACE. OID = native relation ID + 1, RELNAME — точное native имя,
+RELNAMESPACE — прежний namespace ID, kind `r`/`v`; wire types 20/1043/20/1043.
+Новых allocator/registry/hook и изменений C++/API нет.
+
+Включены только schema-level persistent tables (type 0/legacy NULL) и views (1),
+в том числе SYSTEM и служебные. External/virtual/GTT/local/declared/package temporary
+tables, indexes/sequences исключены. Нет фильтра по SELECT/USAGE/search_path.
+IDs стабильны при ALTER, но native DROP/wrap допускает reuse; restore не проверен.
+Installer требует APP-10/11, сохраняет bootstrap и отказывается при существующем
+PG_CLASS. Целевые native/libpq проверки прошли; [контракт и установка](1c/README.md#постоянные-таблицы-и-представления-в-pg_class-app-12).
+PG/native names/regnamespace, visibility/temp namespace, полный catalog и
+selected04/10/11 остаются открытыми; APP-01/03/04/06 этим срезом не закрыты.
 
 ## Клиентская приёмка P9/M2
 

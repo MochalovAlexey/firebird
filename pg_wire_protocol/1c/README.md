@@ -326,7 +326,7 @@ physical layout по фактическим длинам Bind. Engine созда
 |---|---|
 | 1. Начало сессии | SELECT без FROM, ограниченная identity-функция, последовательные скрипты и все семь startup SET принимаются; реальные эффекты enable_mergejoin, cpu_operator_cost и lock_timeout отложены |
 | 2. SQL и параметры | Simple Query выполняет скрипты совместимого SQL; PG BEGIN без опций и последовательные типизированные `$n` поддержаны; postfix `::` добавлен для native builtin types; literal LIMIT 0…2147483647 поддержан; произвольная нумерация и общий LIMIT/OFFSET ещё не реализованы |
-| 3. Открытие базы | pg_class/pg_database/visibility и служебные таблицы 1С ещё не реализованы; нужны настоящие metadata и данные |
+| 3. Открытие базы | APP-12 даёт pg_class для постоянных таблиц/views; полный catalog, pg_database/visibility и служебные таблицы 1С ещё требуют реализации и настоящих данных |
 | 4. Типы и функции | Binary BLOB output выдаётся как bytea; input до 65533 decoded bytes поддержан. Большие input и SQL bytea type/casts/storage/index semantics не добавлены. mchar/mvarchar, regnamespace и BINROWVER остаются открытыми |
 | 5. Транзакции/конкуренция | PG BEGIN без опций использует реальные READ CONSISTENCY транзакции; native controls сохраняются; advisory locks и PG timeout semantics ещё не реализованы |
 | 6. Временные объекты/нагрузка | PG temporary DDL, serial4, ANALYZE и fasttrun_ext ещё не реализованы; нужен эталон их эффектов |
@@ -338,14 +338,81 @@ physical layout по фактическим длинам Bind. Engine созда
 каталогов, selected04 ещё не выполняется. Native DDL под пользовательским savepoint
 запрещён (0A000); проверены отказ и ROLLBACK TO recovery без изменения registry.
 
-Реализован и оставлен на review [APP-11: публичный pg_namespace](NAMESPACE_CATALOG_TASK.md).
+Реализован [APP-11: публичный pg_namespace](NAMESPACE_CATALOG_TASK.md);
+`a3e3c80123` прошёл review без замечаний и независимую приёмку.
 SQL-view OID/NSPNAME над этим registry и отдельная установка; имена точные
 native, metadata BIGINT/VARCHAR (wire20/1043). Это ограниченная проекция реальных
 данных, не полноценные PG oid/name/regnamespace. Их типизацию и name resolution,
-pg_class/visibility/temp namespace предстоит согласовать отдельно. Metadata
+полный pg_class/visibility/temp namespace предстоит согласовать отдельно. Metadata
 schema/relation/field не заменяет type identity: UNION может сохранить origin
 первой ветви при общем BIGINT. C++/API/codecs в APP-11 не меняются. Путь до первого
 запуска 1С/Гилёва — в [PROGRESS](PROGRESS.md); сквозной запуск пока не принят.
+
+Реализован и оставлен на review [APP-12: pg_class для постоянных таблиц/views](CLASS_CATALOG_TASK.md).
+Четыре поля читаются из SYSTEM.RDB$RELATIONS с JOIN PG_NAMESPACE. OID — native
+relation ID+1; новый allocator/registry/hook не нужен. Сохраняются точные native
+имена и BIGINT/VARCHAR metadata, native reuse после DROP/wrap допустим.
+Этот независимый срез предшествует решению name resolution/regnamespace;
+полный pg_class, visibility и temporary objects пока не реализуются.
+
+## Постоянные таблицы и представления в PG_CLASS: APP-12
+
+[install_class_catalog.sql](sql/install_class_catalog.sql) устанавливает только
+PG_CATALOG.PG_CLASS(OID, RELNAME, RELNAMESPACE, RELKIND). Предусловия: исправные
+APP-10/11 с активным namespace hook, запуск владельцем/администратором без
+конкурентного DDL. PG_CATALOG и её USAGE уже обеспечены APP-11. Пример с паролем,
+передаваемым обычными средствами native isql:
+
+```sh
+isql -user OWNER -input pg_wire_protocol/1c/sql/install_class_catalog.sql DATABASE_ALIAS
+```
+
+SET BAIL ON, SET AUTODDL OFF, квалифицированный CREATE VIEW, GRANT SELECT TO PUBLIC
+и один COMMIT. Работа не зависит от search_path; schema, APP-10/11 и compat.sql
+не переустанавливаются. Повтор или чужой PG_CLASS дают явный отказ без замены.
+Ошибка до COMMIT откатывает view/grants, сохраняя bootstrap, namespace mapping
+и counter; gap штатного relation allocator допустим. Отсутствие зависимости —
+обычная SQL error. Repair/upgrade и проверка отключённого hook не добавлены.
+
+| Поле | Значение | Native / wire type |
+|---|---|---|
+| OID | RDB$RELATION_ID + 1; RDB$PAGES ID0 → OID1 | BIGINT / 20 |
+| RELNAME | Точное native имя без хвостового metadata CHAR padding | VARCHAR / 1043 |
+| RELNAMESPACE | Соответствующий PG_NAMESPACE.OID | BIGINT / 20 |
+| RELKIND | `r` для persistent table, `v` для view, без padding | VARCHAR / 1043 |
+
+Все labels остаются uppercase. Binary IDs — 8 bytes network order, имена/kind —
+точные UTF8 bytes. PUBLIC/"public", T/"t" и одинаковые имена в разных схемах
+не объединяются. Это native типы, не PG oid/name/internal "char"; aliases или
+происхождение колонки не меняют type identity.
+
+Область view: SYSTEM.RDB$RELATIONS с type 0 (включая legacy NULL) или 1,
+RDB$PACKAGE_NAME IS NULL, JOIN PG_NAMESPACE по точному native schema name.
+Подходящие SYSTEM/служебные объекты и сам PG_CLASS включены. Нет фильтра по
+SELECT/USAGE/search_path; catalog row не доказывает доступ к данным или visibility.
+DISTINCT делает view read-only и для владельца. Новых прав на исходные таблицы
+или DDL installer не выдаёт. Read-only lookup не пишет и не выделяет IDs.
+
+OID локален этому каталогу/БД, одинаков между attachments и стабилен при ALTER
+в течение жизни объекта. DROP удаляет строку; CREATE берёт текущий native ID.
+Диапазон native 0…32767 отображается в 1…32768. Движок допускает wrap/reuse,
+поэтому вечная уникальность и монотонность не обещаются; generation registry
+не добавлен. После backup/restore/переноса стабильность IDs не проверена.
+Числа могут совпадать с namespace IDs. Будущие indexes/sequences потребуют
+непересекающихся ключей, visibility/locks — этого же relation mapping; APP-03
+должен отдельно решить lifetime и DDL/reuse.
+
+External/virtual relations (2/3), GTT (4/5), local/declared/packaged temporary
+tables, indexes/sequences и остальные поля pg_class исключены. Это ограниченный
+catalog постоянных таблиц/views. Native DDL под user savepoint по-прежнему
+запрещён (0A000); поддержка DDL ROLLBACK TO не заявлена.
+
+Проверка: `pgwire_1c_smoke.py --class-catalog`, прежний runtime/native/libpq harness
+и helpers namespace-проверок. Результаты и SHA — в
+[VALIDATION](../VALIDATION.md#11-ноября-2026-pg_class-для-постоянных-таблиц-и-представлений).
+Диагностический SELECT с relkind/relname/relnamespace/LIMIT прошёл; это изменённый
+SQL, не приёмка selected04/10/11. APP-01/03/04/06 открыты. Следующее решение —
+PG/native name resolution и regnamespace, затем search-path visibility и temp namespace.
 
 ## Публичное представление namespace IDs: APP-11
 
@@ -391,9 +458,9 @@ origin первой ветви даже для общего BIGINT с 4294967296
 native isql и настоящий libpq, text/binary metadata/bytes, права, атомарность
 установки и transaction visibility. Команда, SHA и результат — в
 [VALIDATION](../VALIDATION.md#11-ноября-2026-публичное-представление-namespace-ids).
-APP-01/APP-02/APP-06 и selected04 открыты. Далее нужно согласовать PG/native имена
-и namespace resolution, затем pg_class/relnamespace, search-path visibility и
-temp namespace; только после этого проверять неизменённый selected04.
+APP-01/APP-02/APP-06 и selected04 открыты. APP-12 добавляет ограниченные
+pg_class/relnamespace rows; затем нужны PG/native имена и namespace resolution,
+search-path visibility и temp namespace, чтобы проверить неизменённый selected04.
 
 ## Внутренние namespace IDs: APP-10
 

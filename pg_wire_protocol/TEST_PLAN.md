@@ -4,6 +4,45 @@
 
 Python scaffold мигрирован под текущий контракт: 58 live cases прошли в P6. Начальные host tests расположены в src/common/tests/WireProtocolConfigTest.cpp, src/remote/server/wire/tests и isolated tools harness. P2/P3/P4 приёмка сохранена в VALIDATION. Предыдущая P5-ревизия прошла целевую Linux/Super приёмку с native ограничением READ CONSISTENCY + AUTO COMMIT; P6 повторил сборку, unit tests и целевые регрессии по [VALIDATION.md](VALIDATION.md). Целевой P6/M1 Linux/Super принят с известными native ограничениями, включая отдельно исключённый ON CONNECT shutdown. P7 Extended Query прошёл целевую Linux/Super приёмку: 16 групп. P8 codecs прошли целевую Linux/Super приёмку: восемь групп. P9 прошёл 17 групп с реальными C libpq, raw-wire и ограниченным профилем Psycopg 3; целевой M2 Linux/Super для совместимого SQL и реализованных codecs принят. Следующий этап — P10. PASS относится к зафиксированным cases/fixtures, а наличие строки в полной матрице не означает её прохождения.
 
+## Подэтап 1С: постоянные relations в PG_CLASS
+
+`pgwire_1c_smoke.py --class-catalog` / `pgwire_class_checks.py` переиспользуют
+native/libpq harness и helpers `pgwire_namespace_checks.py`. До полной проверки —
+небольшой native prototype; runtime по SHA, отдельные /tmp fixtures/security/БД.
+
+- Fresh installer после APP-10/11 с search_path=SYSTEM; missing PG_NAMESPACE,
+  повтор, чужой PG_CLASS и injection перед COMMIT. Сохраняются bootstrap
+  owner/source/BLR, прежние grants/objects, namespace mapping/counter; нет partial view.
+- Независимый native oracle читает все RDB$RELATIONS, затем фильтрует type 0/1
+  и отсутствие package в Python и использует private namespace mapping.
+  Совпадают все четыре поля; OID уникален/положителен, нет потерянных namespace
+  references, RDB$PAGES 0→1, self PG_CLASS kind `v`.
+- Simple/Extended/named prepared по ID, имени+namespace и namespace: text/binary
+  inputs/results, SQL-derived params, metadata 20/1043/20/1043, sizes 8/-1/8/-1,
+  typmods -1, uppercase labels. IDs — 8 bytes network order, имена/kind — точные
+  UTF8 bytes, включая 56 Я / 112 bytes. Alias/CAST сохраняют BIGINT type 20.
+- PUBLIC/"public", T/"t", одинаковые имена в двух схемах, mixed case/Unicode/
+  пробел/кавычка, table/view. Diagnostic relkind/relname/relnamespace/LIMIT даёт
+  правильные строки/missing name; это не PASS исходного selected04/10/11.
+- Таблица/view без SELECT и schema без USAGE присутствуют, прямое чтение данных
+  запрещено. DML view запрещён и owner. Новых data/DDL grants нет; repeated
+  native/libpq READ ONLY сохраняет relation metadata и namespace mapping/counter.
+- TABLE и VIEW CREATE/ALTER/DROP, COMMIT/full ROLLBACK, второй attachment:
+  настоящий own uncommitted ID, отсутствие чужих uncommitted CREATE/DROP,
+  стабильный ALTER ID, prepared lookup после DROP/CREATE сверяется с текущим
+  native ID без требования монотонности; rollback не оставляет phantom rows.
+- GTT обоих видов, packaged temporary table, virtual и metadata-only external
+  table исключены; external fixture только /tmp, без изменения config (иначе
+  явно SKIP). Index/sequence не дают rows. Отдельный native attachment использует
+  LTT/declared temporary table без фиктивной постоянной catalog row.
+
+Обязательны native coexistence, отсутствие оставшихся attachments и normal
+shutdown; команды/revision/SHA/PASS/FAIL/SKIP в VALIDATION. Wrap exhaustion,
+allocator mutation, backup/restore, full APP-10/11 suites и known NAT-* crash repro
+не запускаются. Native DDL под user savepoint запрещён; положительный DDL
+ROLLBACK TO не принимается. Полный PG catalog/types/name resolution/visibility/
+temp namespace, APP-01/03/04/06 и selected04/10/11 остаются открытыми.
+
 ## Подэтап 1С: публичное представление namespace IDs
 
 `pgwire_1c_smoke.py --namespace-catalog` / `pgwire_namespace_checks.py` расширяют

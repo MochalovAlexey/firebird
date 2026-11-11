@@ -74,6 +74,54 @@ APP-07 не меняет parser/engine/API/InputCodec/зависимости; in
 Контракт — [1c/README](1c/README.md), проверки — [VALIDATION](VALIDATION.md).
 APP-07 закрывает только output; APP-02/SQL-06 и исходный сценарий 1С остаются открыты.
 
+## PG_CLASS для постоянных таблиц и views
+
+APP-12 предоставляет устанавливаемый native DISTINCT view
+PG_CATALOG.PG_CLASS(OID, RELNAME, RELNAMESPACE, RELKIND). Источник — реальные
+SYSTEM.RDB$RELATIONS, type 0 (включая legacy NULL) / 1 и без package qualifier,
+JOIN PG_NAMESPACE по точному native schema name. SYSTEM, служебные relations и
+сам PG_CLASS входят в эту область. Privileges/search_path не фильтруют rows;
+наличие строки не означает SELECT privilege или pg_table_is_visible.
+
+| Поле | Контракт | Wire type / binary |
+|---|---|---|
+| OID | CAST(native RDB$RELATION_ID + 1 AS BIGINT) | 20 / 8 bytes network order |
+| RELNAME | Native имя без хвостового CHAR padding, VARCHAR(63) UTF8 | 1043 / UTF8 bytes |
+| RELNAMESPACE | PG_NAMESPACE.OID соответствующей schema | 20 / 8 bytes network order |
+| RELKIND | VARCHAR(1) UTF8, ровно `r` или `v` | 1043 / один byte |
+
+Text IDs — decimal, labels OID/RELNAME/RELNAMESPACE/RELKIND, field sizes 8/-1/8/-1,
+typmods -1. Case/Unicode/пробелы/кавычки сохранены, PUBLIC/"public" и T/"t"
+различаются. SQL-derived параметры используют native типы; alias/CAST не создают
+PG type identity. [PostgreSQL pg_class](https://www.postgresql.org/docs/18/catalog-pg-class.html)
+имеет oid/name/internal "char", больше колонок и видов relations; здесь эти типы
+и остальные поля не реализованы.
+
+Native IDs 0…32767 отображаются в 1…32768; ID0 RDB$PAGES получает OID1.
+ID локален этому каталогу/БД, одинаков между attachments и сохраняется при ALTER.
+DROP удаляет row, CREATE использует текущий native allocator, включая допустимый
+reuse после DROP/wrap. Вечная уникальность/монотонность и стабильность при
+backup/restore/переносе не заявлены. Namespace IDs могут численно совпасть.
+Нового allocator/sequence/registry/hook нет. Будущие indexes/sequences должны
+получить непересекающиеся ключи; visibility и locks должны использовать этот же
+relation mapping, а APP-03 отдельно решает lock lifetime при DDL/reuse.
+
+External/virtual relations (2/3), GTT (4/5), local/declared/packaged temporary
+tables, indexes/sequences исключены. View read-only даже для владельца,
+PUBLIC получает только SELECT; USAGE PG_CATALOG уже установлен APP-11.
+Native transaction определяет видимость CREATE/ALTER/DROP, COMMIT/full ROLLBACK;
+READ ONLY lookup не меняет metadata/namespace counter. Savepoint DDL guard (0A000)
+сохранён, положительный DDL ROLLBACK TO не заявлен.
+
+Installer требует исправных APP-10/11 с активным hook и администратора без
+конкурентного DDL. Обычный CREATE VIEW отказывается при существующем PG_CLASS;
+ошибка до COMMIT откатывает view/grants, bootstrap и namespace IDs остаются.
+Gap штатного relation allocator допустим; repair/upgrade не добавлены.
+[Установка](1c/README.md#постоянные-таблицы-и-представления-в-pg_class-app-12),
+[проверки](VALIDATION.md#11-ноября-2026-pg_class-для-постоянных-таблиц-и-представлений).
+APP-01/03/04/06 и selected04/10/11 открыты: ещё нужны согласованные PG/native
+name resolution и regnamespace, затем search-path visibility и temp namespace.
+
 ## Публичное представление namespace IDs
 
 APP-11 — устанавливаемый native SQL view PG_CATALOG.PG_NAMESPACE(OID, NSPNAME)
@@ -104,7 +152,8 @@ USAGE PG_CATALOG и SELECT view, не новые права на private table/s
 [Установка](1c/README.md#публичное-представление-namespace-ids-app-11),
 [проверки](VALIDATION.md#11-ноября-2026-публичное-представление-namespace-ids).
 APP-01/APP-02/APP-06 и selected04 открыты: остаются PG/native names и resolution,
-pg_class с согласованным relnamespace, search-path visibility и temp namespace.
+полный pg_class, search-path visibility и temp namespace; ограниченные постоянные
+relation rows с relnamespace добавлены APP-12 выше.
 
 ## Устанавливаемый внутренний namespace mapping
 

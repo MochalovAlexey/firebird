@@ -1,5 +1,171 @@
 # Проверки реализации
 
+## 11 ноября 2026: pg_class для постоянных таблиц и представлений
+
+[APP-12](1c/CLASS_CATALOG_TASK.md) реализован поверх
+`a3e3c80123f27d7d144ee42b2a1a546a681ec09a` и оставлен на review без git add/commit.
+Production — [install_class_catalog.sql](1c/sql/install_class_catalog.sql),
+26 строк: DISTINCT view PG_CLASS(OID, RELNAME, RELNAMESPACE, RELKIND),
+GRANT SELECT PUBLIC и один COMMIT. APP-10/11 installers, compat.sql и namespace
+helpers не изменены. Новый режим `--class-catalog` в прежнем harness использует
+`pgwire_class_checks.py` с импортом helpers из `pgwire_namespace_checks.py`.
+Нет C++/parser/API/codecs/rewriting и новых runtime-зависимостей.
+`git diff HEAD -- src` пуст, SHA256:
+`e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`.
+
+Проверены `src/jrd/relations.h`, enum rel_t в `constants.h`, диапазон в `ods.h`,
+`RelationNode::generateRelId` в `src/dsql/DdlNodes.epp` и документация schemas/
+created/declared local temporary/packaged temporary tables. Native allocator
+уже выделяет relation IDs, ищет свободные IDs и допускает wrap/reuse. Внешний
+CAST(native ID+1 AS BIGINT) отображает 0…32767 в 1…32768, не создавая второй identity.
+
+Перед полным прогоном повторён небольшой native prototype окончательного SQL:
+
+```sh
+python3 -B /tmp/pgwire-class-prototype.py
+```
+
+Скрипт SHA256 `c252eb5b6b0a3f29368f6c0ecc716a657da632af4874408c495b3df81b004b1e`,
+артефакты `/tmp/firebird-pgwire-class-prototype-20261111-02/`.
+PASS: ordinary native SELECT, RDB$PAGES OID1, self PG_CLASS kind v, исключение
+GTT/package/virtual/LTT; metadata-only external table type2 исключена без изменения
+config. `ordinary.log`, `ltt.log`, `external.log`, `summary.json`, exit 0.
+Первый sandbox-запуск в пути без `-02` остановился с EPERM в prepare до prototype
+SQL: существующий harness создаёт локальный test socket. Это ограничение окружения;
+повтор разрешён с локальным socket. Новый дефект engine не обнаружен.
+
+Использован прежний проверенный
+`/tmp/firebird-pgwire-catalog-source-20261111`, происхождение — в разделе APP-11
+ниже и `catalog_source.json`. SHA runtime совпали с принятой сборкой APP-10/11;
+полный rebuild не выполнялся. Все runtime/security/БД изолированы в /tmp,
+рабочая 1С и пользовательский сервер не изменялись.
+
+```sh
+python3 -B pg_wire_protocol/tools/pgwire_1c_smoke.py \
+  --firebird-dir /tmp/firebird-pgwire-catalog-source-20261111 \
+  --work-dir /tmp/firebird-pgwire-class-catalog-01 \
+  --class-catalog --timeout 180
+```
+
+Итог `/tmp/firebird-pgwire-class-catalog-01/summary.json`: **PASS**,
+completed=true, class_catalog_passed=true. 5 групп установки, 4 native/libpq
+группы, 228 проверенных libpq results (включая prepare/describe и oracle reads).
+Начальная проекция — 56 rows. libpq 14.24. Сервер PID 1325126,
+native port 43169, PgWire 40761, exit_code=0, forced_kill=false, shutdown 0.164 s.
+Native probes до/после и отсутствие оставшихся attachments проверены.
+Для повтора нужны существующий проверенный runtime с чистой security template
+и новый work-dir; исчезновение /tmp не заменяет новый запуск этим историческим PASS.
+
+| Проверка | Результат |
+|---|---|
+| Fresh / search_path | PASS: install после APP-10/11 при SYSTEM; прежние namespace IDs/counter, grants и bootstrap owner/source/BLR неизменны |
+| Missing dependency / repeat / collision | PASS: нет PG_NAMESPACE → 42S02 без partial view; повтор явно отказал; чужой PG_CLASS сохранил owner WIRE_HOST_TEST, данные 73 и grants |
+| Failure injection | PASS: division by zero перед COMMIT откатывает view/grants, прежние relation rows/IDs и namespace state не изменяются; relation allocator gap допустим |
+| Независимый native oracle | PASS: все четыре поля равны отфильтрованным в Python RDB$RELATIONS + private namespace mapping, уникальные положительные OID и полные namespace references; RDB$PAGES ID0→OID1, PG_CLASS kind v |
+| Names / queries | PASS: PUBLIC/"public", T/"t", две схемы с T, mixed case/Unicode/пробел/кавычка, 56 Я = 112 UTF8 bytes. Simple/Extended/named prepared lookup по ID/имени+namespace/namespace, missing name/ID |
+| Metadata / bytes | PASS: outputs 20/1043/20/1043, inputs 20 и 1043/20, sizes 8/-1/8/-1, typmods -1, uppercase labels. Text/binary inputs/results: IDs 8 bytes network order, полные UTF8 names, kind r/v без padding. Alias/CAST сохраняют type20 |
+| Diagnostic LIMIT | PASS: relkind/relname/relnamespace/LIMIT возвращают ожидаемую строку/отсутствие. Этот изменённый SQL не считается selected04/10/11 |
+| Privileges / read-only | PASS: table/view без SELECT и schema без USAGE присутствуют, прямое чтение запрещено. DML view отклонён пользователю и owner; новых data/DDL grants нет. Repeated native/libpq READ ONLY не меняет relation composition/IDs или namespace mapping/counter |
+| TABLE/VIEW lifecycle | PASS: own uncommitted row соответствует текущей native metadata, второй attachment не видит CREATE/DROP до COMMIT. ALTER ID стабилен, full ROLLBACK согласован, phantom rows нет, cached prepared lookup после DROP/CREATE возвращает текущий объект |
+| Scope exclusions | PASS: type2 external (metadata-only /tmp, без изменения config), type3 virtual, GTT type4/5, packaged temporary table, index/sequence. Отдельный native attachment использует LTT/declared table с данными 7/8 без permanent catalog row |
+
+В конкретном прогоне DROP+CREATE дал OID TABLE 150→151 и VIEW 153→154.
+Тест сверяет их с native metadata, **не требует** роста или нового числа:
+reuse допустим. ID локален каталогу/БД; совпадение с namespace ID возможно.
+Backup/restore/перенос не проверены. Будущие indexes/sequences в PG_CLASS требуют
+непересекающихся ключей; visibility/locks должны использовать этот же mapping,
+а lock lifetime/DDL reuse остаются APP-03.
+
+| Артефакт | SHA256 |
+|---|---|
+| libPgWire.so | `adb3eacaadf560a73e7ce9d9ce586d1a2145fea0c869d86d9bc6849c7c4c3395` |
+| libEngine14.so | `ba439210e32962db216a7853c8ff8857c70a77d8dc045e8abda0a7d86d011bf7` |
+| libfbclient.so.2 | `1a6b50a5e3e13e7c81cb5c9d1da599b21154d94895c53f163cb543cd0a5e5a85` |
+| install_class_catalog.sql | `fcb8f0e9e424d855082f64380b24d31a91552e7b8400f68ab2d77e28b1bf052d` |
+| pgwire_1c_smoke.py | `b8c25f760eb97556b936a83955a1db8d94f8f4b4c6bdb5f1bb5d40b9dd1cb8b5` |
+| pgwire_class_checks.py | `fa6d4f2e70b72d4c4d0c330b12eb6a48f3186aafe7fb5f7ad0b65e028d7f43a9` |
+| pgwire_namespace_checks.py (прежний) | `229e5803cd3b90c69d1622dc16ae3402253cd733288dde02d51aed86e2d8265b` |
+| install_namespace_registry.sql (прежний) | `2921fec5381a180021656a6a3d6182c39de92ace4ff5900ab61547ac1766eafe` |
+| install_namespace_catalog.sql (прежний) | `3512cba9248c6e4d97c99e0bf488e6a8e1a4ec1c06a1aa8797d4293a4119b6fe` |
+| compat.sql (прежний) | `dbffdaff007e797370ee5d78b285f5338163d4911c015d6b973e2be38fdff7d5` |
+
+SKIP по границе этапа: rebuild/старые suites, полная APP-10/11 concurrency/restart
+матрица, исчерпание 32767 IDs/изменение native allocator, restore и known NAT-*
+crash repro. Native DDL под user savepoint запрещён (0A000); положительный DDL
+ROLLBACK TO не заявлен. Legacy NULL включён COALESCE в SQL; искусственное изменение
+system metadata для получения NULL не выполнялось.
+
+Это только четыре поля schema-level persistent tables/views, без PG oid/name/
+internal "char", полного catalog, PG/native name resolution/regnamespace,
+search-path visibility и temp namespace. APP-01/03/04/06 и selected04/10/11
+остаются открытыми. Следующий этап требует отдельного согласованного контракта
+имён; простое LOWER и наличие catalog row не заменяют resolution/visibility.
+
+## 11 ноября 2026: архитектурный review публичного namespace catalog
+
+Проверена ревизия `a3e3c80123f27d7d144ee42b2a1a546a681ec09a` относительно
+`5bbdaa763d`: SQL installer, изменения прежнего harness, покрытие и документация.
+Замечаний к реализации APP-11 не найдено. Production — только 19 строк
+install_namespace_catalog.sql; APP-10/compat.sql и C++ не менялись.
+Нативные metadata 20/1043, точные имена и ограничения согласованы с заданием.
+
+Независимо повторена целевая приёмка из чистого worktree:
+
+```sh
+python3 -B pg_wire_protocol/tools/pgwire_1c_smoke.py \
+  --firebird-dir /tmp/firebird-pgwire-catalog-source-20261111 \
+  --work-dir /tmp/firebird-pgwire-namespace-catalog-review-20261111-02 \
+  --namespace-catalog --timeout 180
+```
+
+`/tmp/firebird-pgwire-namespace-catalog-review-20261111-02/summary.json`:
+completed=true, namespace_catalog_passed=true. PASS: 6 групп установки,
+4 native/libpq группы и 128 проверенных libpq results, включая prepare/describe.
+Подтверждены atomic install/collision/rollback, прежний bootstrap, native имена,
+text/binary metadata/bytes, отсутствие retagging в UNION, права/read-only и
+transaction visibility/lifetime. libpq 14.24. Сервер PID 1321085, native 49519,
+PgWire 58263: exit_code=0, forced_kill=false, shutdown 0.164 s.
+
+Runtime PgWire/Engine14/fbclient и SQL/harness SHA256 совпали с таблицей реализации
+ниже. В summary указан HEAD `a3e3c80123`, source_diff_sha256 пустого diff.
+Сборку C++ и старые suites не повторяли: исходники движка/плагина не менялись.
+Первый sandbox-запуск в каталоге без суффикса `-02` остановился с EPERM до server
+start (`runs=[]`); повтор выполнен с разрешённым loopback TCP. Это ограничение
+окружения, не ошибка APP-11. Runtime/security/fixtures отдельные в /tmp, рабочий
+сервер и 1С не затрагивались, known NAT-* crash repro не запускались.
+
+APP-11 закрыт только в описанном native профиле. Полные PG oid/name/regnamespace,
+имена/labels, nspowner/nspacl, pg_class/visibility/temp namespace остаются открытыми.
+Native запрет DDL под user savepoint (0A000) не изменён. Сквозного selected04,
+реального открытия 1С и Гилёва этот результат не подтверждает.
+
+Архитектура следующего [APP-12](1c/CLASS_CATALOG_TASK.md) проверена отдельным
+embedded native probe, **не PgWire приёмкой**. Артефакты:
+`/tmp/pgwire-class-architecture-probe-20261111-ymexppp9/`, в том числе
+`public_join.sql`, `public_join.log`, `public_join_ordinary.log`, `summary.json`.
+Engine SHA прежний; отдельная копия runtime из catalog-source, изолированные
+config/security/data/locks. Запуск native isql с `-bail -charset UTF8`, Providers=Engine14;
+FIREBIRD/FIREBIRD_LOCK/FIREBIRD_TMP/LD_LIBRARY_PATH указывают на probe runtime.
+SHA256 окончательного SQL:
+`96f22ed5d5f03f9cdd29bf4fa93f225c427cd0c11ab538d9b3bbe5b9da50caa4`.
+
+Подтверждена проекция RDB$RELATIONS → PG_CLASS с JOIN public PG_NAMESPACE,
+type 0/1 и без package qualifier: OID=CAST(native ID+1 AS BIGINT), точное имя,
+namespace ID и VARCHAR(1) kind r/v. Native metadata BIGINT/VARCHAR/BIGINT/VARCHAR
+(lengths 8/252/8/4); фактический kind — один UTF8 byte. RDB$PAGES native ID0
+отображается в OID1. Обычный embedded пользователь WIRE_CLASS_PROBE читает 48 rows
+без дополнительных base grants. Final public-join probe exit0.
+
+Первоначальный вариант с private namespace join отдельно подтвердил отказ
+owner DELETE (42000), сохранение OID132 при ALTER, RECREATE137→138 и видимость
+собственного uncommitted CREATE/DROP с полным rollback. Его CHAR(1) kind заменён
+в итоговом варианте на VARCHAR(1), чтобы не вводить padding contract.
+Эти локальные probes не заменяют будущую TCP/libpq приёмку окончательного SQL.
+Source RelationNode::generateRelId подтверждает native диапазон до 32767
+и возможность reuse освобождённых IDs после wrap; вечная уникальность не обещается.
+Нового allocator/hook для relations не требуется. PG/native name resolution,
+visibility и временные объекты этим исследованием не решены.
+
 ## 11 ноября 2026: публичное представление namespace IDs
 
 [APP-11](1c/NAMESPACE_CATALOG_TASK.md) реализован поверх
