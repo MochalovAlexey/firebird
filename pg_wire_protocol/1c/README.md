@@ -123,7 +123,7 @@ UPDATE CAST_ROWS SET V=$1::BIGINT WHERE ID=$2;
 Цель переиспользует `non_array_type`: native builtin types без массивов. Проверены
 INTEGER/INT, SMALLINT, BIGINT, VARCHAR(n), BOOLEAN, DOUBLE PRECISION и дополнительные
 native границы. Bare VARCHAR сохраняет native default 255, NUMERIC — native defaults;
-это не unlimited PG VARCHAR/NUMERIC. Существующие codec limits, включая выдачу BLOB
+это не unlimited PG VARCHAR/NUMERIC. Существующие codec limits, включая выдачу non-binary BLOB
 и типов с time zone, сохраняются; синтаксис не добавляет новых wire codecs.
 
 Единственный новый alias — unquoted INT8 → BIGINT **только** после `::`, без учёта
@@ -205,6 +205,53 @@ SQL-01 закрывает только этот literal-срез; SQL-02 ост�
 selected 04/17 ещё требуют каталогов/custom types; их полная приёмка и открытие
 базы 1С не заявляются.
 
+## Binary BLOB как bytea: только output
+
+По [BINARY_BLOB_OUTPUT_TASK](BINARY_BLOB_OUTPUT_TASK.md), 11 ноября 2026 года,
+ResultCodec принимает только native SQL_BLOB subtype 0 (BINARY), с корректным
+размером ISC_QUAD и прежними проверками offsets/null offsets/message length.
+RowDescription: OID 17, typeSize -1, typmod -1. Text output — ASCII `\x` и
+lowercase hex по две цифры на байт; binary output — исходные байты. NULL имеет
+wire length -1 и не открывает BLOB. Пустой ненулевой BLOB — text `\x` либо
+binary length 0. Нулевой ID не заменяет null indicator. NUL и invalid UTF8
+в payload разрешены; charset conversion и validateText к содержимому не применяются.
+
+Общий путь работает в Simple и Extended, для SELECT cursor, singleton output,
+DML RETURNING и native EXECUTE BLOCK/PROCEDURE. Декодирование получает borrowed
+attachment и текущую transaction только на одну строку. Describe/Parse/Bind
+ничего не открывают; codec/prepared metadata не сохраняют transaction, handle
+или содержимое BLOB. Повторный Bind после commit/rollback и независимые portals
+проверены. Все BLOB закрываются до Protocol::dataRow; consuming close использует
+RefPtr::clear без повторного release, ошибки сохраняют прежнюю engine mapping.
+
+Чтение идёт фиксированными порциями 4096 байт до RESULT_NO_DATA; RESULT_OK и
+RESULT_SEGMENT добавляют байты без разделителей. Пустой сегмент не означает EOF.
+Единый бюджет строки берётся из фактического Protocol limits.frameBytes (сейчас
+1 MiB): `4 + 2 + 4 * число полей + сумма ненулевых wire values`, без тега D.
+Text bytea занимает `2 + 2 * payload length`. Все колонки/форматы делят этот
+бюджет; арифметика и размер проверяются до добавления каждой порции/hex output.
+При полном заполнении ещё одно чтение отличает EOF от превышения. Размер всей
+BLOB заранее не резервируется; Protocol сохраняет независимый preflight.
+
+Превышение даёт 0A000 без усечения и частичного DataRow. Ранее отправленные строки
+не отзываются. Ошибка output возникает после engine execution: прежняя обработка
+откатывает implicit сегмент либо переводит T→E; для DML RETURNING проверены
+rollback/recovery и отсутствие строк через native observer. Это не отказ до
+любых side effects. Unsupported TEXT/другие BLOB subtype по-прежнему дают 0A000
+на metadata до исполнения.
+
+Входные BLOB/bytea, SQL type/cast `bytea`, literals, сравнения/индексы/OCTETS,
+large-object API и SET bytea_output не добавлены. InputCodec не менялся: Bind
+остаётся до startImplicit, создавать BLOB там этот этап не разрешает.
+Engine/parser/публичные API/зависимости также не менялись.
+
+`pgwire_1c_smoke.py --blobs` использует прежние libpq/raw/native wrappers и небольшой
+native OO fixture helper. Проверена неизменная форма selected06 с WHERE `$1` и
+ORDER BY PartNo на синтетической PUBLIC.PARAMS, без исходных данных или записанного
+Bind. APP-07 закрыт по реализации и оставлен на review; APP-02/SQL-06 и открытие
+базы 1С остаются отдельными задачами. Команды, SHA, размеры и результаты — в
+[VALIDATION](../VALIDATION.md).
+
 ## Установка на отдельной тестовой базе
 
 1. Пересобрать сервер и плагины текущей ветки вместе. Использовать отдельную
@@ -253,8 +300,13 @@ review и повторную целевую приёмку, см. VALIDATION.
 
 Реализован [LIMIT с целочисленным литералом](LIMIT_TASK.md) через RowsClause и
 штатное исполнение: count 0…2147483647, без PG OFFSET/ALL/NULL/count-параметров.
-SQL-01 закрыт по проверкам реализации, изменения ожидают review пользователя;
+Ревизия `ccd81f6473` прошла review и повторную целевую приёмку; SQL-01 закрыт,
 расширенный LIMIT/OFFSET остаётся открытым SQL-02 в [BACKLOG](../BACKLOG.md).
+
+Реализована [выдача binary BLOB как bytea](BINARY_BLOB_OUTPUT_TASK.md), APP-07:
+ResultCodec + штатный IBlob, text/binary output и общий предел DataRow. Проверки
+прошли, незакоммиченные изменения оставлены на review пользователя. Входные BLOB,
+bytea grammar и полный APP-02 остаются открытыми, как и каталоговый APP-01.
 
 Срез [фиксированной диагностики](FIXED_DIAGNOSTICS_TASK.md) реализован через
 существующий SetPgSessionNode: только `escape_string_warning=off` и
@@ -266,7 +318,7 @@ SQL-01 закрыт по проверкам реализации, изменен
 | 1. Начало сессии | SELECT без FROM, ограниченная identity-функция, последовательные скрипты и все семь startup SET принимаются; реальные эффекты enable_mergejoin, cpu_operator_cost и lock_timeout отложены |
 | 2. SQL и параметры | Simple Query выполняет скрипты совместимого SQL; PG BEGIN без опций и последовательные типизированные `$n` поддержаны; postfix `::` добавлен для native builtin types; literal LIMIT 0…2147483647 поддержан; произвольная нумерация и общий LIMIT/OFFSET ещё не реализованы |
 | 3. Открытие базы | pg_class/pg_database/visibility и служебные таблицы 1С ещё не реализованы; нужны настоящие metadata и данные |
-| 4. Типы и функции | bytea, mchar/mvarchar и BINROWVER ещё не реализованы; сначала измерить форматы/семантику, затем использовать BLOB API, intl/collations и SQL/PSQL |
+| 4. Типы и функции | Binary BLOB output выдаётся как bytea; input и SQL bytea type/casts/storage/index semantics не добавлены. mchar/mvarchar, regnamespace и BINROWVER остаются открытыми |
 | 5. Транзакции/конкуренция | PG BEGIN без опций использует реальные READ CONSISTENCY транзакции; native controls сохраняются; advisory locks и PG timeout semantics ещё не реализованы |
 | 6. Временные объекты/нагрузка | PG temporary DDL, serial4, ANALYZE и fasttrun_ext ещё не реализованы; нужен эталон их эффектов |
 

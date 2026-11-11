@@ -1,5 +1,184 @@
 # Проверки реализации
 
+## 11 ноября 2026: binary BLOB output
+
+[APP-07](1c/BINARY_BLOB_OUTPUT_TASK.md) реализован поверх
+`ccd81f6473b8017ffa5fc8da1a8560fc508f5de2`, ветка `pg_wire_protocol`.
+Изменения оставлены на review без git add/commit/amend/reset/checkout; исходные
+документальные изменения сохранены. Production — только ResultCodec.cpp/h,
+Protocol.h (getter фактического frameBytes) и четыре decode calls в Execute.cpp/
+Extended.cpp. Parser/core/публичные интерфейсы/InputCodec не менялись.
+
+SHA256 production diff
+`git diff HEAD -- src/plugins/wire/pg ':!src/plugins/wire/pg/tests'`:
+`a91c8ca4f4b852e418c2b813bf470f5f8c89104ce76868b4adfc8964ad6a8e13`.
+SHA256 полного `git diff HEAD -- src`, включая финальные units:
+`a16ef02b82ca794a75a1efce1e3a484a2cc2922f76390f9d9b1a53303fb3f639`.
+Аудит сохранён в `/tmp/firebird-pgwire-1c-build/blob-source-audit.json`.
+
+До правки `python3 -B /tmp/firebird-pgwire-blob-baseline.py` подтвердил metadata
+refusal 0A000 для `SELECT B FROM BLOB_BASELINE WHERE ID=1`. Native fixture BINARY
+содержала `005c27ffc080`, OCTET_LENGTH вернул 6. Отчёт/логи сохранены в
+`/tmp/firebird-pgwire-blob-baseline-01`; сервер завершился 0 без forced kill.
+Baseline PgWire SHA:
+`56302018b7cec2c643d90e99570f56bbdee1c795b8bfcd730ae07a2830244ced`.
+
+Сборка Debug/Linux/Super в `/tmp/firebird-pgwire-1c-build`:
+
+```sh
+make -j2
+make -C gen -j2 TARGET=Debug pgwire_tests
+```
+
+Логи `blob-build-{01,02}.log`, `blob-unit-build.log` и
+`blob-unit-build-{02,03}.log`. После финального расширения unit coverage
+повторно прошёл ResultCodec executable. Итоговый PgWire SHA256:
+`b38d3389ce8235b31bc2c3f89a1fa6ad5b41f4192bf2a99075f3b587f069a5ee`.
+Engine SHA256 остался baseline:
+`36de1e2dcf6320439195e79efa153b4f18acace6a1b1326ab46e0ec4d3bf4cb9`.
+`readelf -d` (`blob-readelf.log`) сравнен с baseline runtime: DT_NEEDED прежний,
+libfbclient, tommath, tomcrypt, m, gcc_s, c, dynamic loader; libpq/новых зависимостей
+в PgWire нет. Зависимости не устанавливались, grammar regeneration не требовалась.
+
+| Проверка | Результат |
+|---|---|
+| Девять pgwire unit executables | PASS: Protocol, ErrorStatus, ResultCodec, Input 154, Float 112, Numeric 502, Temporal 313, SQL 575, Session 5 |
+| wire_socket_test | PASS: shutdown, ownership, TCP backpressure |
+| Native OO fixture/readback | PASS: 14 строк, новый attachment после commit, 8853 чтения, 8590 partial segments; stream ID 5 подтверждён getInfo |
+| `--blobs`, финальный `output-04` | PASS: 90 libpq checks, 31 PQunescapeBytea round-trip с PQfreemem, 9 native observations |
+| Raw BLOB | PASS: 7 групп — Describe/Bind без application transaction, mixed formats NULL/empty, independent portals/resume/close/rebind, shared budget, exact text boundary, later-row failures, unsupported forms/discard/Sync recovery |
+| `pgwire_codec_smoke.py` | PASS: 8 групп прежних scalar codecs |
+| Simple / Extended | PASS: 12 / 16 групп, C libpq, psycopg2, raw wire и прежний no-server-network-hop check |
+| `--casts` | PASS: 129 checks, 35 raw refusals/recovery, 13 native observations; negative BLOB заменён только на SUB_TYPE TEXT |
+
+Unit executables запускались из `gen/Debug/firebird/tests` со сборочным lib/:
+
+```sh
+LD_LIBRARY_PATH=gen/Debug/firebird/lib gen/Debug/firebird/tests/pgwire_protocol_test
+LD_LIBRARY_PATH=gen/Debug/firebird/lib gen/Debug/firebird/tests/pgwire_error_test
+LD_LIBRARY_PATH=gen/Debug/firebird/lib gen/Debug/firebird/tests/pgwire_result_test
+LD_LIBRARY_PATH=gen/Debug/firebird/lib gen/Debug/firebird/tests/pgwire_input_test
+LD_LIBRARY_PATH=gen/Debug/firebird/lib gen/Debug/firebird/tests/pgwire_float_test
+LD_LIBRARY_PATH=gen/Debug/firebird/lib gen/Debug/firebird/tests/pgwire_numeric_test
+LD_LIBRARY_PATH=gen/Debug/firebird/lib gen/Debug/firebird/tests/pgwire_temporal_test
+LD_LIBRARY_PATH=gen/Debug/firebird/lib gen/Debug/firebird/tests/pgwire_sql_test
+LD_LIBRARY_PATH=gen/Debug/firebird/lib gen/Debug/firebird/tests/pgwire_session_test
+LD_LIBRARY_PATH=gen/Debug/firebird/lib gen/Debug/firebird/tests/wire_socket_test
+```
+
+Их логи — `blob-pgwire_*_test.log` и `blob-wire-socket-unit.log` в build.
+Для локальных TCP/socket проверок использовано разрешение sandbox; серверы/
+security DB/fixtures — только новые /tmp runtime с собственными свободными портами.
+TCP-команды из корня репозитория:
+
+```sh
+python3 -B pg_wire_protocol/tools/pgwire_1c_smoke.py --blobs --firebird-dir /tmp/firebird-pgwire-1c-build/gen/Debug/firebird --work-dir /tmp/firebird-pgwire-blob-output-04 --libpq /lib/x86_64-linux-gnu/libpq.so.5 --timeout 120
+python3 -B pg_wire_protocol/tools/pgwire_codec_smoke.py --firebird-dir /tmp/firebird-pgwire-1c-build/gen/Debug/firebird --work-dir /tmp/firebird-pgwire-blob-codecs-01 --libpq-include-dir /tmp/firebird-pgwire-1c-deps/libpq-dev/usr/include/postgresql --libpq-library /lib/x86_64-linux-gnu/libpq.so.5 --timeout 120
+python3 -B pg_wire_protocol/tools/pgwire_1c_smoke.py --casts --firebird-dir /tmp/firebird-pgwire-1c-build/gen/Debug/firebird --work-dir /tmp/firebird-pgwire-blob-casts-01 --libpq /lib/x86_64-linux-gnu/libpq.so.5 --timeout 120
+python3 -B pg_wire_protocol/tools/pgwire_simple_query_smoke.py --firebird-dir /tmp/firebird-pgwire-1c-build/gen/Debug/firebird --work-dir /tmp/firebird-pgwire-blob-simple-01 --libpq-include-dir /tmp/firebird-pgwire-1c-deps/libpq-dev/usr/include/postgresql --libpq-library /lib/x86_64-linux-gnu/libpq.so.5 --driver-python /usr/bin/python3 --timeout 120
+python3 -B pg_wire_protocol/tools/pgwire_extended_query_smoke.py --firebird-dir /tmp/firebird-pgwire-1c-build/gen/Debug/firebird --work-dir /tmp/firebird-pgwire-blob-extended-01 --libpq-include-dir /tmp/firebird-pgwire-1c-deps/libpq-dev/usr/include/postgresql --libpq-library /lib/x86_64-linux-gnu/libpq.so.5 --timeout 120
+```
+
+Каждый каталог содержит summary.json и логи. Реальный libpq — 14.24;
+C helpers собраны с существующими libpq headers, Python harness использует ctypes.
+SHA256 1c harness:
+`fb3e0c9f33a1d6e90c636843da674d45e08c97cff2f7b000ec3e39949ca1a281`;
+новый `pgwire_blob_checks.py`:
+`674d02872440d7499576d511d6067625f085ba48c1a76b85a8558c93327b3b06`;
+новый `pgwire_blob_fixture.cpp`:
+`92d3a98903ab842e23ce2c498ae0b2ddac3f8129d583edf4c305041be5d0e24d`.
+Fixture helper компилируется самим `--blobs`, команда и stdout сохранены в
+blob_fixture_compile.log / blob_fixture.log. Все запущенные серверы завершились
+`exit_code=0`, `forced_kill=false`; codecs/Simple/Extended имеют по два запуска.
+Рабочий сервер, employee, pgwire_test и исходная база 1С не затрагивались.
+
+Проверены NULL, empty, все байты 0…255, NUL/quote/backslash/invalid UTF8,
+segmented/stream и пустые сегменты, payload 10000/65537 байт и больше 2 MiB.
+Значения text/binary и длины сравнены с независимым Python expected payload;
+OID/size/typmod проверены libpq и raw RowDescription. Native selected06 SQL
+с WHERE `$1` и ORDER BY PartNo сохранён дословно, PUBLIC.PARAMS и значения
+параметра синтетические (остальные колонки fixture имеют простые numeric types).
+Это не исходная схема/данные/Bind 1С.
+
+Границы: одиночный binary payload 1048566 байт даёт frameBytes=1048576,
+следующий байт отказан; text payload 524282 байта даёт тот же frame size.
+Text + scalar и mixed строка из двух BLOB, scalar и NULL проверяют точный предел
+и превышение ровно на один wire byte. Большой BLOB не усечён, DataRow не посылается
+частично; предыдущая строка при последующей ошибке остаётся на wire. В units
+Protocol frameLimit уменьшен до 15/22 байт; превышение выявляет decode, serializer
+проверен независимо. Проверены EOF после заполнения бюджета и дополнительный
+непустой сегмент, общий бюджет и scalar после BLOB. Для 20000-byte BLOB при малом
+бюджете прочитана только одна порция до 4096 байт, затем cleanup.
+
+Open/read/close faults инжектированы в минимальных ABI endpoints по прежнему
+образцу SessionTest. Unit проверяет сохранение первичного engine error,
+неожиданный result/length, отсутствие контекста, consuming close без release
+и ровно один release на ошибке/превышении. Реальные engine I/O faults не
+инжектировались; этот live-пробел и остальные fault scenarios сохраняются в
+VAL-04. Success/overflow native lifetime проверен через fetch, singleton,
+portal close, commit/rollback и завершение всех attachments. DML RETURNING
+при ошибке размера в I откатывает implicit segment, в T даёт E/25P02;
+Simple и Extended rollback проверены native observer. Это output error после
+исполнения, в отличие от прежнего metadata refusal TEXT/прочих BLOB subtype.
+
+Промежуточные отчёты сохранены: `output-01` остановился до старта сервера
+(runs=[]), потому что fixture пыталась native CAST TEXT→subtype 2 без BLOB filter.
+Для metadata-negative subtype 2 оставлен NULL; создавать unsupported conversion
+не требуется. `output-02` остановился на тесте EXECUTE PROCEDURE с `$1`: прежний
+root guard правильно дал 0A000, тест исправлен на native `?`. `output-03` прошёл;
+в `output-04` добавлены Extended explicit T overflow/rollback и NULL input rejection.
+Production для исправления этих тестов не расширялся.
+
+Psycopg 3 live — SKIP (клиент отсутствует), остальные suites вне указанного
+перечня повторно не запускались. Known native crash repro не запускались.
+Исторический **P3 VARCHAR FAIL (VAL-02)** сохранён ниже, без модернизации P3.
+APP-07 закрыт по реализации и ожидает review; APP-02, SQL-06, input BLOB/bytea,
+SQL type/casts/literals/storage/comparisons/index semantics и открытие базы 1С
+не закрываются. SET bytea_output и large-object API не добавлены.
+
+## 11 ноября 2026: архитектурный review literal LIMIT
+
+Проверена ревизия `ccd81f6473b8017ffa5fc8da1a8560fc508f5de2` по
+[LIMIT_TASK](1c/LIMIT_TASK.md), SQL-01. Замечаний к ограниченному контракту
+не обнаружено. Проверены PG-only reserved token, оба SELECT grammar пути,
+области UNION/subqueries, native ROWS/OFFSET/FETCH, root guard и `!yytrial`.
+Нормализованные grammar conflicts остаются прежними 158/11. Native ограничения
+имён колонок body wrapper и ORDER BY у UNION не являются регрессиями LIMIT.
+
+Рабочее дерево перед review чистое. Использована существующая Debug/Linux/Super
+сборка `/tmp/firebird-pgwire-1c-build/gen/Debug/firebird`, без новой сборки.
+SHA256 production diff `git diff 9f94454527 ccd81f6473 -- src`:
+`077cb5380bac50d0be324fcec46f9914b6542a973c92b4810a76db4d451c8105`.
+Engine `36de1e2dcf6320439195e79efa153b4f18acace6a1b1326ab46e0ec4d3bf4cb9`
+и PgWire `56302018b7cec2c643d90e99570f56bbdee1c795b8bfcd730ae07a2830244ced`
+совпадают с отчётом реализации.
+
+| Независимо повторённая проверка | Результат |
+|---|---|
+| SQL/session/isql units | PASS: 575 / 5 / 13 |
+| `--limits` | PASS: 112 libpq checks, 5 сравнений LIMIT/FIRST/ROWS, 9 native observations, 44 raw refusals/recovery, portals |
+| `--strings` | PASS: 156 запросов, raw/native/cache/stored source, 1126 OO checks |
+
+Units запускались из tests/ указанной сборки с LD_LIBRARY_PATH на её lib/.
+TCP-команды из корня репозитория, с разрешённым локальным TCP:
+
+```sh
+python3 -B pg_wire_protocol/tools/pgwire_1c_smoke.py --limits --firebird-dir /tmp/firebird-pgwire-1c-build/gen/Debug/firebird --work-dir /tmp/firebird-pgwire-limit-review-20261111 --libpq /lib/x86_64-linux-gnu/libpq.so.5 --timeout 120
+python3 -B pg_wire_protocol/tools/pgwire_1c_smoke.py --strings --firebird-dir /tmp/firebird-pgwire-1c-build/gen/Debug/firebird --work-dir /tmp/firebird-pgwire-limit-native-review-20261111 --libpq /lib/x86_64-linux-gnu/libpq.so.5 --timeout 120
+```
+
+Оба summary.json: completed=true, соответствующий passed=true, exit_code=0,
+forced_kill=false, revision=ccd81f6473, пустой production diff. Runtime/security
+DB/test DB отдельные; рабочие базы не затрагивались. Остальные ранее записанные
+suites заново не запускались; Psycopg 3 live по-прежнему SKIP, исходные 04/17
+и запуск 1С не приняты. SQL-01 закрыт, SQL-02 остаётся открытым.
+
+Следующим выделен APP-07, [binary BLOB output](1c/BINARY_BLOB_OUTPUT_TASK.md),
+для чтения BinaryData в selected06. Исследование каталогов APP-01 выявило
+отсутствие numeric schema ID и отдельные вопросы PG/native имён и collation;
+они сохранены в BACKLOG. В этом архитектурном диалоге изменена только документация,
+новая реализация и git commit не выполнялись.
+
 ## 11 ноября 2026: literal LIMIT в PG4
 
 [Задание SQL-01](1c/LIMIT_TASK.md) реализовано поверх

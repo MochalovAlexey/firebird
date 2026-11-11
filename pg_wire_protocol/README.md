@@ -79,6 +79,15 @@ Named statements переживают commit; portals сохраняются ч�
 
 P7 включает узкое исправление native release_attachment для нескольких prepared requests одного Statement; падение воспроизведено также через native TCP без PgWire. Grammar, public statement metadata и CLOOP не меняются. Отдельный ON CONNECT shutdown assertion !child остаётся неисправленным и в P7 не перепроверялся. P8 codecs прошли целевую Linux/Super приёмку: восемь групп; P9/M2 принят для совместимого SQL; следующий этап — P10.
 
+Binary BLOB subtype 0 теперь выдаётся как bytea (OID 17, size/typmod -1): text
+`\x` + lowercase hex либо исходные binary bytes. NULL и пустой BLOB различаются,
+NUL/invalid UTF8 в payload допустимы. Simple/Extended, RETURNING и native PSQL
+используют текущую transaction и IBlob только на время decode одной строки.
+Общий бюджет DataRow учитывает все поля и фактический frameBytes; превышение —
+0A000 без частичного DataRow. Другие BLOB subtypes и input остаются отвергнутыми;
+SQL type/cast bytea и SET bytea_output не добавлены. Контракт и синтетическая
+selected06-проверка — в [1c/README](1c/README.md), evidence — в [VALIDATION](VALIDATION.md).
+
 ## Клиентская приёмка P9/M2
 
 Целевой Linux/Super профиль прошёл 17 групп libpq/raw/Psycopg 3 и регрессии; [evidence](VALIDATION.md). Проверены настоящий nonblocking libpq 14.24 и Psycopg 3.3.6 с libpq 18.6. Psycopg 3 поддерживает совместимый SQL без parameters при `autocommit=True`, Simple/forced prepared и text/binary results, включая AsyncCursor. Для native transaction controls подтверждён отдельный профиль `prepare_threshold=None`.

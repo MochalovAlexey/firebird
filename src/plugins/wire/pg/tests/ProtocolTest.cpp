@@ -660,6 +660,22 @@ void verifyExtendedBackend(IMaster* master)
 	};
 	require(connection.output == binary, "Binary RowDescription/DataRow changed bytes or format");
 	connection.output.clear();
+	protocol.rowDescription({{"b", 17, -1, -1, 1}});
+	protocol.dataRow({std::string("\0\xff", 2)}, {1});
+	const Bytes bytea = {
+		'T', 0, 0, 0, 26, 0, 1, 'b', 0,
+		0, 0, 0, 0, 0, 0, 0, 0, 0, 17, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0, 1,
+		'D', 0, 0, 0, 12, 0, 1, 0, 0, 0, 2, 0, 0xFF
+	};
+	require(connection.output == bytea, "bytea OID/size/typmod/raw payload differs");
+	connection.output.clear();
+	protocol.dataRow({std::string("\\x005c27ff"), std::string("\\x"), std::nullopt});
+	const Bytes hex = {
+		'D', 0, 0, 0, 30, 0, 3, 0, 0, 0, 10, '\\', 'x', '0', '0', '5', 'c', '2', '7', 'f', 'f',
+		0, 0, 0, 2, '\\', 'x', 0xFF, 0xFF, 0xFF, 0xFF
+	};
+	require(connection.output == hex, "bytea hex/empty/NULL wire lengths differ");
+	connection.output.clear();
 	protocol.dataRow({std::string("\0\xFF", 2), std::string("\xD0\xAF"), std::nullopt}, {1, 0, 1});
 	const Bytes mixed = {
 		'D', 0, 0, 0, 22, 0, 3, 0, 0, 0, 2, 0, 0xFF,

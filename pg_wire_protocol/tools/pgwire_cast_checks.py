@@ -208,7 +208,7 @@ def casts_protocols(h):
             ('USING(A INTEGER=?) DO SELECT :A::BIGINT FROM RDB$DATABASE','0A000'),
             ('UPDATE OR INSERT INTO CAST_ROWS(ID,V) VALUES(899,1::INT8) MATCHING(ID)','0A000'),
             ('CREATE VIEW CAST_BAD_SYNTAX AS SELECT 1::','42601'),
-            ('SELECT 1::BLOB','0A000'),  # Existing output codec limit, not a substitute type.
+            ('SELECT 1::BLOB SUB_TYPE TEXT','0A000'),  # Non-binary BLOB output remains unsupported.
         ]
         for sql,error in invalid:
             raw.exchange(parse('bad',sql)+parse('discarded','INSERT INTO CAST_ROWS(ID,V) VALUES(899,999)')+

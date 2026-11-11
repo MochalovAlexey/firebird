@@ -48,6 +48,32 @@ psycopg2 transactional mode и connection context. Контракт и гран�
 Это не полная PG transaction compatibility или запуск 1С; остальные options,
 default_transaction_*, произвольные `$n`, custom cast targets, общий LIMIT/OFFSET и каталоги остаются за границей.
 
+## Binary BLOB output как bytea
+
+Поддержан только SQL_BLOB subtype 0 / BINARY с размером ISC_QUAD: OID 17,
+typeSize -1, typmod -1. Text format — `\x` + lowercase hex; binary format —
+исходные байты. NUL/invalid UTF8 допустимы. NULL определяется native null indicator
+и не открывает handle; пустой BLOB имеет text `\x` или binary length 0.
+
+Simple/Extended cursor и singleton paths, DML RETURNING, native BLOCK/PROCEDURE
+используют IBlob в текущей transaction. Decode заимствует контекст на одну строку;
+Parse/Describe/Bind не открывают BLOB, prepared metadata не удерживает transaction
+или contents. Сегменты читаются порциями 4096 байт, пустые сегменты не являются EOF.
+Handle закрывается до DataRow, при ошибке освобождается без подмены диагностики.
+
+Один DataRow ограничен фактическим frameBytes: `4 + 2 + 4*N + сумма wire values`,
+без тега D. Text bytea расходует `2+2*bytes`. Все BLOB/scalar/NULL columns и formats
+учитываются вместе до накопления очередной порции; точная граница допускается
+только после проверки EOF. Превышение — 0A000 без частичного DataRow или усечения;
+Protocol сохраняет preflight. Ошибка результата может следовать за engine effects:
+implicit сегмент откатывается, T переходит в E до recovery.
+
+TEXT/прочие subtype остаются metadata refusal 0A000. Input BLOB (включая NULL
+input), SQL bytea type/casts/literals, сравнения/индексы/OCTETS/large-object API
+и SET bytea_output не добавлены. Parser/engine/API/InputCodec/зависимости прежние.
+Контракт — [1c/README](1c/README.md), проверки — [VALIDATION](VALIDATION.md).
+APP-07 закрывает только output; APP-02/SQL-06 и исходный сценарий 1С остаются открыты.
+
 ## Literal LIMIT в PG4
 
 `SELECT … [ORDER BY …] LIMIT n` поддержан для integer literal 0…2147483647
@@ -188,7 +214,7 @@ P7 включает native cleanup fix нескольких requests одног�
 
 Numeric не проходит через float и не округляется: overflow, непредставимая дробь и numeric NaN/Infinity дают 22003. Malformed numeric binary — 22P03, включая ненулевые digits, скрываемые dscale; malformed text — 22P02. Float decimal overflow/underflow вне представимого диапазона — 22003, malformed text — 22P02, неверная binary length — 22P03.
 
-Temporal text принимает строгий ISO `YYYY-MM-DD`, `HH:MM:SS[.ffffff]`, `YYYY-MM-DD HH:MM:SS[.ffffff]` либо разделитель `T`. Дробь содержит до шести цифр; пятая/шестая должны быть нулевыми для точного 100 µs native значения. Binary µs также должны делиться на 100 без остатка. Invalid text format — 22007; календарные/временные границы, непредставимая точность и infinity — 22008; неверная binary length — 22P03. Текстовые BC/TZ suffix не входят в ISO grammar и дают 22007; binary даты до 0001 года, 24:00 и leap second дают 22008. `integer_datetimes=on` отражает binary layout; TimeZone не публикуется. BLOB/ARRAY/OCTETS/DECFLOAT/TZ остаются отдельной работой.
+Temporal text принимает строгий ISO `YYYY-MM-DD`, `HH:MM:SS[.ffffff]`, `YYYY-MM-DD HH:MM:SS[.ffffff]` либо разделитель `T`. Дробь содержит до шести цифр; пятая/шестая должны быть нулевыми для точного 100 µs native значения. Binary µs также должны делиться на 100 без остатка. Invalid text format — 22007; календарные/временные границы, непредставимая точность и infinity — 22008; неверная binary length — 22P03. Текстовые BC/TZ suffix не входят в ISO grammar и дают 22007; binary даты до 0001 года, 24:00 и leap second дают 22008. `integer_datetimes=on` отражает binary layout; TimeZone не публикуется. Binary BLOB output добавлен отдельным APP-07; input/прочие BLOB subtype, ARRAY/OCTETS/DECFLOAT/TZ остаются отдельной работой.
 
 ## P9: клиентский профиль и подтверждённые ограничения
 
@@ -242,6 +268,7 @@ EMPTY определяется ограниченным lexer только дл�
 | Named/unnamed statements и portals | Нет | Нет | Да, с лимитами и проверенным lifetime | Да |
 | Bind с native `?` либо zero parameters | Нет | Нет | Да, по engine metadata | Да |
 | Postfix casts `::` | Исторически parser error | Исторически parser error | PG4: native non-array builtin targets + postfix-only INT8, только корневые SELECT/DML | Custom targets/сохранённый SQL требуют отдельного этапа |
+| Binary BLOB output | Исторически metadata refusal | Исторически metadata refusal | Subtype 0 → bytea OID 17, text hex / raw binary, общий DataRow budget | Input/SQL type/casts и остальные subtypes не добавлены |
 | Literal `LIMIT n` | Исторически parser error | Исторически parser error | PG4 SELECT tail, integer 0…2147483647 в корневых SELECT/DML; native RowsClause | Общий LIMIT/OFFSET и сохранённый SQL требуют отдельного этапа |
 | SQL `$n` | Исторически parser error | Исторически parser error | PG4: только последовательные уникальные inputs в SELECT/INSERT/UPDATE/DELETE/MERGE | Произвольная нумерация требует отдельного этапа |
 | I/T/E, native SET TRANSACTION/COMMIT/ROLLBACK | Implicit Query transaction | Да, plugin-local controls после engine prepare | Да, включая implicit cycle до Sync | Да |
@@ -300,7 +327,7 @@ EMPTY определяется ограниченным lexer только дл�
 - PostgreSQL grammar/functions/catalog compatibility — будущий engine этап. Если он станет обязательным для целевого приложения, M3 этого приложения зависит от него явно.
 - Protocol 3.2, direct TLS negotiation, GSS encryption, PostgreSQL SCRAM/MD5 и channel binding — отдельные возможности. M3 начинает с password exchange внутри TLS и существующих Firebird credentials.
 - Полный предварительный разбор Simple Query остаётся отложенным: поддержаны последовательные скрипты с остановкой на первой окончательной ошибке. COPY, libpq pipeline mode, SQL named cursors, large-object API, LISTEN/NOTIFY и replication — отдельные wire/session contracts.
-- BLOB/bytea, ARRAY, OCTETS, DECFLOAT, типы с часовыми поясами и PostgreSQL custom types — отдельные codecs. Firebird BLOB handle не выдаётся за bytea.
+- Binary BLOB subtype 0 выдаёт содержимое как bytea; input/прочие BLOB subtype, SQL bytea type/casts, ARRAY, OCTETS, DECFLOAT, типы с часовыми поясами и PostgreSQL custom types остаются отдельной работой. Firebird BLOB handle не выдаётся за bytea.
 - Remote security database и базы, требующие ключ шифрования от native клиента, не входят в начальный authentication profile.
 - Текущая платформа — Linux/Super. SuperClassic/Classic пока диагностируются с сохранением native; для них требуется отдельная работа и приёмка. Windows host wiring/runtime отсутствуют; `.dll` входит в архитектуру plugin ABI, но не доказывает готовность Windows build.
 

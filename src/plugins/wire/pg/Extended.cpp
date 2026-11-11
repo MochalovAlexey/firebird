@@ -503,7 +503,8 @@ bool QueryExecutor::process(Protocol& protocol, const Message& message)
 						throw ProtocolError("XX000", "Statement unexpectedly changed the transaction");
 					if (hasOutput)
 					{
-						protocol.dataRow(portal.output->decode(portal.buffer.data(), portal.buffer.size()), portal.formats);
+						protocol.dataRow(portal.output->decode(portal.buffer.data(), portal.buffer.size(),
+							protocol.frameLimit(), attachment, transaction), portal.formats);
 						portal.rows = 1;
 					}
 				}
@@ -526,7 +527,8 @@ bool QueryExecutor::process(Protocol& protocol, const Message& message)
 				}
 				if (result != IStatus::RESULT_OK || portal.rows == std::numeric_limits<std::uint64_t>::max())
 					throw ProtocolError("XX000", "Invalid engine fetch result");
-				protocol.dataRow(portal.output->decode(portal.buffer.data(), portal.buffer.size()), portal.formats);
+				protocol.dataRow(portal.output->decode(portal.buffer.data(), portal.buffer.size(),
+					protocol.frameLimit(), attachment, transaction), portal.formats);
 				++portal.rows;
 				++fetched;
 			}

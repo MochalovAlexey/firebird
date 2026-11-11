@@ -125,6 +125,7 @@ public:
 	Protocol(IMaster* master, IWireConnection* connection, Limits limits = {});
 	Protocol(const Protocol&) = delete;
 	Protocol& operator=(const Protocol&) = delete;
+	unsigned frameLimit() const noexcept { return limits.frameBytes; }
 
 	// false means EOF before the next frame. Truncation inside a frame is an error.
 	// Declines SSL/GSS once each with N.

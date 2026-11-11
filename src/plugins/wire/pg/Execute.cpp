@@ -546,7 +546,8 @@ bool QueryExecutor::execute(Protocol& protocol, std::string_view sql)
 							break;
 						if (result != IStatus::RESULT_OK || rows == std::numeric_limits<std::uint64_t>::max())
 							throw ProtocolError("XX000", "Invalid engine fetch result");
-						protocol.dataRow(output.decode(buffer.data(), buffer.size()));
+						protocol.dataRow(output.decode(buffer.data(), buffer.size(),
+							protocol.frameLimit(), attachment, transaction));
 						++rows;
 					}
 				}
@@ -561,7 +562,8 @@ bool QueryExecutor::execute(Protocol& protocol, std::string_view sql)
 						throw ProtocolError("XX000", "Statement unexpectedly changed the transaction");
 					if (hasOutput)
 					{
-						protocol.dataRow(output.decode(buffer.data(), buffer.size()));
+						protocol.dataRow(output.decode(buffer.data(), buffer.size(),
+							protocol.frameLimit(), attachment, transaction));
 						rows = 1;
 					}
 				}

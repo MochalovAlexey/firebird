@@ -1,6 +1,6 @@
 # Незавершённые задачи PgWire и профиля 1С
 
-Актуализировано 11 ноября 2026 года: review `9f94454527` (postfix casts) и реализация literal LIMIT поверх этой ревизии, оставленная на review пользователя.
+Актуализировано 11 ноября 2026 года: review `ccd81f6473` (literal LIMIT) и реализация binary BLOB output поверх этой ревизии, оставленная на review.
 Это единый список незакрытых работ и ограничений. [PLAN](PLAN.md) задаёт порядок,
 [COMPATIBILITY](COMPATIBILITY.md) — действующий контракт,
 [VALIDATION](VALIDATION.md) — доказательства. Подробности профиля — в [1c/README](1c/README.md).
@@ -25,7 +25,7 @@
 
 | ID | Статус | Что осталось / условие закрытия | Основание |
 |---|---|---|---|
-| SQL-01 | Закрыто по реализации, 11.11.2026; ожидает review | Literal `LIMIT 0…2147483647`, ORDER/UNION/subqueries, native RowsClause; libpq/raw/native/cache и обязательные регрессии PASS. База `9f94454527`, незакоммиченный diff оставлен пользователю. SQL-02 этим не закрыт. | [LIMIT_TASK](1c/LIMIT_TASK.md), [проверки](VALIDATION.md#11-ноября-2026-literal-limit-в-pg4) |
+| SQL-01 | Закрыто, 11.11.2026 | `ccd81f6473`: literal `LIMIT 0…2147483647`, native RowsClause; review без замечаний, независимый повтор libpq/raw/native/cache PASS. SQL-02 этим не закрыт. | [LIMIT_TASK](1c/LIMIT_TASK.md), [review](VALIDATION.md#11-ноября-2026-архитектурный-review-literal-limit) |
 | SQL-02 | Открыто | LIMIT ALL/NULL, параметры/выражения count, более широкий диапазон и PG OFFSET. Учесть отличие native NULL count; не закрывать вместе с SQL-01. | [LIMIT_TASK](1c/LIMIT_TASK.md) |
 | SQL-03 | Открыто | Повторы/пропуски/перестановки `$n`, согласование типов и сохранение Bind positions. Сейчас разрешены только уникальные последовательные номера; предел 32767 не подтверждает поддержку максимального engine message. | [NUMBERED_PARAMETERS_TASK](1c/NUMBERED_PARAMETERS_TASK.md) |
 | SQL-04 | Открыто | Типизация параметров из Parse OIDs при недостаточном SQL-контексте. Сейчас `SELECT $1` даёт HY004 даже с OID=23; нужен отдельный минимальный проект и проверки. | [Параметры](1c/README.md#последовательные-numbered-parameters-первый-срез) |
@@ -52,11 +52,20 @@
 | ID | Статус | Что осталось / условие закрытия | Основание |
 |---|---|---|---|
 | APP-01 | Открыто | Настоящие pg_class/pg_database/namespaces/visibility, current_database, pg_my_temp_schema и требуемые catalog queries. Согласованные объекты, данные и права; не пустые успешные ответы. | [Следующие этапы 1С](1c/README.md#следующие-небольшие-этапы) |
-| APP-02 | Открыто | bytea/BLOB, mchar/mvarchar, regnamespace, BINROWVER и используемые функции/агрегаты; форматы, сравнения, сортировка, metadata и codecs. Native BLOB handle не является bytea. | [Профиль 1С](1c/README.md), [COMPATIBILITY](COMPATIBILITY.md) |
+| APP-02 | Открыто | bytea/BLOB, mchar/mvarchar, regnamespace, BINROWVER и используемые функции/агрегаты; форматы, сравнения, сортировка, metadata и codecs. Первый выходной срез реализован в APP-07; input/SQL types/casts/comparisons/index semantics им не закрываются. | [Профиль 1С](1c/README.md), [COMPATIBILITY](COMPATIBILITY.md) |
 | APP-03 | Открыто | Shared/exclusive advisory locks и их transaction/session lifetime; реальные конфликты между соединениями. Таймаут настройки отдельно в SES-03. | [Профиль 1С](1c/README.md) |
 | APP-04 | Открыто | PG temporary DDL/pg_temp, serial4, WITHOUT OIDS, ANALYZE и fasttrun_ext; сначала установить требуемые реальные эффекты. | [Профиль 1С](1c/README.md) |
 | APP-05 | Открыто | Чтение настоящих служебных таблиц/конфигурации и DML на исходной схеме/типах 1С. Синтетический поиск и 92 параметра этого не подтверждают. | [NUMBERED_PARAMETERS_TASK](1c/NUMBERED_PARAMETERS_TASK.md), [VALIDATION](VALIDATION.md) |
 | APP-06 | Открыто | Сквозной сценарий 1С/Гилёва с зафиксированными версиями, настройками и фактической библиотекой клиента. Открытие базы и нагрузка ещё не приняты. | [Профиль 1С](1c/README.md), P11/P12 в [PLAN](PLAN.md) |
+| APP-07 | Закрыто по реализации, 11.11.2026; ожидает review | База `ccd81f6473`, незакоммиченный diff: subtype 0 → bytea OID 17 через IBlob, text/binary, общий DataRow budget, lifetime/cleanup. Native/libpq/raw/unit и обязательные регрессии PASS. InputCodec/engine/API/dependencies прежние; APP-02/SQL-06 остаются открыты. | [BINARY_BLOB_OUTPUT_TASK](1c/BINARY_BLOB_OUTPUT_TASK.md), [проверки](VALIDATION.md#11-ноября-2026-binary-blob-output) |
+
+Для APP-01 исследование выявило отдельные архитектурные вопросы: RDB$SCHEMAS
+не содержит числового schema ID; простое LOWER(native name) неоднозначно при
+совместном существовании quoted/unquoted имён. Native default collation label
+также не является PostgreSQL LC_COLLATE. Стабильные namespace IDs, правила имён
+и collation contract нужно решить до объявления совместимости catalog queries.
+Возможность SQL-регистра через штатный AFTER ANY DDL STATEMENT исследована,
+но его реализация/публичный catalog contract пока не выбраны. APP-01 не закрыт.
 
 ## Драйверы, wire и платформы
 
@@ -76,7 +85,7 @@
 | VAL-01 | SKIP | Live-повтор Psycopg 3 с уже реализованными BEGIN, typed `$n`, `::date` и named preparation. В текущем окружении клиент отсутствует; обновление теста не является PASS. | [VALIDATION](VALIDATION.md), [P9](COMPATIBILITY.md#p9-клиентский-профиль-и-подтверждённые-ограничения) |
 | VAL-02 | Открыто | Актуализировать или явно вывести из действующей приёмки исторический P3 с устаревшими отказами VARCHAR/NUMERIC/DML. Не менять корректный engine ради старого отрицательного ожидания; не скрывать FAIL. | [VALIDATION](VALIDATION.md), tools/pgwire_query_smoke.py |
 | VAL-03 | Не проверено | Отдельная database dialect 1 для проверки BIGINT helper; проверка client dialect 1 на dialect-3 БД уже есть и не заменяет её. | [Postfix cast validation](VALIDATION.md) |
-| VAL-04 | Не проверено | Auth-plugin preemption и fault injection ошибок close/free/commit. Review ownership и обычный shutdown не заменяют эти проверки; scope следующей приёмки определить явно. | [TEST_PLAN](TEST_PLAN.md), [VALIDATION](VALIDATION.md) |
+| VAL-04 | Частично проверено; открыто | APP-07: ABI unit injection ошибок BLOB open/read/close и consuming close/release PASS. Реальные engine BLOB I/O faults не инжектировались. Auth-plugin preemption и остальные close/free/commit faults не проверены; unit mocks и обычный shutdown не заменяют live-проверки. | [TEST_PLAN](TEST_PLAN.md), [VALIDATION](VALIDATION.md) |
 | VAL-05 | P12, не принято | Финальный M3: реальный прикладной профиль по удалённому TCP с TLS/cancellation, native coexistence, permissions, cross-visibility, concurrency и cleanup. Сверить все открытые ID и ограничения, прежде чем объявлять завершение. | P12 в [PLAN](PLAN.md) |
 | NAT-01 | Отдельный baseline defect | Shutdown во время ON CONNECT: assertion alloc.cpp `!child`, воспроизводился также native-only. По решению пользователя исключён из P6, не исправлен. | [TEST_PLAN](TEST_PLAN.md), [VALIDATION](VALIDATION.md) |
 | NAT-02 | Отдельный baseline defect | READ COMMITTED READ CONSISTENCY + AUTO COMMIT: assertion Savepoint.cpp:833. Успех SNAPSHOT AUTO COMMIT не закрывает это сочетание. | [COMPATIBILITY](COMPATIBILITY.md#семантика-результатов-и-транзакций) |

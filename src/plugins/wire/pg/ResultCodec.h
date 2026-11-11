@@ -34,7 +34,10 @@ public:
 	unsigned messageLength() const noexcept { return length; }
 	std::size_t retainedBytes() const noexcept;
 	const std::vector<Column>& columns() const noexcept { return descriptions; }
-	std::vector<std::optional<std::string>> decode(const void* buffer, unsigned bufferLength) const;
+	// Execution context is borrowed for this row only; only non-NULL BLOBs need it.
+	std::vector<std::optional<std::string>> decode(const void* buffer, unsigned bufferLength,
+		unsigned frameBytes = Limits{}.frameBytes,
+		IAttachment* attachment = nullptr, ITransaction* transaction = nullptr) const;
 
 private:
 	struct Field

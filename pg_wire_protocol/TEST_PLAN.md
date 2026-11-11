@@ -4,6 +4,42 @@
 
 Python scaffold мигрирован под текущий контракт: 58 live cases прошли в P6. Начальные host tests расположены в src/common/tests/WireProtocolConfigTest.cpp, src/remote/server/wire/tests и isolated tools harness. P2/P3/P4 приёмка сохранена в VALIDATION. Предыдущая P5-ревизия прошла целевую Linux/Super приёмку с native ограничением READ CONSISTENCY + AUTO COMMIT; P6 повторил сборку, unit tests и целевые регрессии по [VALIDATION.md](VALIDATION.md). Целевой P6/M1 Linux/Super принят с известными native ограничениями, включая отдельно исключённый ON CONNECT shutdown. P7 Extended Query прошёл целевую Linux/Super приёмку: 16 групп. P8 codecs прошли целевую Linux/Super приёмку: восемь групп. P9 прошёл 17 групп с реальными C libpq, raw-wire и ограниченным профилем Psycopg 3; целевой M2 Linux/Super для совместимого SQL и реализованных codecs принят. Следующий этап — P10. PASS относится к зафиксированным cases/fixtures, а наличие строки в полной матрице не означает её прохождения.
 
+## Подэтап 1С: binary BLOB output
+
+`pgwire_1c_smoke.py --blobs` / `pgwire_blob_checks.py` используют существующий
+libpq/raw/native harness. Небольшой `pgwire_blob_fixture.cpp` создаёт IBlob API
+fixtures и перечитывает их с нового native attachment после commit.
+
+- SQL NULL, empty, все 256 байтов, NUL/backslash/quote/invalid UTF8; segmented и
+  stream, пустые и несколько сегментов, данные больше read buffer. Тип stream
+  проверяется getInfo; native bytes сравниваются независимо от wire.
+- Настоящие PQexec/execParams/prepare/Describe/execPrepared: OID 17, size/typmod -1,
+  точные text hex/binary payload и длины; PQunescapeBytea с PQfreemem для text.
+  Неизменный selected06 SQL на синтетической PUBLIC.PARAMS, несколько PartNo.
+- Simple/Extended cursor и singleton: SELECT/RETURNING, native BLOCK/PROCEDURE,
+  repeated prepared execution через commit/rollback; два portals, suspension/
+  resume/close/rebind, смешанные formats, NULL против empty. Parse/Bind не открывают
+  application transaction; $n root guard сохраняется, в PROCEDURE используется `?`.
+- Точная граница и превышение DataRow на байт в binary и text/mixed строках;
+  несколько BLOB, scalar и NULL. Огромный BLOB отвергается с ограниченным накоплением.
+  Ошибка следующей строки сохраняет предыдущую DataRow, новую частично не посылает.
+- Ошибки результата в I/T, Simple script rollback/stop, Extended E/25P02/Sync,
+  DML RETURNING overflow и native readback после rollback; SELECT recovery.
+  TEXT/другие subtype, input BLOB (также NULL), ::bytea и SET bytea_output отказаны.
+- ResultCodec/Protocol units: уменьшенный фактический frameLimit, общий budget,
+  scalar после BLOB, пустые сегменты, EOF после полного бюджета и последующий
+  непустой сегмент, ID zero без NULL indicator, malformed descriptor/context.
+  Минимальные ABI endpoints по образцу SessionTest проверяют ошибки open/read/close,
+  неожиданный read result/length, consuming close и release без двойного освобождения.
+  Unit injection не заменяет реальные engine I/O faults — оставшаяся область VAL-04.
+
+Обязательные регрессии: все pgwire unit executables, wire_socket_test,
+pgwire_codec_smoke.py, Simple/Extended и --casts. Меняются только непосредственно
+затронутые negative expectations binary BLOB; InputCodec и parser/core diff пустые.
+readelf DT_NEEDED сравнивается с baseline. Historical P3 VARCHAR FAIL (VAL-02)
+и known native crash repro не включаются в переоценку. APP-07 закрывает только
+output; APP-02/SQL-06, оригинальная схема/Bind и запуск 1С остаются вне приёмки.
+
 ## Подэтап 1С: literal LIMIT
 
 `pgwire_1c_smoke.py --limits` / `pgwire_limit_checks.py` расширяют существующий
@@ -53,7 +89,7 @@ libpq/raw/native harness и синтетические fixtures. OO helper ра�
   переводит T→E, 25P02 и rollback/recovery; Simple останавливается, Extended
   отбрасывает сообщения до Sync. Старые repeated/gapped/mixed `$n` отказаны.
 - Target boundaries: unknown/quoted/schema/domain/TYPE OF/arrays, неполный `::`,
-  `: :`/`:/*comment*/:`, неподдержанные aliases и BLOB output codec без подмены типа.
+  `: :`/`:/*comment*/:`, неподдержанные aliases и non-binary BLOB output без подмены типа; binary BLOB проверяется в APP-07.
 - Root guard: CTAS с CTE, VIEW/subquery, CHECK, stored PROCEDURE, BLOCK/local function,
   CALL/PROCEDURE/USING/UPDATE OR INSERT; native observer не видит объектов/строк.
   Прежний CAST и literal `::` сохраняются в исключённых контекстах.
@@ -97,7 +133,7 @@ Baseline этапа numbered inputs — 154/11; текущий postfix-срез 
 Generated numbering actions защищены `!yytrial`.
 Обязательны штатные SQL/Session/isql units, Extended и --settings/--begin/--strings.
 C/Python negative cases меняются только в новом контракте: недостаточный контекст
-остаётся HY004 даже с supplied OID; BLOB/custom types и DEALLOCATE ALL limits сохранены. Postfix casts проверяются отдельным срезом ниже.
+остаётся HY004 даже с supplied OID; input/non-binary BLOB, custom types и DEALLOCATE ALL limits сохранены. Postfix casts проверяются отдельным срезом ниже.
 Psycopg 3 запускается при наличии; отсутствие — SKIP без установки зависимостей.
 Фактические команды, SHA и PASS/FAIL/skip — в VALIDATION. Known crash repro исключены.
 

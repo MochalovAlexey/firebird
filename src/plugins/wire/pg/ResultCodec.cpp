@@ -71,6 +71,64 @@ template <typename T> std::string binaryInteger(T value)
 	return bytes;
 }
 
+void consume(std::size_t& remaining, std::size_t size)
+{
+	if (size > remaining)
+		throw ProtocolError("0A000", "Result message exceeds supported limits");
+	remaining -= size;
+}
+
+std::string readBlob(IAttachment* attachment, ITransaction* transaction, ISC_QUAD id,
+	bool binary, std::size_t& remaining)
+{
+	if (!attachment || !transaction)
+		throw ProtocolError("XX000", "Missing engine BLOB result context");
+	std::string value;
+	if (!binary)
+	{
+		consume(remaining, 2);
+		value = "\\x";
+	}
+	FbLocalStatus status;
+	RefPtr<IBlob> blob(REF_NO_INCR, attachment->openBlob(&status, transaction, &id, 0, nullptr));
+	check(&status);
+	if (!blob)
+		throw ProtocolError("XX000", "Missing engine BLOB result handle");
+	unsigned char scratch[4096];
+	for (;;)
+	{
+		unsigned size = 0;
+		const auto result = blob->getSegment(&status, sizeof(scratch), scratch, &size);
+		check(&status);
+		if (size > sizeof(scratch) || (result == IStatus::RESULT_NO_DATA && size))
+			throw ProtocolError("XX000", "Invalid engine BLOB result length");
+		if (result == IStatus::RESULT_NO_DATA)
+			break;
+		if (result != IStatus::RESULT_OK && result != IStatus::RESULT_SEGMENT)
+			throw ProtocolError("XX000", "Invalid engine BLOB read result");
+		const unsigned factor = binary ? 1 : 2;
+		if (size > remaining / factor)
+			throw ProtocolError("0A000", "Result message exceeds supported limits");
+		consume(remaining, size * factor);
+		if (binary)
+			value.append(reinterpret_cast<const char*>(scratch), size);
+		else
+		{
+			constexpr char hex[] = "0123456789abcdef";
+			for (unsigned i = 0; i < size; ++i)
+			{
+				value.push_back(hex[scratch[i] >> 4]);
+				value.push_back(hex[scratch[i] & 15]);
+			}
+		}
+		// Even with no budget left, read once more to distinguish EOF from overflow.
+	}
+	blob->close(&status);
+	check(&status);
+	blob.clear(); // Successful close consumes the interface; do not release it again.
+	return value;
+}
+
 } // namespace
 
 ResultCodec::ResultCodec(IMessageMetadata* logicalMetadata,
@@ -116,6 +174,14 @@ ResultCodec::ResultCodec(IMessageMetadata* logicalMetadata,
 		column.format = formats.empty() ? 0 : formats[formats.size() == 1 ? 0 : i];
 		switch (type)
 		{
+		case SQL_BLOB:
+			if (subtype || scale)
+				throw ProtocolError("0A000", "BLOB result subtype or modifiers are not supported");
+			if (capacity != sizeof(ISC_QUAD))
+				invalidMetadata();
+			column.oid = 17;
+			column.typeSize = -1;
+			break;
 		case SQL_SHORT:
 		case SQL_LONG:
 		case SQL_INT64:
@@ -230,13 +296,23 @@ std::size_t ResultCodec::retainedBytes() const noexcept
 	return bytes;
 }
 
-std::vector<std::optional<std::string>> ResultCodec::decode(const void* buffer, unsigned bufferLength) const
+std::vector<std::optional<std::string>> ResultCodec::decode(const void* buffer, unsigned bufferLength,
+	unsigned frameBytes, IAttachment* attachment, ITransaction* transaction) const
 {
 	if (bufferLength != length || (length && !buffer))
 		throw ProtocolError("XX000", "Invalid engine result buffer");
+	// Length word + field count + all field lengths, including NULL fields.
+	if (frameBytes < 6 || fields.size() > (frameBytes - 6) / 4)
+		throw ProtocolError("0A000", "Result message exceeds supported limits");
+	std::size_t remaining = frameBytes - 6 - fields.size() * 4;
 	const auto* bytes = static_cast<const unsigned char*>(buffer);
 	std::vector<std::optional<std::string>> result;
 	result.reserve(fields.size());
+	const auto append = [&](std::string value)
+	{
+		consume(remaining, value.size());
+		result.emplace_back(std::move(value));
+	};
 	for (unsigned i = 0; i < fields.size(); ++i)
 	{
 		const auto& field = fields[i];
@@ -249,38 +325,41 @@ std::vector<std::optional<std::string>> ResultCodec::decode(const void* buffer, 
 		const auto* address = bytes + field.offset;
 		if (descriptions[i].oid == 1700)
 		{
-			result.emplace_back(formatNumeric(address, field.type, field.scale, binary));
+			append(formatNumeric(address, field.type, field.scale, binary));
 			continue;
 		}
 		switch (field.type)
 		{
+		case SQL_BLOB:
+			result.emplace_back(readBlob(attachment, transaction, readValue<ISC_QUAD>(address), binary, remaining));
+			break;
 		case SQL_SHORT:
-			result.emplace_back(binary ? binaryInteger(readValue<ISC_SHORT>(address)) :
+			append(binary ? binaryInteger(readValue<ISC_SHORT>(address)) :
 				std::to_string(readValue<ISC_SHORT>(address)));
 			break;
 		case SQL_LONG:
-			result.emplace_back(binary ? binaryInteger(readValue<ISC_LONG>(address)) :
+			append(binary ? binaryInteger(readValue<ISC_LONG>(address)) :
 				std::to_string(readValue<ISC_LONG>(address)));
 			break;
 		case SQL_INT64:
-			result.emplace_back(binary ? binaryInteger(readValue<ISC_INT64>(address)) :
+			append(binary ? binaryInteger(readValue<ISC_INT64>(address)) :
 				std::to_string(readValue<ISC_INT64>(address)));
 			break;
 		case SQL_FLOAT:
 		case SQL_DOUBLE:
-			result.emplace_back(formatFloat(address, field.type, binary));
+			append(formatFloat(address, field.type, binary));
 			break;
 		case SQL_TYPE_DATE:
 		case SQL_TYPE_TIME:
 		case SQL_TIMESTAMP:
-			result.emplace_back(formatTemporal(address, field.type, binary));
+			append(formatTemporal(address, field.type, binary));
 			break;
 		case SQL_BOOLEAN:
 		{
 			const auto value = readValue<FB_BOOLEAN>(address);
 			if (value != FB_FALSE && value != FB_TRUE)
 				throw ProtocolError("XX000", "Invalid engine boolean result");
-			result.emplace_back(binary ? std::string(1, value == FB_TRUE ? '\1' : '\0') :
+			append(binary ? std::string(1, value == FB_TRUE ? '\1' : '\0') :
 				value == FB_TRUE ? "t" : "f");
 			break;
 		}
@@ -291,6 +370,7 @@ std::vector<std::optional<std::string>> ResultCodec::decode(const void* buffer, 
 				throw ProtocolError("XX000", "Invalid engine varying result length");
 			const std::string_view text(reinterpret_cast<const char*>(address + sizeof(ISC_USHORT)), size);
 			validateText(text);
+			consume(remaining, size);
 			result.emplace_back(text);
 			break;
 		}
