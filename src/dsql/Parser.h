@@ -406,6 +406,9 @@ private:
 	StmtNode* parsedDmlNode = nullptr;
 	bool anonymousParameters = false;
 	bool numberedParameters = false;
+	bool postfixCasts = false;
+
+	dsql_fld* makeBigIntField();
 
 	// Parser feedback for lexer
 	QualifiedName* introducerCharSetName = nullptr;

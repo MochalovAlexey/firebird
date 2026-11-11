@@ -38,7 +38,7 @@ context keys, счётчиков и реестров нет. Добавлена 
 PgWire выбирает dialect 4 при Simple Query, Extended Parse и повторной подготовке
 portal. Этот режим включает PG-дополнения грамматики; типы и арифметика сохраняют семантику dialect 3. Обычные одинарные строки учитывают новую настройку; native Q-строки и двойные кавычки сохраняются. Поддержаны `SELECT` без `FROM` и описанный ниже
 фиксированный профиль `lc_messages`/`client_encoding`, а также изменяемый `standard_conforming_strings`. Последовательные типизированные `$1` … `$n` поддержаны в ограниченном контракте ниже;
-`::` и LIMIT пока отвергаются; формы PG BEGIN без опций поддержаны отдельно ниже.
+Postfix `::` поддержан в ограниченном контракте ниже; LIMIT пока отвергается; формы PG BEGIN без опций поддержаны отдельно ниже.
 
 Ключ штатного statement cache содержит исходный клиентский dialect и эффективный режим строк: PG и
 native планы не смешиваются. Обычные native dialects 1/2/3 по-прежнему требуют
@@ -94,13 +94,62 @@ MAKE_parameter/GEN_port, Extended и codecs не изменены; номера 
 повторов и порядка: [positional parameters](https://www.postgresql.org/docs/18/sql-expressions.html#SQL-EXPRESSIONS-PARAMETERS),
 [PREPARE](https://www.postgresql.org/docs/18/sql-prepare.html),
 [Parse/Bind messages](https://www.postgresql.org/docs/18/protocol-message-formats.html).
-Произвольная нумерация, OID-driven inference, `::`, новые codecs и полная
+Произвольная нумерация, OID-driven inference, новые codecs и полная
 параметризация Psycopg 3 остаются отдельными этапами.
 
 `pgwire_1c_smoke.py --parameters` проверяет реальный libpq Bind, metadata,
 92 разных значения с native readback, поиск по FILENAME, CTE/MERGE/RETURNING,
 I/T/E/recovery и запреты. Это синтетическая форма selected 06/19, **не** исходная
 схема, BinaryData/bytea или открытие базы 1С. Результаты — в [VALIDATION](../VALIDATION.md).
+
+## Postfix cast `expression::type`: первый срез
+
+В клиентском PG dialect 4 непрерывный токен `::` создаёт прежний CastNode.
+Значения, округление, truncation, overflow и вывод входных типов соответствуют
+**Firebird CAST**, а не всем PostgreSQL coercion/typmod rules. Приоритет `::`
+выше unary +/−, арифметики, конкатенации, COLLATE и AT; цепочка левоассоциативна.
+Прежние взаимные native приоритеты не меняются. `: :` и `:/*comment*/:` — не оператор.
+
+```sql
+SELECT 1::INT8;
+SELECT (1.0)::int;
+SELECT $1::INTEGER::VARCHAR(12); -- input INTEGER (OID 23), output VARCHAR (1043)
+UPDATE CAST_ROWS SET V=$1::BIGINT WHERE ID=$2;
+```
+
+Цель переиспользует `non_array_type`: native builtin types без массивов. Проверены
+INTEGER/INT, SMALLINT, BIGINT, VARCHAR(n), BOOLEAN, DOUBLE PRECISION и дополнительные
+native границы. Bare VARCHAR сохраняет native default 255, NUMERIC — native defaults;
+это не unlimited PG VARCHAR/NUMERIC. Существующие codec limits, включая выдачу BLOB
+и типов с time zone, сохраняются; синтаксис не добавляет новых wire codecs.
+
+Единственный новый alias — unquoted INT8 → BIGINT **только** после `::`, без учёта
+регистра. INT8 остаётся именем колонки/alias; `CAST(x AS INT8)` и quoted INT8
+в обычном CAST по-прежнему разрешают существующий домен. Postfix `::"INT8"`,
+`::schema.int8`, домены/TYPE OF/arrays, INT2/INT4/FLOAT4/FLOAT8/BOOL, bytea,
+mvarchar и regnamespace не поддерживаются. Alias не зависит от schema/search_path.
+
+Первый срез разрешён только в корневых SELECT/INSERT/UPDATE/DELETE/MERGE, включая
+CTE/subqueries. Распознанные DDL/CTAS/VIEW/stored PSQL, EXECUTE BLOCK,
+CALL/EXECUTE PROCEDURE, USING и UPDATE OR INSERT с настоящим `::` дают 0A000
+до DSQL/эффектов; неверная грамматика остаётся syntax error. Literal `'::'`,
+Q-strings, comments и quoted identifiers guard не включают. Прежний CAST в этих
+контекстах сохраняется. Это исключает сохранение PG syntax в native source:
+serializer, rewriting и расширение внутренних prepare в этот этап не входят.
+
+Parse OID по-прежнему не задаёт тип engine. В `$1::INTEGER::VARCHAR(12)` внутренний
+CastNode выводит INTEGER input, внешний меняет результат; при несовместимом OID
+остаётся 0A000. Ограничения последовательных `$n` и native `?` сохраняются.
+Native dialects 1/2/3 не принимают `::`, но сохраняют CAST, INT8 identifiers и
+`:variable`. Source offsets и разделение statement cache по dialect сохранены.
+
+Приёмка — `pgwire_1c_smoke.py --casts` и прежний OO helper внутри `--strings`;
+команды, SHA, разбор grammar conflicts и результаты — в [VALIDATION](../VALIDATION.md).
+Это синтетические проверки форм из selected 04/08/10/11, не выполнение исходных
+запросов с каталогами/custom types/advisory locks/LIMIT и не открытие базы 1С.
+Основания: [type casts](https://www.postgresql.org/docs/18/sql-expressions.html#SQL-SYNTAX-TYPE-CASTS),
+[precedence](https://www.postgresql.org/docs/18/sql-syntax-lexical.html#SQL-PRECEDENCE),
+[integer aliases](https://www.postgresql.org/docs/18/datatype-numeric.html#DATATYPE-INT).
 
 ## Установка на отдельной тестовой базе
 
@@ -137,9 +186,15 @@ SetTransactionNode и общий executor. Оба этапа в `1f9af20db4`/`97
 прошли архитектурный review и повторную целевую проверку; результаты — в VALIDATION.
 
 Срез [последовательных $1 … $n](NUMBERED_PARAMETERS_TASK.md) реализован через
-штатные Parser/ParameterNode и Bind; изменения и результаты оставлены на review.
+штатные Parser/ParameterNode и Bind; ревизия `df37bb11fa` прошла архитектурный
+review и повторную целевую приёмку, см. VALIDATION.
 Разрешены уникальные номера по порядку в SELECT/INSERT/UPDATE/DELETE/MERGE
-с типами из SQL-контекста. Точный контракт приведён ниже.
+с типами из SQL-контекста. Точный контракт приведён выше.
+
+Реализован [postfix cast expression::type](POSTFIX_CAST_TASK.md) через
+существующий CastNode и native types, с INT8 → BIGINT только в postfix target.
+Первый срез ограничивается SELECT/DML без сохранения PG SQL в metadata.
+Изменения и целевые проверки оставлены на review; контракт описан выше.
 
 Срез [фиксированной диагностики](FIXED_DIAGNOSTICS_TASK.md) реализован через
 существующий SetPgSessionNode: только `escape_string_warning=off` и
@@ -149,7 +204,7 @@ SetTransactionNode и общий executor. Оба этапа в `1f9af20db4`/`97
 | Группа исходного задания | Текущее состояние / что требуется |
 |---|---|
 | 1. Начало сессии | SELECT без FROM, ограниченная identity-функция, последовательные скрипты и все семь startup SET принимаются; реальные эффекты enable_mergejoin, cpu_operator_cost и lock_timeout отложены |
-| 2. SQL и параметры | Simple Query выполняет скрипты совместимого SQL; PG BEGIN без опций поддержан; `$n`, `::` и LIMIT ещё не реализованы |
+| 2. SQL и параметры | Simple Query выполняет скрипты совместимого SQL; PG BEGIN без опций и последовательные типизированные `$n` поддержаны; postfix `::` добавлен для native builtin types; произвольная нумерация и LIMIT ещё не реализованы |
 | 3. Открытие базы | pg_class/pg_database/visibility и служебные таблицы 1С ещё не реализованы; нужны настоящие metadata и данные |
 | 4. Типы и функции | bytea, mchar/mvarchar и BINROWVER ещё не реализованы; сначала измерить форматы/семантику, затем использовать BLOB API, intl/collations и SQL/PSQL |
 | 5. Транзакции/конкуренция | PG BEGIN без опций использует реальные READ CONSISTENCY транзакции; native controls сохраняются; advisory locks и PG timeout semantics ещё не реализованы |
@@ -208,7 +263,7 @@ off и автоматический BEGIN psycopg2. Результаты и ог
 
 Это ограниченный контракт [BEGIN](https://www.postgresql.org/docs/18/sql-begin.html)
 и [transaction flow](https://www.postgresql.org/docs/18/protocol-flow.html#PROTOCOL-FLOW-MULTI-STATEMENT).
-Полная эквивалентность конкурентного DML PostgreSQL не заявляется. `$n`, `::`,
+Полная эквивалентность конкурентного DML PostgreSQL не заявляется. Произвольные `$n`, custom cast targets,
 LIMIT, PG transaction options/default_transaction_*, каталоги и запуск 1С
 остаются отдельными задачами. Whole-query preparse отложен: ранний COMMIT
 сохраняется при поздней syntax error. Прежние native defects не исправлялись.
@@ -432,7 +487,7 @@ assertion на текущей и предыдущей сборках; прове
 сериализации и описан в архитектурном review в VALIDATION.
 
 Не реализованы E-literals, dollar quoting, SET LOCAL/SESSION, DEFAULT, SHOW,
-RESET parameter, новые startup options, $n/::/LIMIT. Whole-query preparse
+RESET parameter, новые startup options, произвольные $n, custom cast targets и LIMIT. Whole-query preparse
 по-прежнему отложен. Полный startup batch и запуск 1С/Гилёва этим срезом не доказаны.
 
 ## Решение от 9 ноября 2026: последовательные скрипты, остановка на ошибке

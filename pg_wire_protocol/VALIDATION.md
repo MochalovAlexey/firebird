@@ -1,5 +1,225 @@
 # Проверки реализации
 
+## 10 ноября 2026: postfix casts, реализация для review
+
+Реализован ограниченный PG4 `expression::type` через прежний CastNode.
+Production-изменения: Parser.cpp, Parser.h, parse.y и обновлённый после разбора
+конфликтов parse-conflicts.txt. CastNode, ParameterNode, GEN_port, MAKE_parameter,
+wire production, codecs и API/flags не менялись. Общий helper BIGINT сохраняет
+прежний descriptor и client/database dialect checks; INT8 alias применяется
+только в postfix target. Git add/commit/amend/reset/checkout не выполнялись;
+исходные изменения пользователя в документации и POSTFIX_CAST_TASK сохранены.
+
+База: `df37bb11faa61ec9aa7e4970cbb48a3c5e667d18`, ветка `pg_wire_protocol`.
+SHA256 `git diff HEAD -- src`:
+`2a8d8675f0138b80f25e4d9d63dadb3f6cca9a5359578d531fb322449f398f04`.
+Сборка Debug/Linux/Super: `/tmp/firebird-pgwire-1c-build`.
+
+| Бинарник / исходник | SHA256 |
+|---|---|
+| Исходный libEngine14.so (`df37bb11fa`) | `5c12e32835d10e6dac40750f58ec6dd18de934210b8b01acd25cfcb594041785` |
+| Новый libEngine14.so | `f19fefaf762406c3629a793c650ffededd91b65293abf72ce2673554ee5dd009` |
+| libPgWire.so до и после | `56302018b7cec2c643d90e99570f56bbdee1c795b8bfcd730ae07a2830244ced` |
+| pgwire_1c_smoke.py | `86592298d25c217b94ee9834b252df67c93d6fb376b3c31e542b4021f3ac533a` |
+| pgwire_cast_checks.py | `1480b65cf3ebf637198db1b5bff694b272329f9c26feaf275fa1f951ad08fd18` |
+| pgwire_strings_api.cpp | `d3bb82b18372fef8157b18033db6a5f49fc4e02322edabad85ee3e5247c16d7a` |
+| pgwire_psycopg3.py | `4b40dcc7ac2c40e3a147bd82e55bf13c50cfd0b5fb28a79a38f09417e7820bab` |
+
+### PASS, пропуски и результаты
+
+Все обязательные suites прошли. Все запущенные серверы, включая промежуточные
+прогоны с ошибочными тестовыми ожиданиями, завершились с `exit_code=0`,
+`forced_kill=false`. У каждого runtime свои security DB, синтетическая база,
+порты и логи в новом `/tmp` каталоге; `runs` в summary фиксирует shutdown.
+Рабочие базы и база 1С не использовались. Новые зависимости не устанавливались.
+
+| Проверка | Результат | Work-dir (`/tmp/firebird-pgwire-…`) |
+|---|---|---|
+| Исходный отказ | `SELECT 1::INT8` → 42601; `SELECT CAST(1 AS BIGINT)` → 1, OID 20 | `cast-baseline-01` |
+| `make -j2` | PASS, exit 0 | build log `postfix-cast-build-01.log` |
+| `pgwire_tests` / isql | PASS: SQL 575, Session 5, isql 13 | build logs `postfix-cast-*-unit.log` |
+| `--casts` | PASS: 129 libpq checks, 32 пары выражений + две пары WITH LOCK, 13 native observations; 35 raw Parse rejection cases и recovery | `cast-03` |
+| `--strings` | PASS: 156 запросов, raw/stored source, 873 OO checks | `cast-strings-04` |
+| `--parameters` | PASS: 73 libpq checks, 13 native observations, 29 raw rejections, все 92 значения | `cast-parameters-01` |
+| Extended | PASS: 16 групп, C libpq/raw; async 20 commands/20 results, 40 poll calls | `cast-extended-01` |
+| Simple | PASS: 12 групп, C libpq/psycopg2/raw | `cast-simple-01` |
+| `--settings` | PASS: 190 запросов, raw/native и исходный startup batch | `cast-settings-01` |
+| `--begin` | PASS: 88 запросов, 43 native observations, raw/native/psql | `cast-begin-01` |
+| WITH diagnostic probe | Обе формы TIME/TIMESTAMP + WITH LOCK совпали с явным CAST, 42000 | `cast-with-01` |
+| Psycopg 3 | **SKIP**, модуль отсутствует; ожидание `sql.Literal(date)`/`::date` обновлено, без установки зависимостей | `cast-03/summary.json` |
+
+Settings/BEGIN повторены дополнительно из-за нового PG-only non-reserved token
+INT8. Общий keyword table и control paths не менялись. C libpq headers/runtime
+14.24, Python 3.10.12, psycopg2 2.9.2; compiler/platform записаны в harness summary.
+
+Сравнение с native CAST подтвердило INTEGER/INT, SMALLINT, BIGINT/INT8,
+VARCHAR(n), BOOLEAN, DOUBLE PRECISION, NULL, column/CTE/subquery, case-insensitive
+INT8. `1.2 + 1.6::int` → 3.2, `(1.2+1.6)::int` → 3; `-32768::SMALLINT` → 22003,
+`(-32768)::SMALLINT` → −32768. Промежуточный overflow в цепочке сохраняет 22003,
+невалидное значение — 22018, truncation — 22001. CONCATENATE/COLLATE/AT,
+TIMESTAMP/TIME WITH TIME ZONE внутри поддержанного выражения, BLOB внутри
+OCTET_LENGTH, native NUMERIC defaults и bare VARCHAR проверены относительно
+явного CAST. Bare VARCHAR сохраняет 255 characters, без unlimited PG semantics.
+
+Настоящие PQexecParams и PQprepare/PQdescribePrepared/PQexecPrepared подтвердили
+input OID=23/output=1043 для `$1::INTEGER::VARCHAR(12)`, несколько типов,
+повторные Bind, NULL, UTF8 и text/binary inputs/results (binary bytes в отчёте — hex).
+Omitted/zero/compatible OID работают; incompatible — прежний 0A000.
+`SELECT $1` с supplied OID=23 остаётся HY004. Raw также проверяет bad Bind 22P02,
+conversion Execute 22018, discard-until-Sync и восстановление. Simple typed input
+остаётся 0A000, повтор/gap/reorder/mixed `$n` не становятся допустимыми.
+
+INSERT/UPDATE/DELETE/MERGE/RETURNING с casts, BEGIN/commit/rollback и ошибка
+преобразования в T проверены native observer: реальные values, отсутствие
+uncommitted/rolled-back rows, E/25P02 и последующий recovery. Simple script
+останавливается на cast error и откатывает текущий сегмент.
+
+Root guard отказал CTAS (в том числе CTE), CHECK, VIEW/subquery, stored PROCEDURE,
+EXECUTE BLOCK/local function, CALL, EXECUTE PROCEDURE, USING и UPDATE OR INSERT;
+неверная grammar остаётся 42601. Объектов `CAST_BAD*` и строк после отказов нет.
+Прежний CAST в этих контекстах работает, включая native OO USING; literal `::`
+разрешён в stored source. Dollar/parameter constraints, unsupported BLOB output,
+unknown/custom/quoted/schema/TYPE OF/array targets сохранены без подмены типов.
+
+Native1/2/3 отвергают настоящий `::`, принимают CAST, INT8 identifiers и PSQL
+`:variable`; AUTOTERM выполняет следующий SELECT после ошибки. OO подтверждает
+PG→native→PG/cache на одном attachment, сохранение domain INT8 в обычном CAST
+(quoted domain — dialects 3/4), исходные line/column при обоих string flags,
+прежний отказ native client dialect 1 для BIGINT (HY000). PG postfix INT8 остаётся
+BIGINT даже при существующем VARCHAR-домене INT8. Общий helper содержит также
+неизменённую проверку database dialect; отдельная dialect-1 БД здесь не создавалась.
+
+### Разбор grammar conflicts: 154/11 → 158/11
+
+Новые конфликты не приняты вслепую. Verbose btyacc выполнен со штатными `types.y`
+и `y.y` до/после; артефакты `/tmp/firebird-pgwire-cast-grammar-baseline/y.output`
+и `/tmp/firebird-pgwire-cast-grammar-01/y.output`. Нормализованное сравнение
+reduce productions, tokens и количества в
+`/tmp/firebird-pgwire-cast-grammar-comparison.json` показывает ровно четыре
+добавленных shift/reduce, **ни одного удалённого**, без новых reduce/reduce:
+
+| Token / production | Причина | Проверка обеих трактовок |
+|---|---|---|
+| WITH / пустой `without_time_zone_opt`, два состояния TIME/TIMESTAMP | `WITH TIME ZONE` продолжает native type; `WITH LOCK` начинает SELECT clause | WITH TIME ZONE работает внутри выражения; WITH LOCK доходит до прежнего engine отказа 42000 для SELECT без physical table, как явный CAST |
+| SUB_TYPE / пустой `blob_subtype` | Продолжение BLOB type либо implicit alias SUB_TYPE | BLOB SUB_TYPE TEXT и BLOB с alias SUB_TYPE, обёрнутый в OCTET_LENGTH, возвращают 3 |
+| SEGMENT / пустой `blob_segsize` | SEGMENT SIZE либо implicit alias SEGMENT | BLOB SEGMENT SIZE 80 и BLOB с alias SEGMENT возвращают ту же длину |
+
+Это применение существующего `non_array_type` в новой позиции выражения;
+штатный backtracking выбирает завершённую grammar branch. Список native типов
+и их optional productions не дублируется/не ограничивается, native precedence
+не меняется. Поэтому после разбора и runtime проверок parse-conflicts.txt
+обновлён на **158 shift/reduce, 11 reduce/reduce**.
+
+Два конфликта COLLATE в `simple_type`/`non_charset_simple_type` уже были в baseline.
+Повторное использование этих productions добавляет новый контекст, но не новый
+конфликт. Native type grammar может поглотить COLLATE в target descriptor;
+проверены явный outer COLLATE, character set/collation target, repeated COLLATE,
+cast поверх collated expression и concat с collated правым операндом. Результаты
+совпадают с явным CAST. В частности, collation правого аргумента не меняет
+native collation левого аргумента concat: сравнение `'a'||'b'... = 'AB'` даёт false.
+Generated postfix action защищён `if (!yytrial)`; признак root guard и создание
+CastNode не исполняются на trial/lookahead. Оператор имеет `%left DOUBLE_COLON`
+после AT, а результат/ошибки unary, arithmetic, concat, COLLATE и AT подтверждены.
+
+### Команды
+
+В `/tmp/firebird-pgwire-1c-build`:
+
+```sh
+make -j2 > postfix-cast-build-01.log 2>&1
+make -C gen -j2 TARGET=Debug pgwire_tests > postfix-cast-units-build-01.log 2>&1
+LD_LIBRARY_PATH=gen/Debug/firebird/lib gen/Debug/firebird/tests/pgwire_sql_test > postfix-cast-sql-unit.log 2>&1
+LD_LIBRARY_PATH=gen/Debug/firebird/lib gen/Debug/firebird/tests/pgwire_session_test > postfix-cast-session-unit.log 2>&1
+LD_LIBRARY_PATH=gen/Debug/firebird/lib gen/Debug/firebird/tests/isql_test --log_level=message > postfix-cast-isql-unit.log 2>&1
+```
+
+Из репозитория (переменные сокращают фактические пути; work-dir должен быть новым):
+
+```sh
+CAST_RUNTIME=/tmp/firebird-pgwire-1c-build/gen/Debug/firebird
+CAST_LIBPQ=/lib/x86_64-linux-gnu/libpq.so.5
+CAST_HEADERS=/tmp/firebird-pgwire-1c-deps/libpq-dev/usr/include/postgresql
+CAST_CAPTURE=/home/aleksey/dev/1c/captures/20261109T105635Z
+python3 -B pg_wire_protocol/tools/pgwire_1c_smoke.py --casts --firebird-dir "$CAST_RUNTIME" --work-dir /tmp/firebird-pgwire-cast-03 --libpq "$CAST_LIBPQ" --timeout 120
+python3 -B pg_wire_protocol/tools/pgwire_1c_smoke.py --strings --firebird-dir "$CAST_RUNTIME" --work-dir /tmp/firebird-pgwire-cast-strings-04 --libpq "$CAST_LIBPQ" --timeout 120
+python3 -B pg_wire_protocol/tools/pgwire_1c_smoke.py --parameters --firebird-dir "$CAST_RUNTIME" --work-dir /tmp/firebird-pgwire-cast-parameters-01 --libpq "$CAST_LIBPQ" --timeout 120
+python3 -B pg_wire_protocol/tools/pgwire_extended_query_smoke.py --firebird-dir "$CAST_RUNTIME" --work-dir /tmp/firebird-pgwire-cast-extended-01 --libpq-include-dir "$CAST_HEADERS" --libpq-library "$CAST_LIBPQ"
+python3 -B pg_wire_protocol/tools/pgwire_simple_query_smoke.py --firebird-dir "$CAST_RUNTIME" --work-dir /tmp/firebird-pgwire-cast-simple-01 --libpq-include-dir "$CAST_HEADERS" --libpq-library "$CAST_LIBPQ" --driver-python /usr/bin/python3
+python3 -B pg_wire_protocol/tools/pgwire_1c_smoke.py --settings --firebird-dir "$CAST_RUNTIME" --work-dir /tmp/firebird-pgwire-cast-settings-01 --capture-dir "$CAST_CAPTURE" --libpq "$CAST_LIBPQ" --timeout 120
+python3 -B pg_wire_protocol/tools/pgwire_1c_smoke.py --begin --firebird-dir "$CAST_RUNTIME" --work-dir /tmp/firebird-pgwire-cast-begin-01 --capture-dir "$CAST_CAPTURE" --libpq "$CAST_LIBPQ" --timeout 120
+```
+
+Baseline/diagnostic probes использовали прежние OneCHarness/Libpq, отдельные
+runtime и scripts `/tmp/firebird-pgwire-cast-baseline.py` /
+`/tmp/firebird-pgwire-cast-with-probe.py`; новый клиент/framework не создавался.
+Python source syntax и `git diff --check` проверены.
+
+### Промежуточные FAIL и границы
+
+`cast-01` **FAIL**: тест ошибочно ожидал true от concat с collation только правого
+аргумента; фактический native CAST даёт false, ожидание исправлено. `cast-strings-01`
+**FAIL**: quoted domain ошибочно проверялся в dialect 1, где double quotes имеют
+другое значение; проверка quoted domain ограничена dialects 3/4, unquoted INT8
+сохранена во всех 1/2/3/4. Production после первой успешной сборки не менялся.
+`cast-02` PASS: 125 checks; `cast-03` добавил четыре проверки WITH LOCK.
+`cast-strings-02` PASS: 863 checks; `-03` добавил native BIGINT/dialect-1 отказ
+(872), `-04` добавил native USING с обычным CAST (873). Все серверы exit 0,
+без forced kill. Эти промежуточные каталоги сохранены.
+
+Исторический P3 VARCHAR FAIL из предыдущего этапа **не перезапускался и не
+исправлялся**: модернизация P3 не относится к заданию. Known native crash repro
+(nested SAVEPOINT/RESET, ON CONNECT shutdown, READ CONSISTENCY + AUTO COMMIT)
+и нагрузка 1С не запускались. Нет новых codecs, PG coercion/typmods,
+custom/schema/domain/array postfix targets, serializer или расширения internal
+prepare. Исходные 04/08/10/11 с каталогами/regnamespace/mvarchar/advisory locks/LIMIT
+не выполнялись и не объявлены совместимыми; запуск 1С не проверен. Изменения
+оставлены для review без commit.
+
+## 10 ноября 2026: архитектурный review последовательных `$n`
+
+Проверена ревизия `df37bb11faa61ec9aa7e4970cbb48a3c5e667d18` по
+[NUMBERED_PARAMETERS_TASK](1c/NUMBERED_PARAMETERS_TASK.md). Замечаний к реализации
+ограниченного контракта не обнаружено. Проверены lexer boundaries/overflow,
+подтверждённые parser actions, root guard до DSQL transformations, прежний
+ParameterNode/Bind и ограничения inference. Production diff затрагивает только
+Parser.cpp, Parser.h и parse.y; API, codecs, GEN_port и MAKE_parameter не изменены.
+
+Для повторной проверки использована уже собранная Debug/Linux/Super версия
+из `/tmp/firebird-pgwire-1c-build/gen/Debug/firebird`. Новая сборка не выполнялась:
+SHA engine/PgWire совпадают с приведёнными в следующем разделе, а SHA256
+`git diff 97e44d0188 df37bb11fa -- src` равен записанному там production diff.
+Рабочее дерево перед review было чистым. Независимо повторены:
+
+| Проверка | Результат |
+|---|---|
+| SQL/session/isql units | PASS: 575 / 5 / 13 |
+| `--parameters` | PASS: 73 libpq checks, 13 native observations, 29 raw rejections с recovery; все 92 значения прочитаны native observer |
+| `--strings` | PASS: 156 запросов, raw/native/cache/stored source, 546 OO checks |
+
+Команды units — как в следующем разделе. TCP-команды из корня репозитория:
+
+```sh
+python3 -B pg_wire_protocol/tools/pgwire_1c_smoke.py --parameters --firebird-dir /tmp/firebird-pgwire-1c-build/gen/Debug/firebird --work-dir /tmp/firebird-pgwire-params-review-01 --libpq /lib/x86_64-linux-gnu/libpq.so.5 --timeout 120
+python3 -B pg_wire_protocol/tools/pgwire_1c_smoke.py --strings --firebird-dir /tmp/firebird-pgwire-1c-build/gen/Debug/firebird --work-dir /tmp/firebird-pgwire-params-native-review-01 --libpq /lib/x86_64-linux-gnu/libpq.so.5 --timeout 120
+```
+
+Оба summary.json содержат completed=true, соответствующий passed=true,
+exit_code=0 и forced_kill=false. Реальный libpq 14.24; Psycopg 3 в окружении
+отсутствует и остаётся SKIP. Остальные ранее записанные suites заново не запускались.
+Рабочие базы пользователя и база 1С не затрагивались.
+
+Исторический P3 FAIL означает устаревшую проверку: `pgwire_libpq_query.c`
+ожидает 0A000 для `SELECT CAST('x' AS VARCHAR(1)) FROM RDB$DATABASE`, но поддержка
+VARCHAR уже есть. Приложенные baseline/current probes возвращают одинаковые
+`x`, OID 1043 и SELECT 1. Здесь «исходный engine» — **ревизия `97e44d0188`
+до добавления `$n`**, не чистый master. Совпадение результатов исключает именно
+регрессию этого запроса от `$n`; оно не превращает старый P3-набор в PASS.
+Проверка и её отчёты изучены; повторный исторический P3 в этом review не запускался.
+
+Подготовлено отдельное [задание на postfix casts](1c/POSTFIX_CAST_TASK.md).
+В архитектурном review изменена только документация; реализация нового этапа
+и git commit не выполнялись.
+
 ## 10 ноября 2026: последовательные `$1` … `$n`, реализация для review
 
 Первый срез реализован: PG4 lexer/parser распознаёт уникальные последовательные

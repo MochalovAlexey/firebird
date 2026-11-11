@@ -129,18 +129,44 @@ DsqlStatement* Parser::parse()
 		return NULL;
 	}
 
-	// Check the original root node, before DSQL can rewrite or compact parameters.
-	if (numberedParameters && !(nodeIs<SelectNode>(parsedDmlNode) ||
+	// Check the original root before DSQL rewrites parameters or reparses stored SQL.
+	if ((numberedParameters || postfixCasts) && !(nodeIs<SelectNode>(parsedDmlNode) ||
 		nodeIs<StoreNode>(parsedDmlNode) || nodeIs<ModifyNode>(parsedDmlNode) ||
 		nodeIs<EraseNode>(parsedDmlNode) || nodeIs<MergeNode>(parsedDmlNode)))
 	{
 		ERRD_post(Arg::Gds(isc_wish_list) << Arg::Gds(isc_random) <<
-			"Numbered parameters require SELECT, INSERT, UPDATE, DELETE or MERGE");
+			(numberedParameters ? "Numbered parameters require SELECT, INSERT, UPDATE, DELETE or MERGE" :
+				"Postfix casts require SELECT, INSERT, UPDATE, DELETE or MERGE"));
 	}
 
 	transformString(lex.start, lex.end - lex.start, transformedString);
 
 	return parsedStatement;
+}
+
+
+dsql_fld* Parser::makeBigIntField()
+{
+	auto field = newNode<dsql_fld>();
+
+	if (client_dialect < SQL_DIALECT_V6_TRANSITION)
+	{
+		ERRD_post(Arg::Gds(isc_sqlerr) << Arg::Num(-104) <<
+			Arg::Gds(isc_sql_dialect_datatype_unsupport) << Arg::Num(client_dialect) <<
+			Arg::Str("BIGINT"));
+	}
+
+	if (db_dialect < SQL_DIALECT_V6_TRANSITION)
+	{
+		ERRD_post(Arg::Gds(isc_sqlerr) << Arg::Num(-104) <<
+			Arg::Gds(isc_sql_db_dialect_dtype_unsupport) << Arg::Num(db_dialect) <<
+			Arg::Str("BIGINT"));
+	}
+
+	field->dtype = dtype_int64;
+	field->length = sizeof(SINT64);
+	field->flags |= FLD_has_prec;
+	return field;
 }
 
 
@@ -1424,7 +1450,14 @@ int Parser::yylexAux()
 		lex.last_token_bk = lex.last_token;
 		lex.line_start_bk = lex.line_start;
 		lex.lines_bk = lex.lines;
-		return TOK_SYMBOL;
+		// INT8 remains an identifier everywhere except the PG postfix cast target.
+		return pgDialect && str == "INT8" ? TOK_INT8 : TOK_SYMBOL;
+	}
+
+	if (pgDialect && c == ':' && lex.ptr < lex.end && *lex.ptr == ':')
+	{
+		++lex.ptr;
+		return TOK_DOUBLE_COLON;
 	}
 
 	// Must be punctuation -- test for double character punctuation

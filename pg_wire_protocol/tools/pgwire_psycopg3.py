@@ -3,7 +3,7 @@
 
 Requires P9_ROWS(ID INTEGER PRIMARY KEY,V INTEGER) with DML rights. IDs9301..9304
 belong to this fixture. No SQL rewriting, pipeline or custom driver adapters.
-The date literal case records an unsupported stock driver adaptation. Optional libpq traces begin only after authentication.
+The date literal case checks the stock driver's postfix cast. Optional libpq traces begin only after authentication.
 API references: https://www.psycopg.org/psycopg3/docs/api/cursors.html
 https://www.psycopg.org/psycopg3/docs/advanced/prepare.html
 https://www.psycopg.org/psycopg3/docs/api/pq.html
@@ -190,11 +190,11 @@ class Profiles:
             query = sql.SQL('SELECT {} FROM RDB$DATABASE').format(sql.Literal(date(2000,1,1)))
             rendered = query.as_string(connection)
             require('::date' in rendered, 'installed driver did not generate the expected date literal cast')
-            expected_error(lambda:connection.execute(query),'42601')
-            require(connection.execute(ANSWER,prepare=False).fetchone() == (42,), 'no recovery after parser limits')
+            require(connection.execute(query).fetchone() == (date(2000,1,1),),
+                    'date literal postfix cast failed')
+            require(connection.execute(ANSWER,prepare=False).fetchone() == (42,), 'no recovery after postfix cast')
         self.summary['checks'].append('ordinary_cursor_typed_numbered_parameter')
-        self.summary['expected_limits'].extend([
-            {'profile':'sql_Literal_date_generates_postgresql_cast','sqlstate':'42601','generated_sql':rendered}])
+        self.summary['checks'].append('sql_Literal_date_postfix_cast')
 
     def rollback_cache_limit(self):
         with self.connect('prepared_rollback_limit',autocommit=True) as connection:

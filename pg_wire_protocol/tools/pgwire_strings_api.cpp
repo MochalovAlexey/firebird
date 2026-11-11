@@ -138,6 +138,35 @@ int main(int argc, char** argv)
 			input(numbered, SQL_DIALECT_PG);
 		}
 		input("USING (A INTEGER=?) DO SELECT :A FROM RDB$DATABASE", SQL_DIALECT_PG);
+		input("USING (A INTEGER=?) DO SELECT CAST(:A AS BIGINT) FROM RDB$DATABASE", SQL_DIALECT_PG);
+		const char* postfix = "SELECT 42::INTEGER FROM RDB$DATABASE";
+		for (unsigned dialect : {1u, 2u, 3u})
+		{
+			query(4, 0, postfix, "42");
+			reject(postfix, dialect, 0, "42000", 1, 10);
+			query(dialect, 0, "SELECT CAST(42 AS INTEGER) AS INT8 FROM RDB$DATABASE", "42");
+			query(dialect, 0, "EXECUTE BLOCK RETURNS(V INTEGER) AS BEGIN "
+				"SELECT 42 FROM RDB$DATABASE INTO :V; SUSPEND; END", "42");
+			query(4, 0, postfix, "42");
+		}
+		// The alias applies only after ::; ordinary CAST still resolves a domain.
+		transaction = attachment->startTransaction(&status, 0, nullptr);
+		attachment->execute(&status, transaction, 0, "CREATE DOMAIN INT8 AS VARCHAR(8)", 3,
+			nullptr, nullptr, nullptr, nullptr);
+		transaction->commit(&status); transaction = nullptr;
+		for (unsigned dialect : {1u, 2u, 3u, 4u})
+		{
+			query(dialect, 0, "SELECT CAST('domain' AS INT8) FROM RDB$DATABASE", "domain");
+			if (dialect >= SQL_DIALECT_V6)
+				query(dialect, 0, "SELECT CAST('quoted' AS \"INT8\") FROM RDB$DATABASE", "quoted");
+			query(dialect, 0, "SELECT INT8 FROM (SELECT 42 AS INT8 FROM RDB$DATABASE)", "42");
+		}
+		query(4, 0, "SELECT 42::INT8 FROM RDB$DATABASE", "42");
+		query(4, 0, "SELECT 42::iNt8 FROM RDB$DATABASE", "42");
+		reject("SELECT CAST(1 AS BIGINT) FROM RDB$DATABASE", 1, 0, "HY000");
+		require(query(4, 0, "SELECT 'abc'::VARCHAR FROM RDB$DATABASE", "abc") ==
+			query(4, 0, "SELECT CAST('abc' AS VARCHAR) FROM RDB$DATABASE", "abc"),
+			"Postfix changed the native VARCHAR default length");
 		for (unsigned flags : {ON, OFF})
 		{
 			reject("SELECT\n CAST($1foo AS INTEGER) FROM RDB$DATABASE", 4, flags, "42000", 2, 7);
@@ -145,6 +174,9 @@ int main(int argc, char** argv)
 			reject("SELECT\n CAST($32768 AS INTEGER) FROM RDB$DATABASE", 4, flags, "54000", 2, 7);
 			reject("SELECT\n CAST($2 AS INTEGER) FROM RDB$DATABASE", 4, flags, "0A000", 2, 7);
 			reject("SELECT CAST($01 AS INTEGER),\n  @ FROM RDB$DATABASE", 4, flags, "42000", 2, 3);
+			reject("SELECT 1::INTEGER,\n  @ FROM RDB$DATABASE", 4, flags, "42000", 2, 3);
+			reject("SELECT\n 1::\"INT8\" FROM RDB$DATABASE", 4, flags, "42000", 2, 5);
+			reject("SELECT\n 1::INT4 FROM RDB$DATABASE", 4, flags, "42000", 2, 5);
 		}
 		const auto onLength = query(4, 0, sql, "\\n");
 		setting(false);

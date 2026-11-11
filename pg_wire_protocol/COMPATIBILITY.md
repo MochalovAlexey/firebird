@@ -44,7 +44,27 @@ Native1/2/3/AUTOTERM, PSQL и DDL START WITH сохранены. Нет ново
 psycopg2 transactional mode и connection context. Контракт и границы — в
 [1c/README.md](1c/README.md); результаты — в [VALIDATION.md](VALIDATION.md).
 Это не полная PG transaction compatibility или запуск 1С; остальные options,
-default_transaction_*, произвольные `$n`, `::`, LIMIT и каталоги остаются за границей.
+default_transaction_*, произвольные `$n`, custom cast targets, LIMIT и каталоги остаются за границей.
+
+## Postfix casts в PG4
+
+`expression::type` использует существующий CastNode с native преобразованиями,
+ошибками и input inference. Тип — штатный `non_array_type`; только INT8 добавлен
+как alias BIGINT, только в postfix target, без резервирования имени. Обычный CAST
+и домен INT8 сохраняются. Домены/TYPE OF/schema-qualified/arrays справа от `::`,
+INT2/INT4/FLOAT4/FLOAT8/BOOL и custom bytea/mvarchar/regnamespace не добавлены.
+
+Оператор непрерывный, левоассоциативный и выше unary/арифметики/concat/COLLATE/AT.
+Разрешены корневые SELECT/INSERT/UPDATE/DELETE/MERGE с CTE/subqueries;
+DDL/CTAS/PSQL/BLOCK/CALL/PROCEDURE/USING/UPDATE OR INSERT с настоящим `::` —
+0A000 до DSQL, неправильная грамматика — syntax error. Literal `::` допустим.
+Native1/2/3, `:variable`, source offsets/cache и прежний CAST сохранены.
+
+Wire API/codecs/Parse OID contract не менялись; цепочка `$1::INTEGER::VARCHAR(12)`
+имеет input 23/output 1043. Синтаксис остальных native типов сохраняет прежние
+codec limits, а преобразования не заявляются как полная PG coercion semantics.
+Подробности — [1c/README](1c/README.md), evidence — [VALIDATION](VALIDATION.md).
+Каталоги, исходные запросы 1С и открытие базы этим не подтверждены.
 
 ## Последовательные `$1` … `$n` в PG4
 
@@ -156,7 +176,7 @@ Temporal text принимает строгий ISO `YYYY-MM-DD`, `HH:MM:SS[.fff
 | Psycopg 3, native transaction controls | PASS: свежая connection с `autocommit=True, prepare_threshold=None`; SET TRANSACTION/COMMIT/ROLLBACK, savepoint, I/T/E, failed COMMIT и подтверждённые effects |
 | Psycopg 3, обычные `%s` параметры | Ограниченный последовательный `$n` с типами из SQL теперь поддержан; новый live Psycopg 3 пропущен (клиент отсутствует), полная параметризация не заявляется |
 | Psycopg 3, обычный transactional mode | Исторический P9 фиксировал 42601 на BEGIN; engine теперь поддерживает BEGIN без опций, сценарий обновлён, live-повтор Psycopg 3 в текущем окружении недоступен |
-| Psycopg 3, `sql.Literal(date)` | Подтверждён 42601: клиент генерирует PostgreSQL cast `::date` |
+| Psycopg 3, `sql.Literal(date)` | Postfix DATE поддержан через native CastNode; ожидание обновлено, live-повтор Psycopg 3 пропущен из-за отсутствия клиента |
 
 **Подтверждённая граница prepared cache:** после native ROLLBACK при непустом cache Psycopg 3 послал SQL `DEALLOCATE ALL` и получил 42601. Сам rollback завершился, состояние осталось I, следующий совместимый запрос выполнился. Отдельное удаление prepared statement через protocol Close прошло; это не доказывает поддержку whole-cache clear. В prepared trace зафиксированы Parse 6, Bind/Execute по 9, Sync 19 и Close 4.
 
@@ -195,7 +215,7 @@ EMPTY определяется ограниченным lexer только дл�
 | Parse/Bind/Describe/Execute/Close/Flush/Sync | Явный отказ | Явный отказ | Да | Да |
 | Named/unnamed statements и portals | Нет | Нет | Да, с лимитами и проверенным lifetime | Да |
 | Bind с native `?` либо zero parameters | Нет | Нет | Да, по engine metadata | Да |
-| PostgreSQL casts `::` | Parser error | Parser error | Parser error | Parser error без отдельного engine расширения |
+| Postfix casts `::` | Исторически parser error | Исторически parser error | PG4: native non-array builtin targets + postfix-only INT8, только корневые SELECT/DML | Custom targets/сохранённый SQL требуют отдельного этапа |
 | SQL `$n` | Исторически parser error | Исторически parser error | PG4: только последовательные уникальные inputs в SELECT/INSERT/UPDATE/DELETE/MERGE | Произвольная нумерация требует отдельного этапа |
 | I/T/E, native SET TRANSACTION/COMMIT/ROLLBACK | Implicit Query transaction | Да, plugin-local controls после engine prepare | Да, включая implicit cycle до Sync | Да |
 | Native SAVEPOINT/ROLLBACK TO/RELEASE и RETAIN | Не критерий smoke | Реальный effect и state policy | Тот же контракт | Тот же контракт |
@@ -228,7 +248,7 @@ EMPTY определяется ограниченным lexer только дл�
 
 В M2 количество, порядок и типы входных native slots берутся из engine metadata. OID hints из Parse и значения Bind проверяются и преобразуются без изменений SQL. Одинаковое значение для нескольких native `?` передаётся несколькими protocol parameters. Будущие повторные `$1` и перестановка индексов должны описываться engine binding metadata после расширения parser; plugin не ищет их в SQL.
 
-Наличие DATE codec не включает cast `::date`, а поддержка Bind не означает произвольную PG-нумерацию `$n`. Если Firebird не может вывести тип параметра, например в нетипизированном выражении, возвращается ошибка; SQL не оборачивается в CAST автоматически. Тесты отдельно различают syntax, inference и codec limitations.
+Postfix `::DATE` теперь использует прежний DATE codec, а поддержка Bind не означает произвольную PG-нумерацию `$n`. Если Firebird не может вывести тип параметра, например в нетипизированном выражении, возвращается ошибка; SQL не оборачивается в CAST автоматически. Тесты отдельно различают syntax, inference и codec limitations.
 
 Ограниченный профиль Psycopg 3 проверен в разделе P9 выше; pgjdbc, Npgsql, pgx и другие клиенты не объявляются поддержанными по факту Extended Query. Их startup, автоматически генерируемый SQL и metadata discovery проверяются на выбранных версиях. Для минимального M2 acceptance достаточно прямого libpq с native SQL и обязательных raw-wire последовательностей.
 

@@ -743,6 +743,8 @@ using namespace Firebird;
 %token <metaNamePtr> CPU_OPERATOR_COST
 %token <metaNamePtr> LOCK_TIMEOUT
 %token <uintVal> NUMBERED_PARAMETER
+%token DOUBLE_COLON
+%token <metaNamePtr> INT8
 
 // precedence declarations for expression evaluation
 
@@ -757,6 +759,7 @@ using namespace Firebird;
 %left	CONCATENATE
 %left	COLLATE
 %left	AT
+%left	DOUBLE_COLON
 
 // Fix the dangling IF-THEN-ELSE problem
 %nonassoc THEN
@@ -5708,27 +5711,7 @@ non_charset_simple_type
 	| decfloat_type
 	| date_time_type
 	| BIGINT
-		{
-			$$ = newNode<dsql_fld>();
-
-			if (client_dialect < SQL_DIALECT_V6_TRANSITION)
-			{
-				ERRD_post (Arg::Gds(isc_sqlerr) << Arg::Num(-104) <<
-					Arg::Gds(isc_sql_dialect_datatype_unsupport) << Arg::Num(client_dialect) <<
-																	Arg::Str("BIGINT"));
-			}
-
-			if (db_dialect < SQL_DIALECT_V6_TRANSITION)
-			{
-				ERRD_post (Arg::Gds(isc_sqlerr) << Arg::Num(-104) <<
-					Arg::Gds(isc_sql_db_dialect_dtype_unsupport) << Arg::Num(db_dialect) <<
-																Arg::Str("BIGINT"));
-			}
-
-			$$->dtype = dtype_int64;
-			$$->length = sizeof(SINT64);
-			$$->flags |= FLD_has_prec;
-		}
+		{ $$ = makeBigIntField(); }
 	| INT128
 		{
 			$$ = newNode<dsql_fld>();
@@ -8674,6 +8657,11 @@ nonparenthesized_value
 		{ $$ = newNode<ArithmeticNode>(blr_add, (client_dialect < SQL_DIALECT_V6_TRANSITION), $1, $3); }
 	| value_special CONCATENATE value_special
 		{ $$ = newNode<ConcatenateNode>($1, $3); }
+	| value_special DOUBLE_COLON postfix_cast_type
+		{
+			postfixCasts = true;
+			$$ = newNode<CastNode>($1, $3);
+		}
 	| value_special COLLATE symbol_collation_name
 		{ $$ = newNode<CollateNode>($1, *$3); }
 	| value_special AT LOCAL %prec AT
@@ -9965,6 +9953,13 @@ named_argument
 		{ $$ = newNode<NonPooledPair<MetaName*, ValueExprNode*>>($1, $3); }
 	;
 
+%type <legacyField> postfix_cast_type
+postfix_cast_type
+	: non_array_type
+	| INT8
+		{ $$ = makeBigIntField(); }
+	;
+
 %type <valueExprNode> cast_specification
 cast_specification
 	: CAST '(' value AS data_type_descriptor ')'
@@ -10736,6 +10731,7 @@ non_reserved_word
 	| ENABLE_MERGEJOIN
 	| CPU_OPERATOR_COST
 	| LOCK_TIMEOUT
+	| INT8
 	;
 
 %%
