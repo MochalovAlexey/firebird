@@ -1,6 +1,7 @@
 # Путь до запуска 1С и теста Гилёва
 
-Срез на 11 ноября 2026 года: ревизия `c27a3a4c5a` и SQL-only APP-10, оставленный на review.
+Срез на 11 ноября 2026 года: ревизия `5bbdaa763d`, APP-10 прошёл review и независимую приёмку.
+APP-11 реализован поверх неё, целевые проверки прошли; изменения оставлены на review без commit.
 Этот файл показывает готовность прикладного сценария; конкретные незавершённые
 работы и ограничения ведутся в [BACKLOG](../BACKLOG.md), доказательства — в
 [VALIDATION](../VALIDATION.md). Обновлять после следующих прикладных этапов.
@@ -19,7 +20,8 @@
 | SQL/исполнение | Simple scripts с остановкой на ошибке; Extended/prepared/portals; typed последовательные `$n`, native postfix casts, literal LIMIT | Общая PG-грамматика и произвольные PG types не реализованы |
 | Транзакции | BEGIN, COMMIT/ROLLBACK, I/T/E, savepoints/recovery, native visibility | Не полная эквивалентность isolation/locks PostgreSQL; advisory locks ещё нет |
 | Binary data | Native BLOB output как bytea; text/binary input через OCTETS и native MOVE | Вход ≤65533 bytes на значение; выход ограничен общим DataRow budget. Это не SQL bytea type/index semantics |
-| Native namespace identity | Устанавливаемый PGWIRE_COMPAT registry, стабильные IDs, native/libpq, права/concurrency/restart | APP-10 на review; native DDL под user savepoint запрещён. Публичные PG names/types/catalogs/visibility и selected04 ещё не реализованы |
+| Native namespace identity | APP-10 принят: устанавливаемый PGWIRE_COMPAT registry, стабильные IDs, native/libpq, права/concurrency/restart | Native DDL под user savepoint запрещён; PG names/types/visibility и selected04 ещё не реализованы |
+| Публичные namespace IDs | APP-11 на review: PG_CATALOG.PG_NAMESPACE над APP-10, atomic installer, точные имена/IDs, read-only, text/binary/native/libpq и transaction visibility PASS | BIGINT/VARCHAR, wire20/1043, uppercase labels; нет PG oid/name/regnamespace, nspowner/nspacl, pg_class/visibility/temp namespace |
 | Прикладные формы | Чтение конфигурации selected06 и запись selected23 неизменённым SQL; форма 92 parameters, включая 68 BLOB | Синтетические таблицы/данные; реальная схема, конфигурация и исходный Bind 1С не приняты |
 
 ## Где находимся относительно конечной цели
@@ -61,9 +63,10 @@
 ## Ближайший путь
 
 1. **Каталоги для открытия базы (APP-01).** [APP-10: namespace registry](NAMESPACE_REGISTRY_TASK.md)
-   реализован и оставлен на review: SQL-only основа устойчивых native IDs,
-   без public catalog contract. Далее отдельными этапами согласовать PG/native имена,
-   regnamespace/oid metadata, pg_class, search-path visibility и temp namespace,
+   принят: SQL-only основа устойчивых native IDs.
+   [APP-11: публичный namespace view](NAMESPACE_CATALOG_TASK.md) реализован и
+   оставлен на review, с native именами и BIGINT/VARCHAR metadata. Далее согласовать
+   PG/native имена, regnamespace/oid/name, pg_class, search-path visibility и temp namespace,
    чтобы выполнить selected04 с реальными объектами. Для selected05 отдельно
    определить честный current_database/collation contract; имя native collation
    нельзя просто выдать за PostgreSQL LC_COLLATE.
@@ -86,7 +89,7 @@
    Удалённый TCP/TLS/cancellation и другие открытые wire/platform пункты также
    остаются в backlog; локальный функциональный успех не закрывает их автоматически.
 
-Условие перехода к следующему этапу — конкретный принятый результат. После APP-10
+Условие перехода к следующему этапу — конкретный принятый результат. После APP-10/11
 нельзя объявлять APP-01 закрытым: сам selected04 ещё требует остальных частей.
 Это порядок приоритетов, не гарантия, что locks/temporary DDL понадобятся только
 после открытия базы: selected10/11/12 появляются уже в начале записи. Такие части

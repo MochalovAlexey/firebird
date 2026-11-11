@@ -1,6 +1,10 @@
 # Следующий этап: устойчивые идентификаторы native schemas
 
-Архитектурное решение от 11 ноября 2026 года. Статус: задание на реализацию.
+Архитектурное решение от 11 ноября 2026 года. Статус: реализовано в `5bbdaa763d`,
+review и независимая приёмка PASS; [доказательства](../VALIDATION.md#11-ноября-2026-архитектурный-review-namespace-registry).
+Native DDL под user savepoint запрещён: вместо положительного undo подтверждены
+штатный отказ/recovery и полный rollback. Следующий этап —
+[APP-11](NAMESPACE_CATALOG_TASK.md). Ниже сохранён исходный контракт задания.
 Рабочий каталог: `/home/aleksey/dev/my_firebird/firebird`.
 База — master Firebird 6, ветка pg_wire_protocol, ревизия исследования `c27a3a4c5a`.
 [BACKLOG](../BACKLOG.md): **APP-10**, первая часть APP-01. Не переключать ветку

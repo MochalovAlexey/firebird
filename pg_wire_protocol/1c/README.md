@@ -332,12 +332,68 @@ physical layout по фактическим длинам Bind. Engine созда
 | 6. Временные объекты/нагрузка | PG temporary DDL, serial4, ANALYZE и fasttrun_ext ещё не реализованы; нужен эталон их эффектов |
 
 Реализован [APP-10: внутренний namespace registry](NAMESPACE_REGISTRY_TASK.md),
-оставлен на review. Устанавливаемые SQL table/sequence/view/DDL trigger поддерживают
+ревизия `5bbdaa763d` прошла review и независимую приёмку, см. VALIDATION.
+Устанавливаемые SQL table/sequence/view/DDL trigger поддерживают
 устойчивые IDs точных native имён; C++/parser/API не меняются. Это основа будущих
 каталогов, selected04 ещё не выполняется. Native DDL под пользовательским savepoint
 запрещён (0A000); проверены отказ и ROLLBACK TO recovery без изменения registry.
-Публичные PG names/types/visibility требуют отдельного решения. Путь до первого
+
+Реализован и оставлен на review [APP-11: публичный pg_namespace](NAMESPACE_CATALOG_TASK.md).
+SQL-view OID/NSPNAME над этим registry и отдельная установка; имена точные
+native, metadata BIGINT/VARCHAR (wire20/1043). Это ограниченная проекция реальных
+данных, не полноценные PG oid/name/regnamespace. Их типизацию и name resolution,
+pg_class/visibility/temp namespace предстоит согласовать отдельно. Metadata
+schema/relation/field не заменяет type identity: UNION может сохранить origin
+первой ветви при общем BIGINT. C++/API/codecs в APP-11 не меняются. Путь до первого
 запуска 1С/Гилёва — в [PROGRESS](PROGRESS.md); сквозной запуск пока не принят.
+
+## Публичное представление namespace IDs: APP-11
+
+[install_namespace_catalog.sql](sql/install_namespace_catalog.sql) устанавливает
+только PG_CATALOG.PG_NAMESPACE(OID, NSPNAME). Требуются уже установленный,
+исправный APP-10 и активный DDL hook; проверка его отключения и repair не входят
+в installer. Запуск владельцем базы/администратором без конкурентного DDL,
+credentials передаются средствами native isql:
+
+```sh
+isql -user OWNER -input pg_wire_protocol/1c/sql/install_namespace_catalog.sql DATABASE_ALIAS
+```
+
+SET BAIL ON, SET AUTODDL OFF, квалифицированные ссылки и один COMMIT делают
+установку независимой от search_path и атомарной. CREATE SCHEMA IF NOT EXISTS
+сохраняет существующий bootstrap PG_CATALOG, его owner и PG_BACKEND_PID.
+Если schema новая, APP-10 hook регистрирует её в той же transaction.
+Отсутствие registry даёт обычную ошибку зависимости. Существующий PG_NAMESPACE
+(включая чужой объект) означает отказ: повтор не upgrade, RECREATE не используется.
+Ошибка до COMMIT откатывает новый view/grants и созданную schema с registry row;
+старые объекты остаются. Sequence gaps после rollback допустимы.
+
+```sql
+CREATE VIEW PG_CATALOG.PG_NAMESPACE(OID, NSPNAME) AS
+SELECT DISTINCT NAMESPACE_ID, NATIVE_NAME
+FROM PGWIRE_COMPAT.NAMESPACES;
+```
+
+PUBLIC получает только USAGE PG_CATALOG и SELECT нового view. DISTINCT запрещает
+запись даже владельцу; новых прав CREATE SCHEMA, private table/sequence/trigger
+не возникает. Все строки registry видны независимо от USAGE перечисленных схем
+и search_path. View хранит identity, не вычисляет table visibility. При чтении
+нет allocation; CREATE/ALTER/DROP и rollback отражаются штатной transaction.
+
+OID — прежний native BIGINT, wire type 20, decimal text / 8 bytes binary.
+NSPNAME — VARCHAR, wire type 1043, полное UTF8 имя в обоих formats.
+Native unquoted labels остаются OID/NSPNAME. PUBLIC и quoted "public" различаются;
+Unicode не усекается до 63 bytes. PG oid/name/regnamespace и nspowner/nspacl здесь
+отсутствуют. Выводить тип из schema/relation/field/alias нельзя: UNION сохраняет
+origin первой ветви даже для общего BIGINT с 4294967296.
+
+Проверка: `pgwire_1c_smoke.py --namespace-catalog`, отдельные временные базы,
+native isql и настоящий libpq, text/binary metadata/bytes, права, атомарность
+установки и transaction visibility. Команда, SHA и результат — в
+[VALIDATION](../VALIDATION.md#11-ноября-2026-публичное-представление-namespace-ids).
+APP-01/APP-02/APP-06 и selected04 открыты. Далее нужно согласовать PG/native имена
+и namespace resolution, затем pg_class/relnamespace, search-path visibility и
+temp namespace; только после этого проверять неизменённый selected04.
 
 ## Внутренние namespace IDs: APP-10
 
@@ -396,8 +452,9 @@ attachments и после нормального restart сервера; фик�
 служебной schema и частичный перенос её объектов вне контракта. Пропущенный
 DROP+CREATE нельзя восстановить по одному совпадению имён; lookup ничего не
 чинит. Upgrade/uninstall/repair не автоматизированы. Backup/restore/migration
-не проверены и не заявляются. Публичные pg_namespace/pg_class, PG name mapping,
-regnamespace/oid, search-path visibility и pg_my_temp_schema остаются APP-01;
+не проверены и не заявляются. Ограниченный публичный view добавлен в APP-11 выше.
+Полные pg_namespace/pg_class, PG name mapping, regnamespace/oid/name,
+search-path visibility и pg_my_temp_schema остаются APP-01;
 selected04 и APP-06 не приняты. Следующая часть не начинается автоматически.
 
 ## Bytea input: ограниченный APP-08

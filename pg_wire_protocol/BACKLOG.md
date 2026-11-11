@@ -1,6 +1,6 @@
 # Незавершённые задачи PgWire и профиля 1С
 
-Актуализировано 11 ноября 2026 года: APP-08 принят в `c27a3a4c5a`, APP-10 реализован и оставлен на review.
+Актуализировано 11 ноября 2026 года: APP-10 прошёл review в `5bbdaa763d`; APP-11 реализован и оставлен на review.
 Это единый список незакрытых работ и ограничений. [PLAN](PLAN.md) задаёт порядок,
 [COMPATIBILITY](COMPATIBILITY.md) — действующий контракт,
 [VALIDATION](VALIDATION.md) — доказательства. Подробности профиля — в [1c/README](1c/README.md).
@@ -61,19 +61,25 @@
 | APP-07 | Закрыто, 11.11.2026 | `5478a589d8`: subtype 0 → bytea OID 17 через IBlob, text/binary, общий DataRow budget, lifetime/cleanup. Review без замечаний; независимые libpq/raw/native/unit и scalar codecs PASS. InputCodec/engine/API/dependencies прежние; APP-02/SQL-06 остаются открыты. | [BINARY_BLOB_OUTPUT_TASK](1c/BINARY_BLOB_OUTPUT_TASK.md), [review](VALIDATION.md#11-ноября-2026-архитектурный-review-binary-blob-output) |
 | APP-08 | Закрыто, 11.11.2026 | `c27a3a4c5a`: bytea input → native BLOB через VARCHAR OCTETS/MOVE, ≤65533 bytes, layout конкретного Bind. Review без замечаний; свежая сборка, 9 unit executables, input 125/output 92 libpq checks и raw/native PASS. Production только InputCodec.cpp/h; engine/API прежние. | [BINARY_BLOB_INPUT_TASK](1c/BINARY_BLOB_INPUT_TASK.md), [review](VALIDATION.md#11-ноября-2026-архитектурный-review-bytea-input) |
 | APP-09 | Открыто | Входные BLOB больше 65533 decoded bytes: выбрать отдельный native путь с корректным transaction/portal lifetime и bounded memory. Не повышать общие лимиты вместо решения. APP-08 этого не закрывает; выходной предел APP-07 остаётся общим DataRow budget. | [BINARY_BLOB_INPUT_TASK](1c/BINARY_BLOB_INPUT_TASK.md) |
-| APP-10 | Реализовано, на review | Private namespace IDs в PGWIRE_COMPAT: одноразовый SQL installer, sequence/read-only view/definer hook. Native/libpq, права, rollback, concurrency и restart PASS. Native DDL под user savepoint запрещён (0A000), проверены отказ/recovery; положительный schema-DDL undo через ROLLBACK TO не заявлен. C++/API прежние; APP-01 и selected04 не закрыты. | [NAMESPACE_REGISTRY_TASK](1c/NAMESPACE_REGISTRY_TASK.md) |
+| APP-10 | Закрыто, 11.11.2026 | `5bbdaa763d`: private namespace IDs в PGWIRE_COMPAT, одноразовый SQL installer, sequence/read-only view/definer hook. Review без замечаний, независимые native/libpq, права, rollback, concurrency/restart PASS. Native DDL под user savepoint запрещён (0A000): refusal/recovery проверены, положительный schema-DDL undo через ROLLBACK TO не заявлен. C++/API прежние; APP-01 и selected04 не закрыты. | [NAMESPACE_REGISTRY_TASK](1c/NAMESPACE_REGISTRY_TASK.md), [review](VALIDATION.md#11-ноября-2026-архитектурный-review-namespace-registry) |
+| APP-11 | Реализовано, на review | SQL-only PG_CATALOG.PG_NAMESPACE(OID, NSPNAME) над APP-10, точные IDs/native имена, DISTINCT read-only, PUBLIC USAGE/SELECT и atomic installer без замены bootstrap. PASS: 6 групп установки, 4 native/libpq группы, 128 проверенных libpq results, normal shutdown. Native BIGINT/VARCHAR, wire20/1043; PG oid/name/regnamespace и nspowner/nspacl не добавлены. | [NAMESPACE_CATALOG_TASK](1c/NAMESPACE_CATALOG_TASK.md), [проверки](VALIDATION.md#11-ноября-2026-публичное-представление-namespace-ids) |
 
 Для APP-01 исследование выявило отдельные архитектурные вопросы: RDB$SCHEMAS
 не содержит числового schema ID; простое LOWER(native name) неоднозначно при
 совместном существовании quoted/unquoted имён. Native default collation label
-также не является PostgreSQL LC_COLLATE. Стабильные native namespace IDs реализованы в APP-10; правила PG имён
+также не является PostgreSQL LC_COLLATE. Стабильные native namespace IDs приняты в APP-10; правила PG имён
 и collation contract нужно решить до объявления совместимости catalog queries.
-Private SQL registry через штатный AFTER ANY DDL STATEMENT реализован и проверен;
-одноразовый installer оставлен на review. Публичный
-catalog contract не выбран: остаются PG/native имена, oid/regnamespace wire types,
-visibility/temp namespace и current_database (native DB_NAME может быть путём,
+Ограниченный публичный view реализован в APP-11 с точными native именами
+и native metadata, без заявления полной PG-совместимости. Остаются PG/native
+name resolution/column labels, SQL/wire types oid/name/regnamespace, nspowner/nspacl,
+pg_class/visibility/temp namespace и current_database (native DB_NAME может быть путём,
 а не Startup database alias). Работа с отключённым DDL hook, upgrade/uninstall/
 recovery registry не входят в APP-10; lookup ничего не исправляет автоматически.
+Native DDL под user savepoint (0A000) также остаётся ограничением: APP-10 его не
+исправляет. Metadata provenance не заменяет type identity: native UNION сохраняет
+origin первой ветви при общем BIGINT, input parameters не имеют column origin.
+Не выводить PG oid/name из schema/relation/field или aliases; probe и решение
+сохранены в [review](VALIDATION.md#11-ноября-2026-архитектурный-review-namespace-registry).
 APP-01 не закрыт.
 
 ## Драйверы, wire и платформы

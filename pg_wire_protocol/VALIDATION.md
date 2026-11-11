@@ -1,5 +1,152 @@
 # Проверки реализации
 
+## 11 ноября 2026: публичное представление namespace IDs
+
+[APP-11](1c/NAMESPACE_CATALOG_TASK.md) реализован поверх
+`5bbdaa763d5ff35f22c6969503a1811d7f4aac7d`, оставлен на review без git add/commit.
+Production — только [install_namespace_catalog.sql](1c/sql/install_namespace_catalog.sql):
+DISTINCT view PG_CATALOG.PG_NAMESPACE(OID, NSPNAME) над принятым APP-10,
+PUBLIC USAGE/SELECT и один COMMIT. Таблица/sequence/hook APP-10 и compat.sql
+не изменены. `git diff HEAD -- src` пуст, SHA256:
+`e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`.
+Новых API, codecs, parser changes, SQL rewriting или зависимостей нет.
+
+Проверенный runtime APP-10 сохранён в
+`/tmp/firebird-pgwire-namespaces-review-20261111/runtime`; исходный build path
+`/tmp/firebird-pgwire-input-review-build-20261111` уже отсутствовал.
+Из сохранённого runtime подготовлена отдельная чистая копия
+`/tmp/firebird-pgwire-catalog-source-20261111`: без data/test databases и logs,
+с копией чистого `gen/Debug/firebird/security6.fdb`. Исходники, security template
+и review-runtime не изменялись. Происхождение и SHA записаны в
+`/tmp/firebird-pgwire-catalog-source-20261111/catalog_source.json`.
+Сборка C++ не повторялась: SHA бинарников совпали с принятой APP-10 сборкой.
+
+Воспроизведение подготовки при наличии сохранённых файлов (новый каталог назначения):
+
+```sh
+python3 - <<'PY'
+from pathlib import Path
+import shutil
+source = Path('/tmp/firebird-pgwire-namespaces-review-20261111/runtime')
+target = Path('/tmp/firebird-pgwire-catalog-source-20261111')
+shutil.copytree(source, target, ignore=shutil.ignore_patterns('data', 'firebird.log', 'memdebug*'))
+shutil.copyfile('gen/Debug/firebird/security6.fdb', target / 'security6.fdb')
+PY
+python3 -B pg_wire_protocol/tools/pgwire_1c_smoke.py \
+  --firebird-dir /tmp/firebird-pgwire-catalog-source-20261111 \
+  --work-dir /tmp/firebird-pgwire-namespace-catalog-03 \
+  --namespace-catalog --timeout 180
+```
+
+Harness сам создаёт отдельные runtime/security/main и negative-install БД,
+выбирает loopback TCP ports, использует native isql и libpq без новых пакетов.
+Для повтора нужны новые пути source/work; при исчезновении /tmp нужен проверенный
+runtime с чистой security template, а этот исторический результат не заменяет
+новый запуск. Пароли не записаны в команды/SQL.
+
+Итог `/tmp/firebird-pgwire-namespace-catalog-03/summary.json`:
+**PASS**, completed=true, namespace_catalog_passed=true. 6 групп установки,
+4 native/libpq группы, 128 проверенных libpq results (включая prepare/describe).
+libpq 14.24; сервер PID 1318248, native port 39237, PgWire 57613,
+exit_code=0, forced_kill=false, shutdown 0.164 s. Native probe до/после и проверка
+отсутствия оставшихся attachments прошли. Все базы в /tmp; рабочая 1С не затронута.
+
+| Проверка | Результат |
+|---|---|
+| Bootstrap / new PG_CATALOG | PASS: точный private mapping, прежние IDs, новая schema зарегистрирована hook ровно один раз; owner/source/BLR/grants PG_BACKEND_PID сохранены |
+| Missing APP-10 / repeat / foreign PG_NAMESPACE | PASS: dependency 42S02; повтор и коллизия явно отказали, объект/owner/data/grants/IDs/counter сохранены |
+| Ошибка перед COMMIT | PASS: rollback view/grants; новая PG_CATALOG и registry row исчезают вместе. Sequence 3→4 остаётся допустимым gap; существующий bootstrap не повреждён |
+| Native / Simple / Extended / named prepared | PASS: одинаковые IDs/имена, PUBLIC и "public" различны, mixed case/пробел/кавычка/leading space и 56 Я = 112 UTF8 bytes без усечения, missing name — ноль строк |
+| Wire metadata / bytes | PASS: SQL-derived inputs 1043/20, outputs 20/1043, sizes 8/-1, typmods -1, labels OID/NSPNAME. Text и binary inputs/results; BIGINT network-order 8 bytes, UTF8 bytes имени точные |
+| Alias / derived / CAST / обе UNION ветви | PASS: BIGINT type 20, 4294967296 не усечён; происхождение/alias не подменяют тип |
+| Права / READ ONLY | PASS: обычный пользователь читает все registry rows, включая schema без USAGE; новых CREATE SCHEMA/base/sequence grants нет. INSERT/UPDATE/DELETE отклонены и владельцу; native/libpq чтения не меняют counter |
+| Bootstrap-функция | PASS: native и libpq PG_BACKEND_PID возвращают CURRENT_CONNECTION; definition/privileges прежние |
+| DDL / transaction visibility | PASS: собственные public/private rows совпадают; второй attachment не видит uncommitted CREATE/DROP. COMMIT/full ROLLBACK согласованы; ALTER сохраняет ID, DROP+CREATE меняет, prepared lookup видит новый ID |
+
+| Артефакт | SHA256 |
+|---|---|
+| libPgWire.so | `adb3eacaadf560a73e7ce9d9ce586d1a2145fea0c869d86d9bc6849c7c4c3395` |
+| libEngine14.so | `ba439210e32962db216a7853c8ff8857c70a77d8dc045e8abda0a7d86d011bf7` |
+| libfbclient.so.2 | `1a6b50a5e3e13e7c81cb5c9d1da599b21154d94895c53f163cb543cd0a5e5a85` |
+| install_namespace_catalog.sql | `3512cba9248c6e4d97c99e0bf488e6a8e1a4ec1c06a1aa8797d4293a4119b6fe` |
+| pgwire_1c_smoke.py | `b4e8396a8fde37f6a1947ec2865d3f68324810b7218adb4b38ea03db93fcd887` |
+| pgwire_namespace_checks.py | `229e5803cd3b90c69d1622dc16ae3402253cd733288dde02d51aed86e2d8265b` |
+| install_namespace_registry.sql (прежний) | `2921fec5381a180021656a6a3d6182c39de92ace4ff5900ab61547ac1766eafe` |
+| compat.sql (прежний) | `dbffdaff007e797370ee5d78b285f5338163d4911c015d6b973e2be38fdff7d5` |
+
+Промежуточные FAIL сохранены в namespace-catalog-01/02. В 01 тест ожидал
+28000 для PgWire CREATE SCHEMA без права, фактически получен 42000; проверка
+исправлена с дополнительной native проверкой причины permission denied.
+В 02 GRANT CREATE SCHEMA после открытия libpq attachment не разрешил ему DDL.
+Фикстура выдаёт право явно после проверки отсутствия installer grants и создаёт
+новый DDL attachment; исходное соединение остаётся reader. Это исправления
+проверок, production SQL не менялся. Оба промежуточных сервера завершились exit 0.
+
+SKIP по границе этапа: rebuild/старые suites, полная APP-10 concurrency/restart
+матрица и known NAT-* crash repro. Native DDL под user savepoint запрещён (0A000),
+положительный DDL ROLLBACK TO не заявлен. Установка требует исправного APP-10
+с активным hook, администратора и отсутствия конкурентного DDL; repair и
+автоматическое обнаружение disabled hook не добавлены.
+
+Это namespace values с native metadata, не полная PG catalog compatibility.
+PG oid/name/regnamespace, PG/native names и resolution, nspowner/nspacl,
+pg_class/visibility/temp namespace отсутствуют; APP-01/APP-02/APP-06 и selected04
+остаются открытыми. Далее требуется отдельное решение о namespace resolution,
+затем pg_class/relnamespace и search-path visibility, после — неизменённый selected04.
+
+## 11 ноября 2026: архитектурный review namespace registry
+
+Проверена ревизия `5bbdaa763d5ff35f22c6969503a1811d7f4aac7d` относительно
+`c27a3a4c5a`: installer, подключение к прежнему harness, проверки и ограничения.
+Замечаний к реализации APP-10 не найдено. Production diff ограничен SQL;
+`git diff c27a3a4c5a 5bbdaa763d -- src` пуст. Native запрет DDL под user savepoint
+подтверждён в DsqlDdlRequest::execute; проверенный отказ/recovery не выдаётся за
+поддержку schema DDL с последующим ROLLBACK TO. APP-10 закрыт в своей границе;
+APP-01 и исходный selected04 остаются открытыми.
+
+Независимо повторена целевая приёмка из чистого worktree этой ревизии:
+
+```sh
+python3 -B pg_wire_protocol/tools/pgwire_1c_smoke.py \
+  --firebird-dir /tmp/firebird-pgwire-input-review-build-20261111/gen/Debug/firebird \
+  --work-dir /tmp/firebird-pgwire-namespaces-review-20261111 \
+  --namespaces --timeout 180
+```
+
+Итог `/tmp/firebird-pgwire-namespaces-review-20261111/summary.json`:
+completed=true, namespaces_passed=true. PASS: 4 группы установки, 11 native/libpq
+групп, 11 адресных отказов доступа, 6 сверок состояния и отдельный restart.
+libpq 14.24; оба server runs exit_code=0, forced_kill=false:
+PID 1311191 (native 60309/PgWire 39427), restart PID 1311392 (56815/36825).
+Runtime, installer и оба harness SHA256 совпали с таблицей реализации ниже;
+source_diff_sha256 — SHA пустого diff. Готовая сборка соответствует неизменённым
+C++ исходникам, rebuild не выполнялся. Остальные suites не повторялись.
+Все fixtures/security DB/runtime отдельные в /tmp, рабочая 1С не затрагивалась;
+known NAT-* crash repro не запускались.
+
+При выборе следующего этапа выполнен отдельный native OO metadata probe
+на том же Engine14, без изменений production: артефакты
+`/tmp/pgwire-catalog-metadata-probe-20261111-hal80k8l/`
+(`probe.cpp`, `result.log`, `summary.json`), exit=0. SHA256 probe.cpp:
+`b781403885a2a7aa3ed39a2a8b6e1abbcbb59c8fb5c5233f642502f25334fc36`.
+Это исследование metadata в отдельной embedded БД, не приёмка нового catalog.
+
+Прямой SELECT/alias/derived/CTE сохраняют schema/relation/field исходной view;
+CAST/арифметика/CASE/MIN/MAX их не сохраняют. UNION с первым полем
+PG_CATALOG.PG_NAMESPACE.OID и второй ветвью `CAST(4294967296 AS BIGINT)` имеет
+общий native BIGINT, но сохраняет provenance первой ветви. Перестановка ветвей
+меняет provenance. Input параметры имён исходной колонки не имеют.
+Следовательно, эти getters нельзя использовать как надёжную идентичность SQL-типа
+для подмены native BIGINT на PG oid; range guard не исправит общий тип UNION.
+
+Выбран [APP-11](1c/NAMESPACE_CATALOG_TASK.md): только SQL-view реальных namespace
+данных, native BIGINT/VARCHAR и wire20/1043. На момент этого review реализация
+ещё не была выполнена; её отдельная приёмка приведена выше. В PostgreSQL
+[pg_namespace](https://www.postgresql.org/docs/18/catalog-pg-namespace.html)
+использует oid/name; полноценные типы, правила PG/native имён и остальные
+catalog queries остаются отдельными задачами. API/codecs для имитации type identity
+по названию колонки не расширяются.
+
 ## 11 ноября 2026: внутренний namespace registry
 
 [APP-10](1c/NAMESPACE_REGISTRY_TASK.md) реализован поверх

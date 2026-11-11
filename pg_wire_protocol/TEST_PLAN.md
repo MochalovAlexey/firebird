@@ -4,6 +4,38 @@
 
 Python scaffold мигрирован под текущий контракт: 58 live cases прошли в P6. Начальные host tests расположены в src/common/tests/WireProtocolConfigTest.cpp, src/remote/server/wire/tests и isolated tools harness. P2/P3/P4 приёмка сохранена в VALIDATION. Предыдущая P5-ревизия прошла целевую Linux/Super приёмку с native ограничением READ CONSISTENCY + AUTO COMMIT; P6 повторил сборку, unit tests и целевые регрессии по [VALIDATION.md](VALIDATION.md). Целевой P6/M1 Linux/Super принят с известными native ограничениями, включая отдельно исключённый ON CONNECT shutdown. P7 Extended Query прошёл целевую Linux/Super приёмку: 16 групп. P8 codecs прошли целевую Linux/Super приёмку: восемь групп. P9 прошёл 17 групп с реальными C libpq, raw-wire и ограниченным профилем Psycopg 3; целевой M2 Linux/Super для совместимого SQL и реализованных codecs принят. Следующий этап — P10. PASS относится к зафиксированным cases/fixtures, а наличие строки в полной матрице не означает её прохождения.
 
+## Подэтап 1С: публичное представление namespace IDs
+
+`pgwire_1c_smoke.py --namespace-catalog` / `pgwire_namespace_checks.py` расширяют
+прежний native isql/libpq harness. Только SQL/harness, проверенный runtime по SHA,
+отдельные БД/security/runtime в /tmp; rebuild и полная матрица APP-10 не нужны.
+
+- Установка после APP-10 при search_path=SYSTEM с bootstrap PG_CATALOG и без неё.
+  View равен private mapping; прежние IDs, owner/source/BLR/grants PG_BACKEND_PID
+  сохранены. Новая PG_CATALOG регистрируется hook ровно один раз.
+- Отсутствующий APP-10, повтор и чужой PG_NAMESPACE: явные отказы без изменения
+  старого объекта, данных, owner, grants и counter. Ошибка перед COMMIT откатывает
+  view/grants и новую schema с registry row. Допустимы sequence gaps.
+- Native/Simple/Extended/prepared lookup по имени и ID: exact case, PUBLIC/"public",
+  пробел/кавычка, mixed case, Unicode имя 56 символов / 112 UTF8 bytes, missing name.
+  SQL-derived input OIDs 1043/20; text/binary results и inputs, metadata 20/1043,
+  sizes 8/-1, typmods -1, uppercase labels. BIGINT — ровно 8 bytes, имена — UTF8.
+- Alias, derived SELECT, CAST и UNION с BIGINT 4294967296 в обоих порядках ветвей:
+  type 20, точные text/binary values без усечения до uint32 или подмены по origin.
+- Обычный пользователь читает view, включая schema без USAGE; новых base/sequence
+  или CREATE SCHEMA grants нет. INSERT/UPDATE/DELETE запрещены и владельцу.
+  Повторные native/libpq READ ONLY lookups не меняют counter; PG_BACKEND_PID работает.
+- CREATE/ALTER/DROP, COMMIT/full ROLLBACK, два attachments: private/public mapping
+  совпадают, uncommitted changes остаются локальны, ALTER сохраняет ID, DROP+CREATE
+  меняет его, prepared lookup видит новую identity. DDL-право выдаёт сама фикстура
+  перед созданием DDL attachment; installer его не выдаёт.
+
+Нормальный server shutdown обязателен. Результаты, commands, revision и SHA —
+в VALIDATION. PG oid/name/regnamespace, nspowner/nspacl, PG name resolution,
+pg_class/visibility/temp namespace и selected04 этим срезом не принимаются.
+Сохранён native запрет DDL под user savepoint (0A000); known NAT-* crash repro,
+полные concurrency/restart и старые suites повторно не запускаются.
+
 ## Подэтап 1С: native namespace registry
 
 `pgwire_1c_smoke.py --namespaces` / `pgwire_namespace_checks.py` используют

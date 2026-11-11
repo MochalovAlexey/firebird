@@ -74,6 +74,38 @@ APP-07 не меняет parser/engine/API/InputCodec/зависимости; in
 Контракт — [1c/README](1c/README.md), проверки — [VALIDATION](VALIDATION.md).
 APP-07 закрывает только output; APP-02/SQL-06 и исходный сценарий 1С остаются открыты.
 
+## Публичное представление namespace IDs
+
+APP-11 — устанавливаемый native SQL view PG_CATALOG.PG_NAMESPACE(OID, NSPNAME)
+над PGWIRE_COMPAT.NAMESPACES из APP-10. Он возвращает те же IDs и полные native
+имена без преобразования регистра или усечения; PUBLIC и quoted "public"
+различаются. Все registry rows доступны независимо от USAGE их схем и search_path;
+наличие строки не доказывает видимость таблицы или SELECT privilege.
+Изменения и rollback видны в исходной native transaction, без отдельного кэша.
+
+| Колонка | Native / wire type | Text / binary | Label |
+|---|---|---|---|
+| OID | BIGINT / 20 | Десятичное число / 8 bytes network order | OID |
+| NSPNAME | VARCHAR / 1043 | Полное UTF8 имя / те же UTF8 bytes | NSPNAME |
+
+Field sizes — 8/-1, typmods — -1. Название OID не меняет BIGINT в PostgreSQL oid.
+Alias, derived SELECT, CAST и обе перестановки UNION с BIGINT 4294967296 сохраняют
+type 20 и значение. Metadata schema/relation/field не используется как type identity.
+PG oid (26), name (19), regnamespace, nspowner/nspacl не реализованы этим view.
+Native identifier resolution/labels сохранены; простое LOWER неоднозначно.
+
+DISTINCT делает view read-only даже для владельца. Installer выдаёт PUBLIC только
+USAGE PG_CATALOG и SELECT view, не новые права на private table/sequence/trigger
+или CREATE SCHEMA. Чтение в READ ONLY transaction не выделяет IDs.
+Отдельная атомарная установка сохраняет bootstrap-функцию PG_BACKEND_PID и её
+права; повтор/чужой PG_NAMESPACE дают ошибку без замены объекта.
+Предусловия: исправный APP-10 с активным hook, администратор и отсутствие
+конкурентного DDL. Repair/проверка отключённого hook не добавлены.
+[Установка](1c/README.md#публичное-представление-namespace-ids-app-11),
+[проверки](VALIDATION.md#11-ноября-2026-публичное-представление-namespace-ids).
+APP-01/APP-02/APP-06 и selected04 открыты: остаются PG/native names и resolution,
+pg_class с согласованным relnamespace, search-path visibility и temp namespace.
+
 ## Устанавливаемый внутренний namespace mapping
 
 APP-10 — SQL-only основа будущих каталогов в отдельной schema PGWIRE_COMPAT,

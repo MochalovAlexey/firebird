@@ -111,9 +111,22 @@ PGWIRE_COMPAT.NAMESPACES выдаёт точное native имя и устойч
 конкурентного DDL. Проверены native/libpq, rollback, права, concurrency и restart;
 native запрет DDL под пользовательским savepoint (0A000) сохранён и описан в
 [контракте](1c/README.md#внутренние-namespace-ids-app-10).
-C++/parser/API не менялись. Это внутренний mapping; публичные каталоги,
-PG oid/regnamespace/name mapping/visibility и selected04 остаются APP-01.
-APP-10 оставлен на review, открытие 1С и Гилёв этим не подтверждаются.
+C++/parser/API не менялись. APP-10 принят в `5bbdaa763d`; открытие 1С и Гилёв
+этим не подтверждаются.
+
+[APP-11](1c/NAMESPACE_CATALOG_TASK.md) добавляет отдельный одноразовый
+[installer публичного view](1c/sql/install_namespace_catalog.sql):
+PG_CATALOG.PG_NAMESPACE(OID, NSPNAME) читает те же IDs и точные native имена.
+DISTINCT запрещает DML даже владельцу; PUBLIC получает только USAGE PG_CATALOG
+и SELECT view. Требуются установленный APP-10 с активным hook и отсутствие
+конкурентного DDL. Существующие PG_CATALOG/PG_BACKEND_PID сохраняются;
+существующий PG_NAMESPACE означает отказ, ошибка до COMMIT — полный rollback.
+
+Metadata остаётся BIGINT/VARCHAR (wire20/1043), binary ID — 8 bytes, labels —
+OID/NSPNAME. Все registry rows доступны независимо от USAGE их схем.
+PG oid/name/regnamespace, PG/native name resolution, nspowner/nspacl,
+pg_class/visibility/temp namespace и selected04 остаются открытыми.
+APP-11 оставлен на review; [установка и проверки](1c/README.md#публичное-представление-namespace-ids-app-11).
 
 ## Клиентская приёмка P9/M2
 
