@@ -313,7 +313,8 @@ APP-08: text hex/escape и raw binary до 65533 decoded bytes на параме
 physical layout по фактическим длинам Bind. Engine создаёт BLOB штатным MOVE
 при Execute; новых handles/transaction lifecycle в плагине не требуется.
 Проверены libpq/raw/native readback, selected23 на синтетической PUBLIC.FILES
-и 68 BLOB среди 92 mixed параметров; APP-08 оставлен на review. Большие значения
+и 68 BLOB среди 92 mixed параметров; `c27a3a4c5a` прошёл review и независимую
+приёмку на свежей сборке, APP-08 закрыт. Большие значения
 остаются APP-09; исходные SQL bytea types/casts и APP-05 не закрываются.
 
 Срез [фиксированной диагностики](FIXED_DIAGNOSTICS_TASK.md) реализован через
@@ -329,6 +330,75 @@ physical layout по фактическим длинам Bind. Engine созда
 | 4. Типы и функции | Binary BLOB output выдаётся как bytea; input до 65533 decoded bytes поддержан. Большие input и SQL bytea type/casts/storage/index semantics не добавлены. mchar/mvarchar, regnamespace и BINROWVER остаются открытыми |
 | 5. Транзакции/конкуренция | PG BEGIN без опций использует реальные READ CONSISTENCY транзакции; native controls сохраняются; advisory locks и PG timeout semantics ещё не реализованы |
 | 6. Временные объекты/нагрузка | PG temporary DDL, serial4, ANALYZE и fasttrun_ext ещё не реализованы; нужен эталон их эффектов |
+
+Реализован [APP-10: внутренний namespace registry](NAMESPACE_REGISTRY_TASK.md),
+оставлен на review. Устанавливаемые SQL table/sequence/view/DDL trigger поддерживают
+устойчивые IDs точных native имён; C++/parser/API не меняются. Это основа будущих
+каталогов, selected04 ещё не выполняется. Native DDL под пользовательским savepoint
+запрещён (0A000); проверены отказ и ROLLBACK TO recovery без изменения registry.
+Публичные PG names/types/visibility требуют отдельного решения. Путь до первого
+запуска 1С/Гилёва — в [PROGRESS](PROGRESS.md); сквозной запуск пока не принят.
+
+## Внутренние namespace IDs: APP-10
+
+Одноразовый [install_namespace_registry.sql](sql/install_namespace_registry.sql)
+устанавливается владельцем базы/администратором только в выбранную базу, при
+отсутствии конкурентного DDL. Подключение и credentials задаются native isql,
+в SQL-файле их нет. Пример, пароль передаётся обычными средствами клиента:
+
+```sh
+isql -user OWNER -input pg_wire_protocol/1c/sql/install_namespace_registry.sql DATABASE_ALIAS
+```
+
+Installer использует SET BAIL ON, SET AUTODDL OFF и один финальный COMMIT.
+Первый DDL — CREATE SCHEMA PGWIRE_COMPAT без IF NOT EXISTS. Уже существующая
+schema, включая чужую, означает отказ до изменений; повторный запуск не upgrade.
+Ошибка до COMMIT откатывает schema и все созданные объекты. Установка не меняет
+compat.sql и не выполняется автоматически при подключении.
+
+| SQL-объект | Назначение |
+|---|---|
+| PGWIRE_COMPAT.NAMESPACE_IDS | NATIVE_NAME VARCHAR(63) UTF8 с binary/case-sensitive UTF8 collation — PK; NAMESPACE_ID BIGINT NOT NULL UNIQUE, CHECK 1…4294967295 |
+| PGWIRE_COMPAT.NAMESPACE_SEQ | Одна native sequence, новые IDs; пропуски допустимы, reseed/reuse не выполняются |
+| PGWIRE_COMPAT.NAMESPACES | Read-only DISTINCT projection только NATIVE_NAME/NAMESPACE_ID |
+| PGWIRE_COMPAT.NAMESPACE_DDL | AFTER ANY DDL STATEMENT, SQL SECURITY DEFINER; фильтр OBJECT_TYPE=SCHEMA, имя из OBJECT_NAME |
+
+Первичное заполнение читает SYSTEM.RDB$SCHEMAS, включая уже существующие schemas,
+SYSTEM и саму PGWIRE_COMPAT. Снимается только хвостовое CHAR padding; LOWER/UPPER
+не применяется. Native PUBLIC и quoted "public" имеют разные записи/IDs.
+Registry хранит identity, остальные свойства схем остаются в native metadata.
+Текущий engine ограничивает schema name 56 символами; registry не вводит усечение.
+
+CREATE выдаёт новый ID, ALTER оставляет прежний, DROP удаляет строку. RECREATE
+следует фактическим DROP/CREATE hooks; IF NOT EXISTS/IF EXISTS не выделяют ID при
+отсутствии реального события. DROP+CREATE одноимённой схемы не переиспользует ID.
+Всё выполняется в исходной DDL transaction; ошибка записи registry отменяет DDL.
+Native Firebird запрещает DDL при активном пользовательском SAVEPOINT (0A000):
+положительный undo schema DDL через ROLLBACK TO не поддерживается. Проверены
+сам отказ, ROLLBACK TO recovery и сохранность DDL, сделанного до savepoint.
+COMMIT/полный ROLLBACK registry следуют обычной native транзакции.
+
+Installer выдаёт PUBLIC только USAGE на служебную schema и SELECT на view.
+Базовая таблица, sequence и управление trigger прикладному пользователю не выданы.
+View read-only даже для владельца; обычный schema owner выполняет свой DDL через
+definer hook без прямых прав записи в registry. Права CREATE SCHEMA установщик
+прикладным пользователям не добавляет — они выдаются администратором отдельно.
+Lookup — чистый SELECT, работает в READ ONLY transaction, неизвестное имя даёт
+ноль строк и не двигает sequence. Через PgWire NAMESPACE_ID пока обычный BIGINT
+(OID 20), а не PostgreSQL oid/regnamespace. ID локален базе, сохраняется между
+attachments и после нормального restart сервера; фиксированные PG OID не копируются.
+
+Проверка: `pgwire_1c_smoke.py --namespaces`, native/libpq на одной временной базе,
+отдельные install failure/collision базы, конкурентные transactions и restart.
+Результаты и SHA — в [VALIDATION](../VALIDATION.md).
+
+Отключённые triggers/-nodbtriggers, ручная порча registry/allocator, удаление
+служебной schema и частичный перенос её объектов вне контракта. Пропущенный
+DROP+CREATE нельзя восстановить по одному совпадению имён; lookup ничего не
+чинит. Upgrade/uninstall/repair не автоматизированы. Backup/restore/migration
+не проверены и не заявляются. Публичные pg_namespace/pg_class, PG name mapping,
+regnamespace/oid, search-path visibility и pg_my_temp_schema остаются APP-01;
+selected04 и APP-06 не приняты. Следующая часть не начинается автоматически.
 
 ## Bytea input: ограниченный APP-08
 

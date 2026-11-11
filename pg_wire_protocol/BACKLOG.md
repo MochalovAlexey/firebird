@@ -1,9 +1,10 @@
 # Незавершённые задачи PgWire и профиля 1С
 
-Актуализировано 11 ноября 2026 года: APP-07 принят в `5478a589d8`, APP-08 реализован и оставлен на review.
+Актуализировано 11 ноября 2026 года: APP-08 принят в `c27a3a4c5a`, APP-10 реализован и оставлен на review.
 Это единый список незакрытых работ и ограничений. [PLAN](PLAN.md) задаёт порядок,
 [COMPATIBILITY](COMPATIBILITY.md) — действующий контракт,
 [VALIDATION](VALIDATION.md) — доказательства. Подробности профиля — в [1c/README](1c/README.md).
+Готовность к реальному открытию 1С и Гилёву — в [1c/PROGRESS](1c/PROGRESS.md).
 
 ## Как поддерживать список
 
@@ -58,16 +59,22 @@
 | APP-05 | Открыто | Чтение настоящих служебных таблиц/конфигурации и DML на исходной схеме/типах 1С. Синтетический поиск и 92 параметра этого не подтверждают. | [NUMBERED_PARAMETERS_TASK](1c/NUMBERED_PARAMETERS_TASK.md), [VALIDATION](VALIDATION.md) |
 | APP-06 | Открыто | Сквозной сценарий 1С/Гилёва с зафиксированными версиями, настройками и фактической библиотекой клиента. Открытие базы и нагрузка ещё не приняты. | [Профиль 1С](1c/README.md), P11/P12 в [PLAN](PLAN.md) |
 | APP-07 | Закрыто, 11.11.2026 | `5478a589d8`: subtype 0 → bytea OID 17 через IBlob, text/binary, общий DataRow budget, lifetime/cleanup. Review без замечаний; независимые libpq/raw/native/unit и scalar codecs PASS. InputCodec/engine/API/dependencies прежние; APP-02/SQL-06 остаются открыты. | [BINARY_BLOB_OUTPUT_TASK](1c/BINARY_BLOB_OUTPUT_TASK.md), [review](VALIDATION.md#11-ноября-2026-архитектурный-review-binary-blob-output) |
-| APP-08 | Реализовано, на review | Input bytea → native BLOB subtype 0 через physical VARCHAR OCTETS и штатный MOVE при Execute. Text hex/escape и binary; ≤65533 decoded bytes на значение, layout по фактическим длинам Bind. libpq/raw/native проверяют selected23, 68 BLOB из 92 mixed параметров, реальные boundaries/cache, rollback/savepoint/disconnect. Production только InputCodec.cpp/h; engine/API прежние. | [BINARY_BLOB_INPUT_TASK](1c/BINARY_BLOB_INPUT_TASK.md) |
+| APP-08 | Закрыто, 11.11.2026 | `c27a3a4c5a`: bytea input → native BLOB через VARCHAR OCTETS/MOVE, ≤65533 bytes, layout конкретного Bind. Review без замечаний; свежая сборка, 9 unit executables, input 125/output 92 libpq checks и raw/native PASS. Production только InputCodec.cpp/h; engine/API прежние. | [BINARY_BLOB_INPUT_TASK](1c/BINARY_BLOB_INPUT_TASK.md), [review](VALIDATION.md#11-ноября-2026-архитектурный-review-bytea-input) |
 | APP-09 | Открыто | Входные BLOB больше 65533 decoded bytes: выбрать отдельный native путь с корректным transaction/portal lifetime и bounded memory. Не повышать общие лимиты вместо решения. APP-08 этого не закрывает; выходной предел APP-07 остаётся общим DataRow budget. | [BINARY_BLOB_INPUT_TASK](1c/BINARY_BLOB_INPUT_TASK.md) |
+| APP-10 | Реализовано, на review | Private namespace IDs в PGWIRE_COMPAT: одноразовый SQL installer, sequence/read-only view/definer hook. Native/libpq, права, rollback, concurrency и restart PASS. Native DDL под user savepoint запрещён (0A000), проверены отказ/recovery; положительный schema-DDL undo через ROLLBACK TO не заявлен. C++/API прежние; APP-01 и selected04 не закрыты. | [NAMESPACE_REGISTRY_TASK](1c/NAMESPACE_REGISTRY_TASK.md) |
 
 Для APP-01 исследование выявило отдельные архитектурные вопросы: RDB$SCHEMAS
 не содержит числового schema ID; простое LOWER(native name) неоднозначно при
 совместном существовании quoted/unquoted имён. Native default collation label
-также не является PostgreSQL LC_COLLATE. Стабильные namespace IDs, правила имён
+также не является PostgreSQL LC_COLLATE. Стабильные native namespace IDs реализованы в APP-10; правила PG имён
 и collation contract нужно решить до объявления совместимости catalog queries.
-Возможность SQL-регистра через штатный AFTER ANY DDL STATEMENT исследована,
-но его реализация/публичный catalog contract пока не выбраны. APP-01 не закрыт.
+Private SQL registry через штатный AFTER ANY DDL STATEMENT реализован и проверен;
+одноразовый installer оставлен на review. Публичный
+catalog contract не выбран: остаются PG/native имена, oid/regnamespace wire types,
+visibility/temp namespace и current_database (native DB_NAME может быть путём,
+а не Startup database alias). Работа с отключённым DDL hook, upgrade/uninstall/
+recovery registry не входят в APP-10; lookup ничего не исправляет автоматически.
+APP-01 не закрыт.
 
 ## Драйверы, wire и платформы
 

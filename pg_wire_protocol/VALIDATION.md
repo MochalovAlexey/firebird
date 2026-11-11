@@ -1,5 +1,215 @@
 # Проверки реализации
 
+## 11 ноября 2026: внутренний namespace registry
+
+[APP-10](1c/NAMESPACE_REGISTRY_TASK.md) реализован поверх
+`c27a3a4c5a964775ac759bd2d7ebcf6e35323351` и оставлен на review, без git add/commit.
+Production — только устанавливаемый
+[install_namespace_registry.sql](1c/sql/install_namespace_registry.sql).
+Изменения harness: новый `--namespaces` в прежнем `pgwire_1c_smoke.py` и
+`pgwire_namespace_checks.py`, без нового framework/dependencies.
+`git diff HEAD -- src` пустой (SHA256
+`e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`):
+C++/parser/engine/PgWire/public API не менялись, повторная сборка не требовалась.
+Исходные пользовательские README/PLAN/BACKLOG/VALIDATION, PROGRESS и файл задания
+сохранены и дополнены.
+
+Installer создаёт PGWIRE_COMPAT.NAMESPACE_IDS (NATIVE_NAME/NAMESPACE_ID), одну
+NAMESPACE_SEQ, read-only DISTINCT view NAMESPACES и NAMESPACE_DDL с SQL SECURITY
+DEFINER. Имя — VARCHAR(63) UTF8/case-sensitive UTF8, PK; ID — NOT NULL UNIQUE BIGINT,
+CHECK 1…4294967295. Initial fill — SYSTEM.RDB$SCHEMAS, только TRIM TRAILING CHAR
+padding, без LOWER/UPPER. Служебная schema также включена. Hook отфильтровывает
+OBJECT_TYPE=SCHEMA и использует OBJECT_NAME; CREATE выделяет ID, ALTER сохраняет,
+DROP удаляет строку. Sequence не сбрасывается; пропуски допустимы.
+PUBLIC получает только schema USAGE и SELECT view. Native CREATE SCHEMA права
+приложению installer не выдаёт, они остаются отдельным решением администратора.
+
+Использована готовая независимая сборка из review APP-08:
+`/tmp/firebird-pgwire-input-review-build-20261111/gen/Debug/firebird`.
+Фактически загруженные SHA256 совпали с review:
+
+| Артефакт | SHA256 |
+|---|---|
+| `libPgWire.so` | `adb3eacaadf560a73e7ce9d9ce586d1a2145fea0c869d86d9bc6849c7c4c3395` |
+| `libEngine14.so` | `ba439210e32962db216a7853c8ff8857c70a77d8dc045e8abda0a7d86d011bf7` |
+| `libfbclient.so.2` | `1a6b50a5e3e13e7c81cb5c9d1da599b21154d94895c53f163cb543cd0a5e5a85` |
+| `install_namespace_registry.sql` | `2921fec5381a180021656a6a3d6182c39de92ace4ff5900ab61547ac1766eafe` |
+| `pgwire_namespace_checks.py` | `e89e15e8c18b2bc251cbc25a5ee20dbafa64bdab57d2293d368821aabb6d65f7` |
+| `pgwire_1c_smoke.py` | `89d6d6a88ef3e433e7cb66ca6de160a57e801d9a3bb42f7ec9bb6a0dac065985` |
+
+Начальный native probe: `/tmp/namespace-hooks-probe.py`, артефакты
+`/tmp/firebird-pgwire-namespaces-probe-01/{hook_schema.log,hook_owner.log,summary.json}`.
+На этой сборке подтверждены CREATE/ALTER/DROP SCHEMA events, точный OBJECT_NAME
+`MiXeD Тест`, пустой SCHEMA_NAME и EFFECTIVE_USER=SYSDBA при DDL обычного
+WIRE_HOST_TEST. Hook пишет в закрытую таблицу владельца через DEFINER; ROLLBACK
+удаляет и schema DDL, и запись hook. Прежний native prototype ниже использован
+как исследование, новый probe — отдельная проверка текущего review runtime.
+
+Целевая команда из корня репозитория:
+
+```sh
+python3 -B pg_wire_protocol/tools/pgwire_1c_smoke.py \
+  --firebird-dir /tmp/firebird-pgwire-input-review-build-20261111/gen/Debug/firebird \
+  --work-dir /tmp/firebird-pgwire-namespaces-04 --namespaces --timeout 180
+```
+
+Итог `/tmp/firebird-pgwire-namespaces-04/summary.json`: completed=true,
+namespaces_passed=true. 4 группы установки, 11 native/libpq групп и отдельная
+restart-проверка; 76 namespace isql logs, 11 адресных отказов доступа, 6 сверок
+registry с native schemas/ID. Настоящий libpq 14.24 (140024), native isql той же
+сборки, одна private database/server для cross-visibility; failure/collision
+fixtures — две дополнительные БД того же private runtime.
+
+| Проверка | Результат |
+|---|---|
+| Fresh install | PASS при search_path=SYSTEM: 7 заранее созданных schemas, SYSTEM/PUBLIC и PGWIRE_COMPAT; registry точно равен RDB$SCHEMAS |
+| Exact native names | PASS: PUBLIC/quoted public имеют разные IDs; mixed case, кириллица, пробел, leading space, двойная кавычка и имя 56 Unicode characters; отдельные quoted CREATE/DROP через hook и parameterized libpq lookup |
+| One-shot/atomic install | PASS: повторный запуск 42000 без изменения mapping/counter/объектов; чужая PGWIRE_COMPAT сохраняет owner/table/data/sequence. Ошибки 22012 в середине и непосредственно до COMMIT оставляют ноль объектов; последующий fresh install успешен |
+| Lifecycle | PASS: CREATE/ALTER/DROP, CREATE OR ALTER, RECREATE, IF EXISTS/IF NOT EXISTS; ALTER/no-op без allocation, новый lifetime без reuse, failed RESTRICT и DROP CASCADE |
+| Other DDL/DML | PASS: native table ALTER/INSERT/UPDATE работают, registry и allocator неизменны |
+| Access/definer | PASS: обычный schema owner выполняет DDL и читает view без base grants; direct table SELECT/DML, sequence allocation/reseed/drop, trigger alter/drop, table alter — 28000; view DELETE — 42000, также для SYSDBA owner |
+| Constraints/DDL failure | PASS: NULL/0/-1/4294967296 и duplicate names/IDs отвергнуты; 4294967295 принят в откатанном test insert. Временный CHECK guard в registry отменяет исходный CREATE SCHEMA целиком |
+| COMMIT/full ROLLBACK | PASS: нет phantom namespace, uncommitted ID не виден native observer, rollback gaps не переиспользуются |
+| Schema DDL под user savepoint | **Native NOT SUPPORTED: 0A000**. Положительный undo такого DDL через ROLLBACK TO не пройден; refusal/E/ROLLBACK TO recovery и сохранность mapping PASS |
+| Two connections | PASS: два одновременно открытых transactions с разными именами получают разные IDs; до commit нет чужих rows, после commit mapping одинаков |
+| Same-name conflict | PASS: после завершённого первого uncommitted CREATE native и PgWire NO WAIT возвращают одинаковый 42000/schema already exists; rollback/retry без phantom/duplicates. Синхронизация шагов явная, sleeps отсутствуют |
+| Read-only lookup | PASS native/libpq: повторные SELECT не меняют таблицу/counter, отсутствующее имя даёт ноль строк, OID ID-колонки остаётся BIGINT/20 |
+| New attachment/restart | PASS: после обычного restart 15 committed mappings и counter=27 прежние; значения — артефакт fixture, не зарезервированные IDs |
+| Unrelated build/suites | Не повторялись: SQL/harness-only diff; предыдущий PASS не выдаётся за новый прогон |
+
+Ограничение savepoint воспроизведено отдельно native isql, без PgWire:
+
+```sql
+SET AUTODDL OFF;
+SET TRANSACTION READ WRITE READ COMMITTED;
+SAVEPOINT S;
+DROP SCHEMA NS_TX_ROLLBACK;
+-- SQLSTATE 0A000: Running under user savepoint S, DDL prohibited
+```
+
+Это штатный guard DsqlDdlRequest::execute в `src/dsql/DsqlRequests.cpp`:
+проверка user savepoints предшествует node->executeDdl. Он не возникает из registry
+и не относится к known nested-EDS crash repro. CREATE имеет тот же отказ.
+Проверены native отказ и PgWire E -> ROLLBACK TO -> T с неизменным mapping.
+Также CREATE до SAVEPOINT сохраняется после ROLLBACK TO и откатывается полным
+ROLLBACK. Положительная схема DDL-after-savepoint требует отдельного решения по
+native движку; обход/изменение ядра в APP-10 не добавлялись.
+
+Оба server runs завершились exit_code=0, forced_kill=false, shutdown около 0.164 s:
+первый PID 1301359 (native 40615, PgWire 51805), после restart PID 1301568
+(native 42641, PgWire 46783). Нет оставшихся attachments; native probes до/после
+успешны. Все runtime/config/security DB/fixtures в отдельных /tmp; рабочие базы,
+серверы и исходная 1С не изменялись. Known NAT-* crash repro не запускались.
+
+Промежуточные результаты сохранены: namespaces-01 остановился до server start
+на native schema-name limit 56 (фикстура ошибочно использовала 63); namespaces-02
+считал системные CHECK triggers как пользовательские (3 вместо 1); namespaces-03
+выявил описанный native savepoint guard, server exit 0. Проверки исправлены по
+реальной семантике; финальный namespaces-04 прошёл. Первая попытка подготовки
+probe в sandbox остановилась на создании test socket; native hooks затем проверены
+отдельным embedded probe, TCP-приёмка — с разрешённым локальным TCP.
+
+[PG pg_namespace](https://www.postgresql.org/docs/18/catalog-pg-namespace.html)
+и [OID/regnamespace](https://www.postgresql.org/docs/18/datatype-oid.html) описывают
+будущий публичный контракт; текущая BIGINT/view основа не выдаётся за эти типы
+и catalog. APP-10 реализован и ожидает review с зафиксированной native границей
+savepoint. APP-01/APP-06 и selected04 остаются открытыми. Disabled hooks/
+-nodbtriggers, manual corruption/deletion, upgrade/uninstall/repair вне контракта;
+backup/restore/migration не проверены. Восстановление пропущенного DROP+CREATE
+по имени не гарантирует identity, lookup ничего автоматически не исправляет.
+
+
+## 11 ноября 2026: архитектурный review bytea input
+
+Проверена ревизия `c27a3a4c5a964775ac759bd2d7ebcf6e35323351` относительно
+`5478a589d8` по [APP-08](1c/BINARY_BLOB_INPUT_TASK.md). Замечаний к ограниченному
+контракту не обнаружено. Проверены logical OID/physical OCTETS, динамический
+layout, пределы и NULL/empty, hex/escape, сохранение старого layout при ошибке,
+владение metadata и отдельный codec каждого portal. Production ограничен
+InputCodec.cpp/h; engine/parser/Extended/API не менялись.
+
+Source diffs и четыре harness/helper SHA совпадают с отчётом реализации ниже.
+Но прежний `/tmp/firebird-pgwire-1c-build` и итоговые runtime summaries уже
+отсутствовали; их PASS нельзя было повторно прочитать. Сохранены unit JSON,
+build logs и reference script. Сборка в repo gen/Debug была старше изменения.
+Поэтому выполнена новая независимая сборка, без изменения рабочего runtime:
+
+```sh
+mkdir /tmp/firebird-pgwire-input-review-build-20261111
+cd /tmp/firebird-pgwire-input-review-build-20261111
+/home/aleksey/dev/my_firebird/firebird/configure --enable-binreloc --enable-developer
+make -j2
+make -C gen -j2 TARGET=Debug pgwire_tests
+```
+
+Debug/Linux/Super, configure/build/units PASS. Логи configure.log, build.log,
+unit-build.log, units.json и девять pgwire_*_test.log находятся в build directory.
+Units запускались из gen/Debug/firebird/tests с LD_LIBRARY_PATH на build/lib.
+
+| Независимо повторённая проверка | Результат |
+|---|---|
+| Девять pgwire executables | PASS: Protocol, ErrorStatus, ResultCodec, Input 559, Float 112, Numeric 502, Temporal 313, SQL 575, Session 5 |
+| `--blob-input` | PASS: 125 libpq checks, 7 raw groups, 9 native readback/visibility observations |
+| `--blobs` | PASS: 92 checks, 32 PQunescapeBytea roundtrips, 9 native observations, 7 raw groups |
+
+TCP-команды из корня репозитория, с разрешённым локальным TCP:
+
+```sh
+python3 -B pg_wire_protocol/tools/pgwire_1c_smoke.py --firebird-dir /tmp/firebird-pgwire-input-review-build-20261111/gen/Debug/firebird --work-dir /tmp/firebird-pgwire-input-review-20261111 --blob-input --capture-dir /home/aleksey/dev/1c/captures/20261109T105635Z --timeout 180
+python3 -B pg_wire_protocol/tools/pgwire_1c_smoke.py --firebird-dir /tmp/firebird-pgwire-input-review-build-20261111/gen/Debug/firebird --work-dir /tmp/firebird-pgwire-input-output-review-20261111 --blobs --timeout 180
+```
+
+Оба summary: completed=true, соответствующий passed=true, revision=c27a3a4c5a,
+пустой production diff; оба server runs exit_code=0, forced_kill=false.
+Только отдельные runtime/security/test DB, рабочие базы не затрагивались.
+Остальные runtime suites и Postgres Pro reference live заново не запускались;
+их код/сохранённые записи рассмотрены, прежние результаты не выданы за новый PASS.
+
+SHA256 фактически проверенной новой сборки:
+
+- PgWire: `adb3eacaadf560a73e7ce9d9ce586d1a2145fea0c869d86d9bc6849c7c4c3395`;
+- Engine: `ba439210e32962db216a7853c8ff8857c70a77d8dc045e8abda0a7d86d011bf7`;
+- fbclient: `1a6b50a5e3e13e7c81cb5c9d1da599b21154d94895c53f163cb543cd0a5e5a85`.
+
+DT_NEEDED PgWire совпадает с repo baseline: libfbclient.so.2, libtommath.so.1,
+libtomcrypt.so.1, libm, libgcc_s, libc, loader. В старой /tmp сборке была
+libtommath.so.0; новая использует установленную .so.1, как repo baseline.
+Новые зависимости не устанавливались и не добавлялись кодом.
+
+APP-08 закрыт. APP-09 (>65533 input bytes), APP-02/SQL-06 (SQL types/casts/semantics),
+APP-01/05/06 и сквозной запуск 1С/Гилёва остаются открыты. Текущая оценка готовности
+сохранена в [1c/PROGRESS](1c/PROGRESS.md). В архитектурном диалоге изменена только
+документация; реализации следующего этапа в repo и commit нет.
+
+### Native proof следующего этапа namespace identity
+
+Для [APP-10](1c/NAMESPACE_REGISTRY_TASK.md) отдельно проверены штатные SQL schema
+hooks и одноразовый installer. Артефакты:
+`/tmp/pgwire-schema-registry-proof-20261111-sdzk641h` — install.sql, run_checks.py,
+quoted.sql, логи и summary.json. Это исследовательский prototype, не установленная
+production-функция и не приёмка pg_catalog/selected04.
+
+Использовались read-only binaries repo gen/Debug и отдельные configs/locks/новые
+БД в /tmp, без сервера/TCP. Engine SHA:
+`35d44dd6c7fba3840a2495ec1d379344d22a1a4e4ccbdc209e306b30f5a45935`.
+Это другая сборка, чем bytea review выше; доказательство относится к native
+DDL-механизму. Первая попытка со старым отсутствующим /tmp build остановилась
+до запуска isql/создания базы.
+
+PASS: атомарный install; CREATE rollback, ALTER сохраняет ID, DROP rollback
+восстанавливает ID, committed DROP+CREATE даёт новый ID; обычный schema owner
+читает view в READ ONLY и выполняет собственный schema DDL через definer hook;
+прямой DELETE registry отказан. Повтор install отказан до изменений, прежние
+IDs сохранены; rollback полной установки убирает schema/table/view/sequence/
+trigger. PUBLIC и quoted "public" различаются, mixed case/пробел/кириллица
+сохраняются. Проверено OBJECT_NAME для schema events. Summary SHA256:
+`c6deef1743411d5bc140cc08031d629763601406311d54993b0e921ae30d8cff`.
+
+Остальные будущие проверки — concurrency, restart, savepoints, все DDL-варианты,
+libpq coexistence и install failure injection — заданы в инструкции APP-10,
+этим prototype не объявлены пройденными. Public PG name mapping/oid/regnamespace,
+каталоги/visibility и bypass-disabled-hook recovery здесь не реализованы.
+
 ## 11 ноября 2026: bytea input через native VARCHAR OCTETS
 
 [APP-08](1c/BINARY_BLOB_INPUT_TASK.md) реализован поверх

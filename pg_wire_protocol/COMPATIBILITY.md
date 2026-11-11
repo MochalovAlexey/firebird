@@ -74,6 +74,37 @@ APP-07 не меняет parser/engine/API/InputCodec/зависимости; in
 Контракт — [1c/README](1c/README.md), проверки — [VALIDATION](VALIDATION.md).
 APP-07 закрывает только output; APP-02/SQL-06 и исходный сценарий 1С остаются открыты.
 
+## Устанавливаемый внутренний namespace mapping
+
+APP-10 — SQL-only основа будущих каталогов в отдельной schema PGWIRE_COMPAT,
+устанавливаемая администратором выбранной базы. View PGWIRE_COMPAT.NAMESPACES
+содержит только NATIVE_NAME и NAMESPACE_ID: точное native имя (с учётом регистра,
+без CHAR padding) и локальный уникальный BIGINT 1…4294967295. Native PUBLIC и
+quoted "public" различаются. Это не публичный pg_namespace, не PG name mapping,
+не wire oid (OID 26) или regnamespace; текущий wire type ID-колонки — BIGINT/OID 20.
+
+Первичная загрузка — из SYSTEM.RDB$SCHEMAS. Одна sequence и AFTER ANY DDL STATEMENT
+SQL SECURITY DEFINER поддерживают CREATE/new ID, ALTER/same ID, DROP/remove row;
+имя берётся из DDL_TRIGGER.OBJECT_NAME. DROP+CREATE/RECREATE дают новый ID, пропуски
+допустимы. Hook участвует в исходной транзакции; ошибки registry отменяют DDL.
+Native DDL при активном user savepoint запрещён с 0A000; положительный ROLLBACK TO
+для schema DDL не заявлен. Отказ/recovery и COMMIT/полный ROLLBACK проверены.
+
+PUBLIC получает USAGE служебной schema и SELECT read-only DISTINCT view; прямых
+прав записи/чтения таблицы, sequence и управления trigger не выдано. Обычный
+schema owner выполняет свой DDL через definer hook. Read-only lookup не пишет
+и не выделяет ID; отсутствие имени — ноль строк. Native и libpq видят одинаковые
+committed IDs; новые attachments и обычный restart их сохраняют.
+
+Одноразовая установка требует отсутствия concurrent DDL, отказывается при
+существующей PGWIRE_COMPAT и атомарно откатывается при ошибке до COMMIT.
+Upgrade/uninstall/repair, отключённые hooks/-nodbtriggers, ручная порча или удаление
+служебных объектов вне контракта. Backup/restore/migration не проверены. После
+пропущенного DROP+CREATE восстановление по имени не доказывает прежнюю identity;
+lookup не выполняет repair. APP-01/APP-06 и selected04 остаются открытыми.
+[Установка и детали](1c/README.md#внутренние-namespace-ids-app-10),
+[проверки](VALIDATION.md#11-ноября-2026-внутренний-namespace-registry).
+
 ## Bytea input через native VARCHAR OCTETS
 
 APP-08 принимает logical SQL_BLOB subtype 0, scale 0, длина ISC_QUAD.

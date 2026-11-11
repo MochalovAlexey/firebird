@@ -11,6 +11,7 @@ guessed Bind values. No captured SQL, parameter DETAIL or result data is saved.
 --limits checks literal SELECT limits through native RowsClause.
 --blobs checks native binary BLOB output as bytea.
 --blob-input checks bounded bytea parameters via native VARCHAR OCTETS.
+--namespaces checks the optional native schema identity registry.
 The external subprocess watchdog configures no server timeout.
 """
 import argparse
@@ -352,7 +353,10 @@ def client_child():
     try:
         connection = Libpq(config)
         output = {'libpq_version': connection.pq.PQlibVersion(), 'cases': []}
-        if config.get('blob_input'):
+        if config.get('namespaces'):
+            from pgwire_namespace_checks import namespaces_client
+            output['namespaces'] = namespaces_client(config, connection)
+        elif config.get('blob_input'):
             from pgwire_blob_input_checks import blob_input_client
             output['blob_input'] = blob_input_client(config, connection)
         elif config.get('blobs'):
@@ -597,7 +601,7 @@ class OneCHarness(StartupHarness):
             ready.close()
         self.native_probe('native_before')
         config = {'port':pg,'password':self.password,'baseline':args.baseline,'settings':args.settings,'strings':args.strings,
-                  'begin':args.begin, 'parameters':args.parameters, 'casts':args.casts, 'limits':args.limits, 'blobs':args.blobs, 'blob_input':args.blob_input,
+                  'begin':args.begin, 'parameters':args.parameters, 'casts':args.casts, 'limits':args.limits, 'blobs':args.blobs, 'blob_input':args.blob_input, 'namespaces':args.namespaces,
                   'capture_dir':str(args.capture_dir),'libpq':args.libpq, 'native_port':native,
                   'runtime':str(self.runtime),'work':str(self.work),'timeout':self.timeout}
         client_env = {key:value for key,value in self.env.items() if not key.startswith('PG')}
@@ -608,7 +612,10 @@ class OneCHarness(StartupHarness):
         child = json.loads(result.stdout)
         self.summary['client'] = child
         require(result.returncode == 0, 'libpq child failed; see libpq.log')
-        if args.blob_input:
+        if args.namespaces:
+            from pgwire_namespace_checks import namespaces_restart
+            self.summary['namespaces_restart'] = namespaces_restart(self)
+        elif args.blob_input:
             from pgwire_blob_input_checks import blob_input_protocols
             self.summary['blob_input_protocols'] = blob_input_protocols(self)
         elif args.blobs:
@@ -670,6 +677,7 @@ def main():
     mode.add_argument('--parameters',action='store_true',help='test consecutive numbered parameters')
     mode.add_argument('--casts',action='store_true',help='test PG postfix casts through native CastNode')
     mode.add_argument('--limits',action='store_true',help='test PG literal SELECT limits through native RowsClause')
+    mode.add_argument('--namespaces',action='store_true',help='test optional native schema identity registry')
     mode.add_argument('--blob-input',action='store_true',help='test bounded bytea input via native VARCHAR OCTETS')
     mode.add_argument('--blobs',action='store_true',help='test native binary BLOB output as bytea')
     parser.add_argument('--libpq')
@@ -690,8 +698,8 @@ def main():
     work.mkdir(mode=0o700)
     harness = OneCHarness(source,work.resolve(),args.timeout)
     harness.summary.pop('passed')
-    harness.summary.update(completed=False, mode='blob_input' if args.blob_input else 'blobs' if args.blobs else 'limits' if args.limits else 'casts' if args.casts else 'parameters' if args.parameters else 'begin' if args.begin else 'strings' if args.strings else 'settings' if args.settings else 'baseline' if args.baseline else 'select_without_from',
-        stage='Bytea input via native VARCHAR OCTETS' if args.blob_input else 'Binary BLOB output as bytea' if args.blobs else 'PG literal SELECT limits' if args.limits else 'PG postfix casts' if args.casts else 'Consecutive numbered parameters' if args.parameters else 'PG BEGIN / native transactions' if args.begin else 'standard_conforming_strings / revision 2' if args.strings else
+    harness.summary.update(completed=False, mode='namespaces' if args.namespaces else 'blob_input' if args.blob_input else 'blobs' if args.blobs else 'limits' if args.limits else 'casts' if args.casts else 'parameters' if args.parameters else 'begin' if args.begin else 'strings' if args.strings else 'settings' if args.settings else 'baseline' if args.baseline else 'select_without_from',
+        stage='Native schema identity registry' if args.namespaces else 'Bytea input via native VARCHAR OCTETS' if args.blob_input else 'Binary BLOB output as bytea' if args.blobs else 'PG literal SELECT limits' if args.limits else 'PG postfix casts' if args.casts else 'Consecutive numbered parameters' if args.parameters else 'PG BEGIN / native transactions' if args.begin else 'standard_conforming_strings / revision 2' if args.strings else
             'Fixed profiles and syntax-only startup settings' if args.settings else '1C observations / first engine slice',
         capture_dir=str(args.capture_dir), workers=6,
         module_sha256=hashlib.sha256((source/'plugins/libPgWire.so').read_bytes()).hexdigest(),
@@ -703,7 +711,10 @@ def main():
         ['git','diff','HEAD','--','src'],cwd=repo)).hexdigest()
     try:
         harness.prepare()
-        if args.blob_input:
+        if args.namespaces:
+            from pgwire_namespace_checks import namespaces_fixture
+            namespaces_fixture(harness)
+        elif args.blob_input:
             from pgwire_blob_input_checks import blob_input_fixture
             blob_input_fixture(harness)
         elif args.blobs:
@@ -734,7 +745,9 @@ def main():
             harness.summary['compat_script_sha256'] = hashlib.sha256(compat.read_bytes()).hexdigest()
         harness.run(args)
         harness.summary['completed'] = True
-        if args.blob_input:
+        if args.namespaces:
+            harness.summary['namespaces_passed'] = True
+        elif args.blob_input:
             harness.summary['blob_input_passed'] = True
         elif args.blobs:
             harness.summary['blobs_passed'] = True

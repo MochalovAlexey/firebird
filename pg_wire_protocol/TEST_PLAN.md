@@ -4,6 +4,43 @@
 
 Python scaffold мигрирован под текущий контракт: 58 live cases прошли в P6. Начальные host tests расположены в src/common/tests/WireProtocolConfigTest.cpp, src/remote/server/wire/tests и isolated tools harness. P2/P3/P4 приёмка сохранена в VALIDATION. Предыдущая P5-ревизия прошла целевую Linux/Super приёмку с native ограничением READ CONSISTENCY + AUTO COMMIT; P6 повторил сборку, unit tests и целевые регрессии по [VALIDATION.md](VALIDATION.md). Целевой P6/M1 Linux/Super принят с известными native ограничениями, включая отдельно исключённый ON CONNECT shutdown. P7 Extended Query прошёл целевую Linux/Super приёмку: 16 групп. P8 codecs прошли целевую Linux/Super приёмку: восемь групп. P9 прошёл 17 групп с реальными C libpq, raw-wire и ограниченным профилем Psycopg 3; целевой M2 Linux/Super для совместимого SQL и реализованных codecs принят. Следующий этап — P10. PASS относится к зафиксированным cases/fixtures, а наличие строки в полной матрице не означает её прохождения.
 
+## Подэтап 1С: native namespace registry
+
+`pgwire_1c_smoke.py --namespaces` / `pgwire_namespace_checks.py` используют
+существующий private runtime/native isql/libpq harness, без C++ изменений.
+Переиспользуется проверенная сборка; SQL-only этап не требует полного rebuild.
+
+- Fresh installer с SET BAIL/AUTODDL OFF/одним COMMIT при search_path=SYSTEM;
+  preexisting schemas + служебная schema, точный native case/Unicode/пробелы/
+  кавычки, leading space и native максимальное имя 56 символов. Уникальные
+  имена и IDs, NOT NULL и диапазон 1…4294967295; initial mapping равен RDB$SCHEMAS.
+- Повторный installer и чужая PGWIRE_COMPAT: явный отказ до изменений mapping,
+  объектов, owner, данных и counters. Искусственные ошибки в середине и перед
+  COMMIT: нет частичной schema/table/view/sequence/trigger, свежий install успешен.
+- Native и libpq schema CREATE/ALTER/DROP, CREATE OR ALTER, RECREATE, IF NOT EXISTS/
+  IF EXISTS, failed RESTRICT и DROP CASCADE. ALTER/no-op сохраняют ID/counter,
+  DROP+CREATE даёт новый ID; non-schema DDL/DML не меняет registry.
+- Ordinary user создаёт/изменяет/удаляет свою schema через definer hook. Native
+  SELECT view не требует прав на base table; прямые SELECT/DML base, allocation/
+  reseed/drop sequence, alter/drop trigger и alter base запрещены. DISTINCT view
+  read-only даже для owner. CHECK failure registry отменяет исходный CREATE SCHEMA.
+- Full COMMIT/ROLLBACK, допустимые sequence gaps; native запрет DDL под user
+  savepoint (0A000) и PgWire E/ROLLBACK TO recovery. DDL до savepoint сохраняется
+  после ROLLBACK TO и исчезает после полного ROLLBACK. Положительный undo schema
+  DDL под savepoint не поддерживается движком и не считается PASS.
+- Два одновременно активных transactions: разные schemas получают разные IDs,
+  uncommitted rows не видны, после commit mapping одинаков. Same-name conflict
+  сверяется с native NO WAIT при явно завершённом первом CREATE, без sleeps;
+  rollback/retry не оставляет phantom/duplicate namespace.
+- Повторные native/libpq READ ONLY lookups и missing name не меняют mapping или
+  sequence. Native и libpq видят одинаковые IDs, wire column — BIGINT/OID 20.
+  Новый attachment и normal server restart сохраняют mapping/counter; оба exit 0.
+
+Сравниваются SQL/harness и runtime SHA. Все БД/security/configs отдельные в /tmp.
+Known native crash repro и несвязанные старые suites не запускаются. Disabled
+hooks/repair, backup/restore/migration, public catalogs/oid/regnamespace/name
+mapping/visibility не заявляются; APP-01/APP-06/selected04 остаются открытыми.
+
 ## Подэтап 1С: bytea input через VARCHAR OCTETS
 
 `pgwire_1c_smoke.py --blob-input` / `pgwire_blob_input_checks.py` используют прежний

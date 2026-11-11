@@ -98,6 +98,23 @@ NULL и empty различаются; Parse/Bind не создают BLOB/applic
 большие входные BLOB остаются APP-09, SQL bytea grammar и открытие 1С не приняты.
 
 
+## Внутренние namespace IDs
+
+[APP-10](1c/NAMESPACE_REGISTRY_TASK.md) добавляет необязательный одноразовый
+[SQL installer](1c/sql/install_namespace_registry.sql) для выбранной базы.
+PGWIRE_COMPAT.NAMESPACES выдаёт точное native имя и устойчивый локальный BIGINT ID
+в диапазоне 1…4294967295. Одна sequence и definer DDL trigger поддерживают mapping
+при CREATE/DROP; ALTER сохраняет ID. PUBLIC/quoted "public" различаются.
+Приложению выданы только USAGE schema/SELECT view; lookup ничего не создаёт.
+
+Повтор установки — явная ошибка без изменений, установка выполняется без
+конкурентного DDL. Проверены native/libpq, rollback, права, concurrency и restart;
+native запрет DDL под пользовательским savepoint (0A000) сохранён и описан в
+[контракте](1c/README.md#внутренние-namespace-ids-app-10).
+C++/parser/API не менялись. Это внутренний mapping; публичные каталоги,
+PG oid/regnamespace/name mapping/visibility и selected04 остаются APP-01.
+APP-10 оставлен на review, открытие 1С и Гилёв этим не подтверждаются.
+
 ## Клиентская приёмка P9/M2
 
 Целевой Linux/Super профиль прошёл 17 групп libpq/raw/Psycopg 3 и регрессии; [evidence](VALIDATION.md). Проверены настоящий nonblocking libpq 14.24 и Psycopg 3.3.6 с libpq 18.6. Psycopg 3 поддерживает совместимый SQL без parameters при `autocommit=True`, Simple/forced prepared и text/binary results, включая AsyncCursor. Для native transaction controls подтверждён отдельный профиль `prepare_threshold=None`.
