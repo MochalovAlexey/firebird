@@ -1,8 +1,11 @@
 # Путь до запуска 1С и теста Гилёва
 
-Срез на 11 ноября 2026 года: ревизия `13f64d0e00`, APP-10/11/12 прошли review
-и независимую приёмку. APP-13 реализован в рабочем diff и оставлен на review: PG4 lowercase identifiers,
-сохранённый native-safe SQL, lowercase bootstrap, initial/RESET search path.
+Срез на 11 ноября 2026 года: ревизия `4520f371e9`, APP-10…13 прошли review
+и независимую приёмку. APP-13 добавил PG4 lowercase identifiers, сохранённый
+native-safe SQL, lowercase bootstrap, initial/RESET search path. Поверх этой основы
+реализован APP-14: visibility постоянных отношений на явном пути, с native SCL
+и отказом при неподдержанном пути/LTT. 174 libpq results, OO 46 и регрессии PASS;
+обнаружен baseline cache crash NAT-05, он не исправлен. Изменения оставлены для review.
 Этот файл показывает готовность прикладного сценария; конкретные незавершённые
 работы и ограничения ведутся в [BACKLOG](../BACKLOG.md), доказательства — в
 [VALIDATION](../VALIDATION.md). Обновлять после следующих прикладных этапов.
@@ -21,10 +24,11 @@
 | SQL/исполнение | Simple scripts с остановкой на ошибке; Extended/prepared/portals; typed последовательные `$n`, native postfix casts, literal LIMIT | Общая PG-грамматика и произвольные PG types не реализованы |
 | Транзакции | BEGIN, COMMIT/ROLLBACK, I/T/E, savepoints/recovery, native visibility | Не полная эквивалентность isolation/locks PostgreSQL; advisory locks ещё нет |
 | Binary data | Native BLOB output как bytea; text/binary input через OCTETS и native MOVE | Вход ≤65533 bytes на значение; выход ограничен общим DataRow budget. Это не SQL bytea type/index semantics |
-| Native namespace identity | APP-10 принят: устанавливаемый PGWIRE_COMPAT registry, стабильные IDs, native/libpq, права/concurrency/restart | Native DDL под user savepoint запрещён; PG names/types/visibility и selected04 ещё не реализованы |
-| Публичные namespace IDs | APP-11 принят: PG_CATALOG.PG_NAMESPACE над APP-10, atomic installer, точные имена/IDs, read-only, text/binary/native/libpq и transaction visibility PASS | BIGINT/VARCHAR, wire20/1043, uppercase labels; нет PG oid/name/regnamespace, nspowner/nspacl, visibility/temp namespace |
+| Native namespace identity | APP-10 принят: устанавливаемый PGWIRE_COMPAT registry, стабильные IDs, native/libpq, права/concurrency/restart | Native DDL под user savepoint запрещён; PG types и selected04 ещё не реализованы; visibility ограничена APP-14 |
+| Публичные namespace IDs | APP-11 принят: PG_CATALOG.PG_NAMESPACE над APP-10, atomic installer, точные имена/IDs, read-only, text/binary/native/libpq и transaction visibility PASS | BIGINT/VARCHAR, wire20/1043, uppercase labels; нет PG oid/name/regnamespace, nspowner/nspacl и temp namespace; visibility — отдельный APP-14 |
 | Постоянные relations | APP-12 принят: PG_CLASS из RDB$RELATIONS + PG_NAMESPACE, native ID+1, атомарная установка, 228 libpq results и native oracle/права/lifecycle PASS | Только schema-level persistent tables/views, native wire20/1043/20/1043. Reuse ID допустим, restore не проверен; полный catalog/visibility/temp и selected04/10/11 открыты |
-| Имена PG4 / APP-13 | ASCII lowercase unquoted, точные quoted names, native-safe source, lowercase bootstrap и public-first path | Native1/2/3 прежние; полный PG path/USAGE/regnamespace/visibility/temp ещё не реализован |
+| Имена PG4 / APP-13 | Принят: ASCII lowercase unquoted, точные quoted names, native-safe source, lowercase bootstrap и public-first path; независимые names/strings PASS | Native1/2/3 прежние; ведущий `_` ещё introducer (SQL-09); полный PG path/USAGE/regnamespace/visibility/temp ещё не реализован |
+| Видимость / APP-14 | Реализована pg_table_is_visible поверх native resolver/SCL, exact names и live attachment state; изменения для review | Только явный путь с pg_catalog, USAGE всех существующих schemas, без $user/pg_temp/LTT; типы wire20→16 |
 | Прикладные формы | Чтение конфигурации selected06 и запись selected23 неизменённым SQL; форма 92 parameters, включая 68 BLOB | Синтетические таблицы/данные; реальная схема, конфигурация и исходный Bind 1С не приняты |
 
 ## Где находимся относительно конечной цели
@@ -52,9 +56,9 @@
 | 01, 02, 03, 09, 21, 22 | Соответствующие операции поддержаны в принятых ограниченных контрактах; в 03 три SET намеренно no-op |
 | 06, 23 | Исходный SQL проверен на синтетической схеме и данных |
 | 19 | Проверен механизм 92 parameters/68 BLOB; исходный запрос на полной исходной схеме не принят |
-| 04, 05 | Не приняты: каталоги, namespace identity/имена/visibility, current_database/collation |
+| 04, 05 | Не приняты: regnamespace/pg_my_temp_schema, полный catalog, current_database/collation; APP-14 даёт ограниченную visibility |
 | 07, 17 | Не приняты: SQL bytea literals/casts/comparison и исходная схема; LIMIT сам работает |
-| 08, 18 | Не приняты: BINROWVER, custom strings/SQL types и binary predicates |
+| 08, 18 | Не приняты: BINROWVER, custom strings/SQL types, binary predicates и unquoted имена с начальным `_` |
 | 10, 11 | Не приняты: advisory locks, каталоги и timeout contract |
 | 12, 13, 14, 15, 16, 24 | Не приняты: temporary DDL/pg_temp, serial, ANALYZE, fasttrun, индексы |
 | 20 | Не принят: исходная register schema/types и полноценная проверка записи |
@@ -70,9 +74,11 @@
    [APP-11: публичный namespace view](NAMESPACE_CATALOG_TASK.md) принят с native
    именами и BIGINT/VARCHAR metadata. [APP-12](CLASS_CATALOG_TASK.md) принят:
    pg_class для постоянных таблиц/views через native IDs, без нового registry.
-   Реализованный для review [APP-13](PG_IDENTIFIER_NAMES_TASK.md) реализует выбранные
+   Принятый [APP-13](PG_IDENTIFIER_NAMES_TASK.md) реализует выбранные
    пользователем PG-правила имён вместе с source/bootstrap/session integration.
-   Затем нужны regnamespace/oid/name, search-path visibility и temp namespace,
+   Реализованный [APP-14](RELATION_VISIBILITY_TASK.md) добавляет pg_table_is_visible
+   для persistent catalog на поддержанном явном пути, через native resolver/SCL.
+   Regnamespace/oid/name, полный effective path и temp namespace ещё нужны,
    чтобы выполнить selected04 с реальными объектами. Для selected05 отдельно
    определить честный current_database/collation contract; имя native collation
    нельзя просто выдать за PostgreSQL LC_COLLATE.
@@ -80,6 +86,7 @@
    с требуемыми сравнениями/индексами, mchar/mvarchar с проверкой регистра,
    пробелов и Unicode, BINROWVER. Выбрать минимальные native механизмы; только
    после этого готовить схему и переносить реальные служебные данные/конфигурацию.
+   Не забыть SQL-09: unquoted имена 1С с начальным `_`, сохраняя native introducers.
    Каталоги и типы частично зависят друг от друга, это не два больших монолитных патча.
 3. **Первое реальное открытие 1С (APP-06, промежуточная точка).** Подключить
    реальный клиент к подготовленной базе, проверить фактическую библиотеку,

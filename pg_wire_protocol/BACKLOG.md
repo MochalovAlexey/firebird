@@ -1,6 +1,7 @@
 # Незавершённые задачи PgWire и профиля 1С
 
-Актуализировано 11 ноября 2026 года: APP-12 принят в `13f64d0e00`; пользователь выбрал PG-правила имён, APP-13 реализован в рабочем diff и ожидает review.
+Актуализировано 11 ноября 2026 года: APP-13 принят в `4520f371e9` после review
+и независимой приёмки. APP-14 реализован поверх этой основы и оставлен для review.
 Это единый список незакрытых работ и ограничений. [PLAN](PLAN.md) задаёт порядок,
 [COMPATIBILITY](COMPATIBILITY.md) — действующий контракт,
 [VALIDATION](VALIDATION.md) — доказательства. Подробности профиля — в [1c/README](1c/README.md).
@@ -34,6 +35,7 @@
 | SQL-06 | Открыто по нужным типам | Postfix domain/schema/array/custom targets, необходимые aliases и отличия PG conversions/typmods. Сейчас `::` использует native CAST, добавлен только postfix INT8. | [POSTFIX_CAST_TASK](1c/POSTFIX_CAST_TASK.md) |
 | SQL-07 | Отложено пользователем | Предварительный синтаксический разбор всего Simple Query. Сейчас ошибка останавливает остаток, но ранний COMMIT сохраняется при поздней syntax error. Вернуться отдельным решением, без автоматического расширения API. | [Решение о скриптах](1c/README.md#решение-от-9-ноября-2026-последовательные-скрипты-остановка-на-ошибке) |
 | SQL-08 | Условно | E-literals, dollar quoting и другие требуемые отличия строк/грамматики PG. Сейчас действуют описанные native длины/сцепление и UTF8-профиль. Сначала подтвердить потребность. | [Строковый режим](1c/README.md#standard_conforming_strings-редакция-2-10-ноября-2026) |
+| SQL-09 | Открыто | Unquoted identifiers с начальным `_`, необходимые для `_ExtensionsInfo`, `_IDRRef` и других имён 1С. Сейчас lexer трактует `_` как introducer. Расширить только PG4, сохранив `_UTF8 '...'`, native1/2/3, folding/source marks и savepoint lexer. Quoted обход в тестах не закрывает исходный SQL. | [review APP-13](VALIDATION.md#11-ноября-2026-архитектурный-review-правил-имён-pg4) |
 
 ## Настройки и транзакции
 
@@ -64,18 +66,19 @@
 | APP-10 | Закрыто, 11.11.2026 | `5bbdaa763d`: private namespace IDs в PGWIRE_COMPAT, одноразовый SQL installer, sequence/read-only view/definer hook. Review без замечаний, независимые native/libpq, права, rollback, concurrency/restart PASS. Native DDL под user savepoint запрещён (0A000): refusal/recovery проверены, положительный schema-DDL undo через ROLLBACK TO не заявлен. C++/API прежние; APP-01 и selected04 не закрыты. | [NAMESPACE_REGISTRY_TASK](1c/NAMESPACE_REGISTRY_TASK.md), [review](VALIDATION.md#11-ноября-2026-архитектурный-review-namespace-registry) |
 | APP-11 | Закрыто, 11.11.2026 | `a3e3c80123`: SQL-only PG_NAMESPACE над APP-10, точные IDs/native имена, read-only/atomic install. Review без замечаний; независимый PASS: 6 групп установки, 4 native/libpq группы, 128 results и normal shutdown. Native BIGINT/VARCHAR, wire20/1043; PG oid/name/regnamespace и nspowner/nspacl не добавлены. | [NAMESPACE_CATALOG_TASK](1c/NAMESPACE_CATALOG_TASK.md), [review](VALIDATION.md#11-ноября-2026-архитектурный-review-публичного-namespace-catalog) |
 | APP-12 | Закрыто, 11.11.2026 | `13f64d0e00`: SQL-only PG_CLASS для schema-level persistent tables/views, native ID+1, JOIN PG_NAMESPACE, wire20/1043/20/1043. Review без замечаний; независимый PASS: 5 групп установки, 4 native/libpq группы, 228 results и normal shutdown. Reuse допустим, restore не проверен; полный catalog/visibility/temp и selected04/10/11 открыты. | [CLASS_CATALOG_TASK](1c/CLASS_CATALOG_TASK.md), [review](VALIDATION.md#11-ноября-2026-архитектурный-review-pg_class) |
-| APP-13 | Реализовано, на review | PG4 lowercase unquoted/exact quoted identifiers, native-safe stored SQL, lowercase bootstrap/catalog labels, initial path/RESET/savepoint history и реальный DDL/DML/native readback. Пользователь явно разрешил изменение прежнего PG4 naming contract; native1/2/3 сохраняются. Без нового API/ODS/codecs/dependencies. | [PG_IDENTIFIER_NAMES_TASK](1c/PG_IDENTIFIER_NAMES_TASK.md) |
+| APP-13 | Закрыто, 11.11.2026 | `4520f371e9`: PG4 lowercase/exact quoted, native-safe source, lowercase bootstrap, initial path/RESET/savepoints. Review без подтверждённых дефектов; независимые 109 results/6 installer groups и strings 156 queries/API1209 PASS, shutdown штатный. Native1/2/3 прежние, нового API/ODS/codecs/dependencies нет. Native lexical границы сохраняются; SQL-09 открыт. | [PG_IDENTIFIER_NAMES_TASK](1c/PG_IDENTIFIER_NAMES_TASK.md), [review](VALIDATION.md#11-ноября-2026-архитектурный-review-правил-имён-pg4) |
+| APP-14 | Реализовано, ожидает review | pg_table_is_visible(BIGINT) → BOOLEAN для нынешнего persistent catalog, SQL SECURITY INVOKER wrapper + builtin штатного resolver/SCL. Явный путь/USAGE и отсутствие live native LTT проверяются на Execute; вне профиля — отказ. Полный PG search_path/regnamespace/temp и selected04 не входят. | [RELATION_VISIBILITY_TASK](1c/RELATION_VISIBILITY_TASK.md) |
 
 Для APP-01 исследование выявило отдельные архитектурные вопросы: RDB$SCHEMAS
 не содержит числового schema ID; простое LOWER(native name) неоднозначно при
 совместном существовании quoted/unquoted имён. Native default collation label
 также не является PostgreSQL LC_COLLATE. Стабильные native namespace IDs приняты в APP-10; правила PG имён
 и collation contract нужны для совместимости catalog queries. Решение о регистре
-принято пользователем: PG4 переходит на PG naming в APP-13, native1/2/3 прежние;
-реализация ещё впереди. Catalog values не приводятся к LOWER.
+принято пользователем и реализовано в APP-13: PG4 использует PG folding,
+native1/2/3 прежние. Catalog values не приводятся к LOWER.
 Ограниченный публичный view реализован в APP-11 с точными native именами
 и native metadata, без заявления полной PG-совместимости. Остаются PG/native
-name resolution/column labels, SQL/wire types oid/name/regnamespace, nspowner/nspacl,
+полные правила поиска и автоматических labels выражений, SQL/wire types oid/name/regnamespace, nspowner/nspacl,
 полный pg_class/visibility/temp namespace и current_database (native DB_NAME может быть путём,
 а не Startup database alias). Работа с отключённым DDL hook, upgrade/uninstall/
 recovery registry не входят в APP-10; lookup ничего не исправляет автоматически.
@@ -98,7 +101,7 @@ relation mapping ключей; их native ID сам по себе может н
 
 После APP-13 остаются полная PG search_path semantics (implicit pg_catalog priority,
 $user, filtering по USAGE, transactional SET), regnamespace/type semantics и
-visibility/temp namespace. Native MAKE_DBKEY не фильтрует schemas по USAGE;
+полная visibility/temp namespace. APP-14 покрывает только явно ограниченный профиль. Native MAKE_DBKEY не фильтрует schemas по USAGE;
 MON$LOCAL_TEMPORARY_TABLES — transaction snapshot и не live guard. Эти препятствия
 подтверждены отдельным [probe](VALIDATION.md#11-ноября-2026-архитектурный-review-pg_class).
 Начальный public-first path APP-13 — ограниченный native контракт. Native длины
@@ -115,6 +118,7 @@ MON$LOCAL_TEMPORARY_TABLES — transaction snapshot и не live guard. Эти �
 | WIRE-03 | Открыто | Windows wiring/build/runtime и поддержка SuperClassic/Classic. Сейчас подтверждён только Linux/Super; наличие plugin ABI не закрывает платформенную приёмку. | [COMPATIBILITY](COMPATIBILITY.md#отдельные-расширения-и-ограничения) |
 | WIRE-04 | Условно | COPY, pipeline, SQL named cursors, large-object API, LISTEN/NOTIFY, replication; protocol 3.2/direct TLS/GSS/SCRAM/MD5/channel binding. Отдельные contracts только при потребности профиля. | [COMPATIBILITY](COMPATIBILITY.md#отдельные-расширения-и-ограничения) |
 | WIRE-05 | Условно | Остальные codecs (ARRAY/OCTETS/DECFLOAT/timezone и custom types), remote security DB, encryption-key callbacks и немедленная отмена SQL при client EOF. Сейчас EOF во время engine call обнаруживается при следующем I/O; отдельного watcher нет. | [COMPATIBILITY](COMPATIBILITY.md#отдельные-расширения-и-ограничения) |
+| WIRE-06 | Открыто | Понятная диагностика DDL вместо общего Firebird SQL operation failed: как минимум isc_dyn_cannot_mod_obj_sys_schema и isc_dyn_no_create_priv. Сохранить корректный SQLSTATE и безопасные сообщения. Пользователь сообщил CREATE failure на employee; код подтверждает отсутствие этих mappings, но конкретная причина в его live-сеансе не проверена (Connection refused). При отсутствии lowercase bootstrap default path выбирает SYSTEM; ручной native путь описан в quickstart. | src/plugins/wire/pg/ErrorStatus.cpp, [quickstart](quickstart.md#sql-names-and-application-bootstrap) |
 
 ## Проверки и известные дефекты
 
@@ -129,6 +133,7 @@ MON$LOCAL_TEMPORARY_TABLES — transaction snapshot и не live guard. Эти �
 | NAT-02 | Отдельный baseline defect | READ COMMITTED READ CONSISTENCY + AUTO COMMIT: assertion Savepoint.cpp:833. Успех SNAPSHOT AUTO COMMIT не закрывает это сочетание. | [COMPATIBILITY](COMPATIBILITY.md#семантика-результатов-и-транзакций) |
 | NAT-03 | Отдельный baseline defect | RESET внутри PSQL после SAVEPOINT: PgWire Debug assertion ExtDS.cpp:2021 и на исходной сборке; embedded вариант даёт 01002. Не смешивать с обычным ALTER SESSION RESET. | [VALIDATION](VALIDATION.md) |
 | NAT-04 | Отдельный baseline defect | Внутренний SAVEPOINT через EXECUTE STATEMENT: assertion на исходной и изменённой сборках. Положительный вложенный SELECT этот сценарий не покрывает. | [VALIDATION](VALIDATION.md), [строковый режим](1c/README.md#standard_conforming_strings-редакция-2-10-ноября-2026) |
+| NAT-05 | Отдельный baseline defect, 11.11.2026 | SIGSEGV в DsqlStatementCache после длинной catalog/RESET/LTT последовательности при позднем Extended catalog lookup после SET ROLE. Воспроизведён на APP-14 и архивном APP-13 без нового builtin. Минимальный trigger/root cause ещё не локализован; отдельные 160-query path/role probes PASS. APP-14 получает fixture OIDs заранее, cache остаётся 2 MiB, обхода в production нет. | [APP-14 validation](VALIDATION.md#11-ноября-2026-app-14-видимость-постоянных-отношений) |
 | OPS-01 | При наличии старых объектов | Ранее неверно сериализованный SQL автоматически не исправлен. Такие объекты пересоздать из исходного SQL; исправление новых сохранений не считать миграцией старых. | [STRINGS_SOURCE_FIX_TASK](1c/STRINGS_SOURCE_FIX_TASK.md), [1c/README](1c/README.md) |
 
 Known crash repro не запускать в обычной регрессии; исправления NAT-* выполнять

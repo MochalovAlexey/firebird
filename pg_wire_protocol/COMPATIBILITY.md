@@ -1,5 +1,54 @@
 # Матрица совместимости PostgreSQL wire plugin
 
+## APP-14: видимость постоянных отношений
+
+После отдельного [installer](1c/sql/install_relation_visibility.sql) поверх APP-10…13
+доступна `pg_catalog.pg_table_is_visible(BIGINT) RETURNS BOOLEAN` (wire20→16).
+Это профиль нынешнего pg_class: schema-level persistent tables/views с native ID+1.
+Аргумент не является полноценным PG oid; native BIGINT limits и прежние ограничения
+reuse/restore сохраняются. Indexes/sequences/external/virtual/GTT/LTT/package rows
+в каталог не добавляются.
+
+| Состояние | Результат |
+|---|---|
+| NULL, отсутствующий OID, 0, отрицательный или большой BIGINT | NULL |
+| Известный OID, точное имя не найдено в пути | FALSE |
+| Первое одноимённое отношение имеет другой native ID | FALSE |
+| Native ID первого отношения равен oid−1 | TRUE |
+| USAGE есть, SELECT нет | Visibility по имени; реальное чтение отдельно отвергается |
+| Нет явного lowercase pg_catalog, есть $user/pg_temp или активная native LTT | 0A000 с причиной |
+| Нет USAGE существующей schema пути, ошибка SCL/metadata | Native error; не FALSE/NULL |
+
+Явный путь сохраняет native порядок (initial/RESET: public, pg_catalog, SYSTEM).
+Отсутствующие schemas пропускаются; существующие проверяются через SCL_check_schema
+в контексте вызывающего. Нет PG filtering schemas без USAGE, implicit pg_catalog,
+$user expansion, temporary namespaces или transactional SET. Native permission
+SQLSTATE документируется в отчёте проверки; ошибки ACL не перехватываются.
+Причина guard входит в native status. На wire действует прежний фиксированный
+английский diagnostic profile: SQLSTATE 0A000 и общее сообщение без raw native DETAIL.
+Guard выполняется и для известного OID вне пути; неизвестный OID может вернуть
+NULL до helper. Остальные SELECT не запрещаются при неподдержанном visibility path/LTT.
+
+Builtin `RDB$PG_RELATION_ID(exact_name)` возвращает nullable INTEGER через штатный
+SysFunction/BLR dispatch. Он читает текущие attachment path/live LTT на Execute,
+проверяет SCL и использует qualifyExistingName/getVersioned/getId. Имя — значение,
+не SQL syntax: точка и кавычка не разбираются. Metadata UTF8 проверяется до MetaName:
+1…63 native characters/≤252 bytes, без NUL/конечного ASCII space; неверный аргумент
+даёт invalid_name с SQLSTATE 22023, ошибка charset сохраняет native diagnostics.
+Wire input codec отдельно отвергает NUL с 22021 до helper.
+Helper и wrapper не deterministic, собственного cache нет. Уже подготовленный
+native SELECT может хранить прежнюю привязку, поэтому SELECT oracle готовится
+заново. PgWire Bind/reprepare не изменён. Прямой RESET сохраняет прежнее удаление
+named statements (26000 до нового Parse). Известный baseline cache crash NAT-05
+после сочетания catalog/RESET/LTT и позднего Extended catalog lookup не исправлен;
+он воспроизведён также без нового builtin на APP-13, см. VALIDATION.
+
+Wrapper — SQL SECURITY INVOKER, без dynamic SQL, autonomous transaction или записи
+при вызове. Engine не знает PG catalog/identity mapping. Installer plain CREATE
+FUNCTION атомарен, сохраняет прежние объекты/grants, выдаёт PUBLIC EXECUTE; runtime
+обновляется без ODS migration. Полный PG effective path/regnamespace/temp и исходный
+selected04 остаются в APP-01/04/SES-06; APP-02/03/06 и SQL-09 не закрываются.
+
 ## APP-13: правила имён PG4
 
 Unquoted SQL identifiers в клиентском dialect 4 складывают только ASCII A–Z в
@@ -11,7 +60,10 @@ Database dialect, DPB и SQL_DIALECT_CURRENT остаются 3; startup user/da
 application_name не преобразуются. Для native security identities в SQL нужны quotes.
 
 Native ограничения длины и лексики сохранены: нет усечения до PG 63 bytes, Unicode
-casefold или новых U&-форм. Unquoted Unicode остаётся за native lexical границей (42601). Quoted Unicode, leading spaces и doubled quotes допустимы;
+casefold или новых U&-форм. Unquoted Unicode остаётся за native lexical границей (42601).
+Начальный `_` также пока трактуется как introducer, а не начало unquoted identifier:
+имена вроде `_ExtensionsInfo` требуют отдельного расширения (SQL-09).
+Quoted Unicode, leading spaces и doubled quotes допустимы;
 quoted trailing ASCII space и NUL в PG4 отвергаются до эффектов, поскольку MetaName
 теряет эти различия. Native quoted-name semantics не изменены. Named native charsets
 и collations в SQL требуют точного quoted имени; introducers вроде `_UTF8`, GDSCODE,

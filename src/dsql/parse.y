@@ -647,6 +647,7 @@ using namespace Firebird;
 %token <metaNamePtr> RESETTING
 %token <metaNamePtr> RDB_ERROR
 %token <metaNamePtr> RDB_GET_TRANSACTION_CN
+%token <metaNamePtr> RDB_PG_RELATION_ID
 %token <metaNamePtr> RDB_ROLE_IN_USE
 %token <metaNamePtr> RDB_SYSTEM_PRIVILEGE
 %token <metaNamePtr> RESET
@@ -9606,6 +9607,7 @@ system_function_std_syntax
 	| RAND
 	| RDB_GET_CONTEXT
 	| RDB_GET_TRANSACTION_CN
+	| RDB_PG_RELATION_ID
 	| RDB_RESET_CONTEXT
 	| RDB_ROLE_IN_USE
 	| RDB_SET_CONTEXT
@@ -10691,6 +10693,7 @@ non_reserved_word
 	| LPARAM
 	| MAKE_DBKEY
 	| MESSAGE
+	| RDB_PG_RELATION_ID
 	| MODE
 	| NATIVE
 	| NORMALIZE_DECFLOAT

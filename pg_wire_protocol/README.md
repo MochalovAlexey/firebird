@@ -1,11 +1,15 @@
 # Wire-протоколы через плагины Firebird 6
 
-APP-13 реализован для review: в PG4 unquoted имена теперь ASCII lowercase,
+APP-13 принят в `4520f371e9`: в PG4 unquoted имена теперь ASCII lowercase,
 quoted имена точные; native 1/2/3 не меняются. Старые объекты требуют quotes,
 например `"PUBLIC"."TTT"` и `"SYSTEM"."RDB$DATABASE"`. Для unquoted CREATE/catalog
 запросов нужен отдельный [lowercase bootstrap](1c/README.md#app-13-имена-и-установка-lowercase-профиля).
 Сохранённый SQL канонизируется движком для native reprepare. Начальный/RESET path:
 `"public", "pg_catalog", "SYSTEM"`. Полный PG search_path/visibility/temp остаётся открытым.
+APP-14 добавляет [устанавливаемую pg_table_is_visible](1c/README.md#app-14-видимость-постоянных-отношений)
+для текущих постоянных tables/views: SQL wrapper и небольшой builtin штатного
+resolver/SCL, с проверкой явного пути и отсутствия LTT на Execute. Типы wire20→16;
+regnamespace/temp и исходный selected04 этим этапом не закрываются.
 
 Что ещё нужно доделать и проверить: [единый BACKLOG](BACKLOG.md).
 Порядок этапов — [PLAN](PLAN.md), фактические проверки — [VALIDATION](VALIDATION.md).
@@ -145,9 +149,9 @@ PG_NAMESPACE. OID = native relation ID + 1, RELNAME — точное native им
 RELNAMESPACE — прежний namespace ID, kind `r`/`v`; wire types 20/1043/20/1043.
 Новых allocator/registry/hook и изменений C++/API нет.
 
-Реализован для review [APP-13: PG-правила имён](1c/PG_IDENTIFIER_NAMES_TASK.md).
+Принят [APP-13: PG-правила имён](1c/PG_IDENTIFIER_NAMES_TASK.md).
 Пользователь согласовал lowercase unquoted lookup только в PG4; этот переход
-реализован для review. В один этап входят parser/source, lowercase bootstrap,
+проверен независимо через libpq/native. В один этап входят parser/source, lowercase bootstrap,
 session path/RESET/savepoints и сквозной DDL/DML. Родные подключения сохраняются.
 
 Включены только schema-level persistent tables (type 0/legacy NULL) и views (1),

@@ -1,5 +1,194 @@
 # Проверки реализации
 
+## 11 ноября 2026: APP-14 — видимость постоянных отношений
+
+Реализовано поверх `4520f371e9375ecdc26f5eb3685f2efe53a99145`, без staging/commit.
+Исходные пользовательские review/status правки сохранены (начальный diff:
+`/tmp/pg-visibility-initial.diff`). Production C++/parser diff — три файла,
+82 добавленные строки; `git diff HEAD -- src` SHA256:
+`15300b7fcbca3454aa1fb5a97df04bece0ac5e13ed04c12062869cf8b2c8affa`.
+Новый builtin использует SysFunction/существующий BLR dispatch, current attachment
+path/live LTT map, SCL_check_schema и qualifyExistingName/getVersioned/getId.
+SQL SECURITY INVOKER wrapper владеет oid−1 mapping. Executor/session/API/ODS,
+resolver/MAKE_DBKEY, codecs и runtime dependencies не изменены.
+
+Свежая developer build GCC 13.4.0/Linux/Super, полный configure/make, финальный
+incremental make и targets `pgwire_tests wire_tests` завершились exit 0.
+Grammar conflicts прежние: 158 shift/reduce, 11 reduce/reduce. Логи в build dir:
+`configure.log`, `build.log`, `rebuild.log`, `tests-build.log`, `units.json`.
+
+```sh
+mkdir /tmp/firebird-pgwire-visibility-build-20261111
+cd /tmp/firebird-pgwire-visibility-build-20261111
+/home/aleksey/dev/my_firebird/firebird/configure --enable-binreloc --enable-developer
+make -j2
+make -C gen -j2 TARGET=Debug pgwire_tests wire_tests
+# Все девять gen/Debug/firebird/tests/pgwire_*_test: exit 0, см. units.json.
+```
+
+Старый runtime из APP-13 отчёта отсутствовал. Для честного upgrade proof собрана
+отдельная основа: `git archive HEAD` распакован в
+`/tmp/firebird-pgwire-app13-source-20261111`; там `./autogen.sh --enable-binreloc
+--enable-developer` и `make -j2` завершились exit 0. Его engine SHA256
+`ac02edf337e848ffae0e1f8df5ce5405ee86468dba7b3c61a4ec8b2bef9ca111`.
+В отдельной копии старого runtime isql создал UTF8/dialect3 базу и APP-10…13,
+закрыл её (exit 0); новый runtime установил функцию и прочитал прежние данные
+53/visibility TRUE. ODS до и после **14.0**, новый isql exit 0; миграции и ручных
+системных записей не было. Logs `visibility_upgrade_old/new.log` в final work dir.
+
+Команды из корня репозитория; все paths — отдельные тестовые `/tmp`:
+
+```sh
+VIS_RUNTIME=/tmp/firebird-pgwire-visibility-build-20261111/gen/Debug/firebird
+VIS_PREVIOUS=/tmp/firebird-pgwire-app13-source-20261111/gen/Debug/firebird
+VIS_HEADERS=/tmp/firebird-pgwire-visibility-deps/libpq-dev/usr/include/postgresql
+python3 -B pg_wire_protocol/tools/pgwire_1c_smoke.py --visibility --firebird-dir "$VIS_RUNTIME" --previous-firebird-dir "$VIS_PREVIOUS" --work-dir /tmp/firebird-pgwire-visibility-07 --timeout 180
+python3 -B pg_wire_protocol/tools/pgwire_1c_smoke.py --pg-names --firebird-dir "$VIS_RUNTIME" --work-dir /tmp/firebird-pgwire-visibility-names --timeout 180
+python3 -B pg_wire_protocol/tools/pgwire_1c_smoke.py --strings --firebird-dir "$VIS_RUNTIME" --work-dir /tmp/firebird-pgwire-visibility-strings --timeout 180
+python3 -B pg_wire_protocol/tools/pgwire_1c_smoke.py --class-catalog --firebird-dir "$VIS_RUNTIME" --work-dir /tmp/firebird-pgwire-visibility-class --timeout 180
+python3 -B pg_wire_protocol/tools/pgwire_transaction_smoke.py --firebird-dir "$VIS_RUNTIME" --work-dir /tmp/firebird-pgwire-visibility-transactions --libpq-include-dir "$VIS_HEADERS" --libpq-library /lib/x86_64-linux-gnu/libpq.so.5 --timeout 120
+python3 -B pg_wire_protocol/tools/pgwire_startup_smoke.py --firebird-dir "$VIS_RUNTIME" --work-dir /tmp/firebird-pgwire-visibility-startup --timeout 120
+```
+
+C headers libpq-dev 14.24 скачаны и распакованы только в `/tmp`, без системной
+установки; фактический libpq 140024. Private capture в этих прогонах не использован.
+
+| Проверка | Результат |
+|---|---|
+| Новый `--visibility`, `-07/summary.json` | PASS: 5 групп, **174** libpq результата |
+| Installer | PASS: fresh, injected rollback, repeat/foreign collision, прежние catalogs/IDs/grants, INVOKER/non-deterministic/PUBLIC EXECUTE |
+| Native OO probe | PASS: **46** assertions; один native prepared handle, Execute-time path/guards, native1/2/3 и MAKE_DBKEY |
+| Names regression | PASS: 109 результатов, 6 installer groups |
+| Strings regression | PASS: 156 libpq queries, существующие raw protocols и 1209 OO checks |
+| Class catalog regression | PASS: 228 результатов, 5 installer/4 client groups |
+| Transaction/session regression | PASS: 14 групп, C libpq, native observers, trace backend connects=0 |
+| Startup regression | PASS: 49 групп, native coexistence, trace backend connects=0 |
+| Units | PASS: SQL576, input559, numeric502, float112, temporal313, session5; protocol/result/error |
+
+Все серверы **финальных строк таблицы** завершились exit 0, forced_kill=false;
+native probes до/после и отсутствие оставшихся application attachments проверены
+harness. OO база удалена штатным dropDatabase. Runtime, закрытые базы и logs
+сохранены для review. Финальный `cleanup.json` в build dir проверил 32 тестовых
+loopback ports: открытых нет. Working server/реальные базы 1С не использовались.
+
+Проверены distinct data 11/22 в va.same/vb.same и совпадение visibility с заново
+подготовленным SELECT/native ID. View, outside-path FALSE, missing schema,
+mixed-case, Unicode вплоть до 63 characters/252 bytes, dot/doubled-quote names и
+uppercase native objects имеют точные lookup/results. NULL/0/negative/unknown/
+обе границы BIGINT дают NULL. Public Describe: input **20**, output **16**;
+BOOLEAN text t/f/NULL, binary 01/00/NULL. Helper metadata — nullable INTEGER.
+Named Execute после SET читает текущий путь; RESET сохраняет прежнее удаление
+statements (26000 до нового Parse). SET path сохраняет session lifetime после
+ROLLBACK; независимые attachments не делят путь или LTT.
+
+Owner/PUBLIC/role USAGE сверены с native helper; отсутствие SELECT не меняет
+visibility, но data SELECT отвергается. No-USAGE не пропускается даже после уже
+найденного отношения. Native permission SQLSTATE **28000**, wire **42501**.
+Wrapper действительно использует caller, не владельца. GRANT/REVOKE проверены
+на свежих attachments в рамках native cache semantics. SET ROLE использует точные
+native identities `"VISIBILITY_ROLE"`/`"NONE"`.
+
+Native NUL через ASCII_CHAR(0), trailing space и непредставимые длины отвергаются
+до MetaName; helper invalid_name → **22023**. Wire NUL проверен binary Bind,
+его раньше отвергает существующий codec (**22021**); text Bind libpq не переносит
+embedded NUL. Path guards дают **0A000** с причиной в native status, на wire
+сохраняется прежний общий английский diagnostic без raw native DETAIL.
+Обычный SELECT остаётся работоспособным при неподдержанном visibility path/LTT.
+
+LTT создаётся после первого MON чтения в той же транзакции. Native OO подтверждает:
+MON всё ещё показывает 0, live guard отвергает, DROP сразу снимает guard у того же
+statement. Wire ошибка в T даёт E/25P02/recovery. Проверены full DDL rollback,
+DROP→NULL и прежний запрет DDL под user savepoint (0A000).
+
+**SKIP / не принято:** исходный selected04 всё ещё требует regnamespace и
+pg_my_temp_schema. Synthetic predicate с известным OID проверен отдельно и не
+выдаётся за original PASS. Полный PG path/temp/transactional SET, APP-01/02/03/04/06,
+SQL-09 и реальная 1С/Гилёв остаются открыты. NAT-01…04 не запускались.
+
+### Обнаруженный baseline cache defect (NAT-05)
+
+Промежуточный `visibility-06` завершился **FAIL, server -11** в позднем Extended
+catalog lookup после длинной names/catalog/RESET/LTT последовательности и SET ROLE.
+Backtrace `DsqlStatementCache::shrink → DsqlStatement::resetCacheKey`, освобождённая
+память/некорректный cacheSize; лог `/tmp/firebird-pgwire-visibility-role-backtrace.log`,
+значения `/tmp/firebird-pgwire-visibility-cache-values.log`.
+
+Диагностический replay на **архивном APP-13 без нового builtin** также дал -11,
+в DsqlStatementCache key comparator; `/tmp/firebird-pgwire-visibility-app13-replay/`,
+backtrace `/tmp/firebird-pgwire-visibility-app13-cache-backtrace.log`.
+В этом отдельном replay локальная SQL wrapper заменяла helper assignment на 0,
+семантические несовпадения только записывались; это **не тест совместимости и не PASS**.
+Диагностический script — `/tmp/pg-visibility-app13-replay.py`; в Git не включён.
+Изолированные native 160 distinct-path queries и wire 160 path/role queries на APP-13
+прошли (`visibility-cache-app13`, `visibility-cache-wire-app13-02/03`). Поэтому SET ROLE
+сам по себе не объявляется причиной; минимальный trigger/root cause пока не установлен.
+
+В финальной матрице fixture OIDs читаются до lifetime/role сценариев; позднее
+перечитывание этого fixture catalog не требуется для проверки helper. Все проверки
+функции, SCL, Execute-time path и LTT сохранены. Cache по-прежнему **2 MiB**,
+production workaround/исправления cache нет. Финальный PASS не устраняет NAT-05
+и не подтверждает безопасность исходной падающей комбинации. Дефект вынесен в BACKLOG.
+
+Первые попытки `-01…05` также не выдаются за PASS: уточнялись assertions формата
+isql `<false>`, RESET/26000, text-vs-binary NUL/codec 22021 и quotes security NONE.
+Production helper после финальной сборки при этих уточнениях не менялся.
+
+SHA256 итоговых артефактов (`artifacts.json` в build dir):
+
+| Артефакт | SHA256 |
+|---|---|
+| `libEngine14.so` | `509f3bec1b1b29599a60d2070b3613cc4f169587117889db00bc1783c4d9eef8` |
+| `libPgWire.so` | `92cf2e11774f3607c58ab3efc0e8e30012cf0f4b8d8d1e56709c703767cb3509` |
+| `firebird` | `d9c0d4f73becbc81775574ec28c328bac66d1213f96714440fe00d6fc4ea9e07` |
+| `install_relation_visibility.sql` | `afe4b4a4b2e8127770ef3cc3bf6510e11ccf0528246b9dcb1c8e73110f88a8ef` |
+| `pgwire_visibility_checks.py` | `8c77eb5fcf91b9f31317aebbef34e546bcb43b86c000c928bbc62f6bcc7521b9` |
+| `pgwire_visibility_api.cpp` | `114b843ef97d3bb4f122f9e26662905ecb03396bf58bce7af45473c26de71e11` |
+| `pgwire_1c_smoke.py` | `01a488147209c32db082180047ceb3860cc5e1ccba0a4bea329b572608556ad7` |
+
+
+## 11 ноября 2026: архитектурный review правил имён PG4
+
+Проверена ревизия `4520f371e9375ecdc26f5eb3685f2efe53a99145` относительно
+`13f64d0e00`. Рабочее дерево перед review чистое. Подтверждённых дефектов в
+реализации APP-13 не обнаружено; этап закрыт в описанном ограниченном профиле.
+Проверены parser/grammar и canonical symbolic contexts, сохранение identifier и
+literal spans, native reprepare, initial/RESET path, savepoint history, атомарность
+lowercase bootstrap и права. Изменения старых fixtures соответствуют согласованному
+пользователем PG4 naming contract; это не разрешение ослаблять проверки данных.
+
+Найден и исправлен дефект документации APP-13: три строки таблицы 1c/README
+после ошибочной замены текста объявляли произвольные параметры/LIMIT/OFFSET,
+advisory locks и temporary DDL «реализованными для review». Восстановлено
+«ещё не реализованы», в согласии с кодом, BACKLOG и PROGRESS.
+
+Независимо повторены две целевые проверки через настоящий libpq/TCP:
+
+```sh
+python3 -B pg_wire_protocol/tools/pgwire_1c_smoke.py --firebird-dir /tmp/firebird-pgwire-names-build-20261111/gen/Debug/firebird --work-dir /tmp/firebird-pgwire-names-review-20261111 --pg-names --capture-dir /home/aleksey/dev/1c/captures/20261109T105635Z --timeout 180
+python3 -B pg_wire_protocol/tools/pgwire_1c_smoke.py --firebird-dir /tmp/firebird-pgwire-names-build-20261111/gen/Debug/firebird --work-dir /tmp/firebird-pgwire-names-review-strings-20261111 --strings --timeout 180
+```
+
+Оба `summary.json`: completed=true, все целевые группы PASS. Имена: **109 results,
+6 installer groups**, исходный selected01, реальные stored-source/native reprepare,
+Simple/Extended RESET и savepoint recovery. Строки: **156 queries, 1209 API checks**,
+raw-wire/ParameterStatus/portals, native dialects 1/2/3. Оба server runs: exit 0,
+forced_kill=false. Рабочие сервер и база 1С не затрагивались; NAT-* repro не запускались.
+Сборка использована из реализации, повторный build не выполнялся. Совпадение
+production diff и артефактов проверено:
+
+- `git diff 13f64d0e00 HEAD -- src`: SHA256 `d34d6e4e41f711a6a2b2446677e6a4ed6cdec09e0f25766461d88cc1a3611b30`;
+- Engine: `afbb16bb1b2b05b988a1ff39416303f968233e8b243c9159c2ed49eaccfd7e1c`;
+- PgWire: `aa1c1e67b486d066bf36bca4ca8033450b0e4c3d8ef10e539cba9c53952d98f9`;
+- `git diff --check 13f64d0e00 HEAD` — PASS.
+
+Отдельно найдено прежнее, не перечисленное явно ограничение: ведущий `_` в
+`Parser::yylexAux` трактуется как TOK_INTRODUCER. Поэтому unquoted `_IDRRef` и
+`_ExtensionsInfo` ещё не поддержаны. Это вывод из исходников, отдельный runtime
+probe не запускался. APP-13 сохранял native лексические границы, поэтому это не
+регрессия; добавлено SQL-09 в BACKLOG. Поддержанные `_UTF8 '...'` нужно сохранить
+при будущем расширении. Полные search_path/USAGE, regnamespace и temporary objects
+остаются открытыми. Следующий контракт — [APP-14](1c/RELATION_VISIBILITY_TASK.md).
+
 ## APP-13: 11 ноября 2026 — правила имён PG4
 
 Реализация на review, без staging/commit. База `13f64d0e003b4b8d647a059016e52c79e2de6050` плюс рабочий diff;

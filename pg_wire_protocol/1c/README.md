@@ -2,13 +2,13 @@
 
 ## APP-13: имена и установка lowercase профиля
 
-Реализовано для review одним этапом: PG4 unquoted ASCII lowercase, точные quoted
+Реализовано и принято в `4520f371e9`: PG4 unquoted ASCII lowercase, точные quoted
 имена, native-safe stored SQL, реальные lowercase schemas/catalog entry points и
 начальный путь `"public", "pg_catalog", "SYSTEM"`. Native 1/2/3 сохраняются.
 `foo`/`FOO`/`"foo"` совпадают; старые native объекты требуют точных quotes, например
 `SELECT "V" FROM "PUBLIC"."TTT"`. Нет uppercase fallback или копирования user data.
 Полный [контракт](../COMPATIBILITY.md#app-13-правила-имён-pg4),
-[проверки](../VALIDATION.md#app-13-11-ноября-2026-правила-имён-pg4).
+[review и независимые проверки](../VALIDATION.md#11-ноября-2026-архитектурный-review-правил-имён-pg4).
 
 На чистой отдельной UTF8/dialect3 базе запустить native isql от владельца/администратора
 в следующем порядке (credentials задаются вне SQL):
@@ -54,8 +54,44 @@ ALTER SESSION RESET восстанавливает public-first профиль. 
 SEARCH_PATH действует до явного изменения/reset. Полный PG search_path/USAGE,
 regnamespace/oid/name, visibility/temp и selected04/10/11 остаются открытыми.
 Quoted trailing space/NUL отвергаются, native длины/лексика сохранены; нет U&/ICU
-или усечения 63 bytes. Stored SQL quotes folded identifiers и сохраняет literal
+или усечения 63 bytes. Начальный `_` в unquoted имени пока трактуется как introducer:
+SQL-09 фиксирует необходимое расширение для имён 1С вроде `_ExtensionsInfo`.
+Stored SQL quotes folded identifiers и сохраняет literal
 канонизацию, в том числе strings=off. Старые `$n`/`::`/LIMIT root guards остаются.
+
+## APP-14: видимость постоянных отношений
+
+После APP-10…13 установить [отдельную функцию](sql/install_relation_visibility.sql)
+на runtime с builtin `RDB$PG_RELATION_ID`:
+
+```sh
+isql -bail -user OWNER -i pg_wire_protocol/1c/sql/install_relation_visibility.sql DATABASE_ALIAS
+```
+
+Installer атомарный: BAIL ON, AUTODDL OFF, один COMMIT; plain CREATE FUNCTION
+отвергает повтор и чужой одноимённый объект. Существующие schemas/views/grants
+сохраняются, PUBLIC получает EXECUTE. Автоматической установки при attach нет.
+Функция работает и в закрытой базе APP-13 после смены runtime без ODS migration.
+
+`pg_catalog.pg_table_is_visible(BIGINT) RETURNS BOOLEAN` сопоставляет точное имя
+из текущего pg_class с первым native relation ID в текущем пути. NULL/неизвестный
+OID → NULL, отсутствие в пути или shadowing → FALSE, совпадение → TRUE. Метаданные
+остаются native: аргумент wire20, результат wire16 (binary 01/00/NULL), не OID26.
+SQL SECURITY INVOKER; наличие SELECT права не проверяется. Helper использует
+штатные SCL и resolver, без нового API/BLR opcode/ODS/registry/codecs.
+
+Профиль требует явного lowercase `pg_catalog`, отсутствия `$user`/`pg_temp` и
+native LTT в этом attachment; нарушение → 0A000. Каждая существующая schema пути
+должна иметь USAGE по native SCL, иначе обычный отказ в доступе; отсутствующие
+schemas пропускаются. Проверки выполняются на каждом Execute. Порядок
+`"public", "pg_catalog", "SYSTEM"` и session lifetime SET/RESET прежние.
+Native подготовленный SELECT может сохранять прежнюю привязку: SELECT oracle
+после смены пути готовится заново, helper этого не требует.
+
+Полный [контракт](../COMPATIBILITY.md#app-14-видимость-постоянных-отношений),
+[задание](RELATION_VISIBILITY_TASK.md), результаты — [VALIDATION](../VALIDATION.md).
+Исходный selected04 всё ещё требует regnamespace и pg_my_temp_schema; синтетическая
+замена namespace predicate не считается его PASS. APP-01/02/03/04/06 и SQL-09 открыты.
 
 Незавершённые этапы, ограничения частичных реализаций и пробелы приёмки ведутся
 в общем [BACKLOG](../BACKLOG.md). Обновлять его после каждого этапа и review.
@@ -305,7 +341,7 @@ Engine/parser/публичные API/зависимости также не ме
 `pgwire_1c_smoke.py --blobs` использует прежние libpq/raw/native wrappers и небольшой
 native OO fixture helper. Проверена неизменная форма selected06 с WHERE `$1` и
 ORDER BY PartNo на синтетической PUBLIC.PARAMS, без исходных данных или записанного
-Bind. APP-07 закрыт по реализации и оставлен на review; APP-02/SQL-06 и открытие
+Bind. APP-07 прошёл review и закрыт; APP-02/SQL-06 и открытие
 базы 1С остаются отдельными задачами. Команды, SHA, размеры и результаты — в
 [VALIDATION](../VALIDATION.md).
 
@@ -368,11 +404,11 @@ physical layout по фактическим длинам Bind. Engine созда
 | Группа исходного задания | Текущее состояние / что требуется |
 |---|---|
 | 1. Начало сессии | SELECT без FROM, ограниченная identity-функция, последовательные скрипты и все семь startup SET принимаются; реальные эффекты enable_mergejoin, cpu_operator_cost и lock_timeout отложены |
-| 2. SQL и параметры | Simple Query выполняет скрипты совместимого SQL; PG BEGIN без опций и последовательные типизированные `$n` поддержаны; postfix `::` добавлен для native builtin types; literal LIMIT 0…2147483647 поддержан; произвольная нумерация и общий LIMIT/OFFSET реализован для reviewы |
+| 2. SQL и параметры | Simple Query выполняет скрипты совместимого SQL; PG BEGIN без опций и последовательные типизированные `$n` поддержаны; postfix `::` добавлен для native builtin types; literal LIMIT 0…2147483647 поддержан; произвольная нумерация и общий LIMIT/OFFSET ещё не реализованы |
 | 3. Открытие базы | APP-12 даёт pg_class для постоянных таблиц/views; полный catalog, pg_database/visibility и служебные таблицы 1С ещё требуют реализации и настоящих данных |
 | 4. Типы и функции | Binary BLOB output выдаётся как bytea; input до 65533 decoded bytes поддержан. Большие input и SQL bytea type/casts/storage/index semantics не добавлены. mchar/mvarchar, regnamespace и BINROWVER остаются открытыми |
-| 5. Транзакции/конкуренция | PG BEGIN без опций использует реальные READ CONSISTENCY транзакции; native controls сохраняются; advisory locks и PG timeout semantics реализован для reviewы |
-| 6. Временные объекты/нагрузка | PG temporary DDL, serial4, ANALYZE и fasttrun_ext реализован для reviewы; нужен эталон их эффектов |
+| 5. Транзакции/конкуренция | PG BEGIN без опций использует реальные READ CONSISTENCY транзакции; native controls сохраняются; advisory locks и PG timeout semantics ещё не реализованы |
+| 6. Временные объекты/нагрузка | PG temporary DDL, serial4, ANALYZE и fasttrun_ext ещё не реализованы; нужен эталон их эффектов |
 
 Реализован [APP-10: внутренний namespace registry](NAMESPACE_REGISTRY_TASK.md),
 ревизия `5bbdaa763d` прошла review и независимую приёмку, см. VALIDATION.
@@ -404,7 +440,9 @@ relation ID+1; новый allocator/registry/hook не нужен. Сохран�
 в PG4, точные quoted names, сохранение native-safe SQL source, lowercase
 bootstrap/catalog labels, initial path/RESET и savepoint journal. Native1/2/3
 не меняются; старые uppercase объекты в PG4 требуют точных quoted имён.
-Реализация и проверки подготовлены для review; установка и новый контракт описаны выше.
+Ревизия `4520f371e9` прошла review и независимые names/strings проверки;
+установка и новый контракт описаны выше. APP-14 с ограниченной visibility
+реализован и оставлен для review; полный path/regnamespace/temp остаётся открытым.
 Полные search_path/USAGE/regnamespace/visibility/temp остаются открытыми.
 
 ## Постоянные таблицы и представления в PG_CLASS: APP-12

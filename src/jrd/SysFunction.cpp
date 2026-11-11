@@ -5459,6 +5459,83 @@ dsc* evlNormDec(thread_db* tdbb, const SysFunction* function, const NestValueArr
 }
 
 
+// Exact object-name lookup for the explicitly configured PG visibility profile.
+// PG catalog identities and relation kinds belong to the installed SQL wrapper.
+void setParamsPgRelationId(DataTypeUtilBase*, const SysFunction*, int, dsc** args)
+{
+	if (args[0]->isUnknown())
+		args[0]->makeVarying(MAX_SQL_IDENTIFIER_LEN, ttype_metadata);
+}
+
+
+void makePgRelationId(DataTypeUtilBase*, const SysFunction*, dsc* result, int, const dsc**)
+{
+	result->makeLong(0);
+	result->setNullable(true);
+}
+
+
+dsc* evlPgRelationId(thread_db* tdbb, const SysFunction*, const NestValueArray& args,
+	impure_value* impure)
+{
+	const auto attachment = tdbb->getAttachment();
+	const auto& path = *attachment->att_schema_search_path;
+	bool catalogPresent = false;
+	for (const auto& schema : path)
+	{
+		if (schema == "$user" || schema == "pg_temp")
+		{
+			(Arg::Gds(isc_wish_list) << Arg::Gds(isc_random) <<
+				"RDB$PG_RELATION_ID does not support $user or pg_temp in SEARCH_PATH").raise();
+		}
+		catalogPresent |= schema == "pg_catalog";
+	}
+	if (!catalogPresent)
+	{
+		(Arg::Gds(isc_wish_list) << Arg::Gds(isc_random) <<
+			"RDB$PG_RELATION_ID requires explicit pg_catalog in SEARCH_PATH").raise();
+	}
+	if (attachment->att_local_temporary_tables.count())
+	{
+		(Arg::Gds(isc_wish_list) << Arg::Gds(isc_random) <<
+			"RDB$PG_RELATION_ID does not support active local temporary tables").raise();
+	}
+	for (const auto& schema : path)
+	{
+		// SCL returns false for missing schemas, and raises native access errors.
+		// Do not check SELECT or mask other failures (including damaged ACLs).
+		SCL_check_schema(tdbb, schema, SCL_usage);
+	}
+
+	const auto value = EVL_expr(tdbb, tdbb->getRequest(), args[0]);
+	if (!value)
+		return nullptr;
+
+	const string name = MOV_make_string2(tdbb, value, ttype_metadata);
+	const auto charset = INTL_charset_lookup(tdbb, CS_METADATA);
+	if (name.isEmpty() || name.length() > MAX_SQL_IDENTIFIER_LEN ||
+		name[name.length() - 1] == ' ' || memchr(name.c_str(), 0, name.length()) ||
+		!charset->wellFormed(name.length(), (const UCHAR*) name.c_str(), nullptr) ||
+		charset->length(name.length(), (const UCHAR*) name.c_str(), false) > METADATA_IDENTIFIER_CHAR_LEN)
+	{
+		(Arg::Gds(isc_invalid_name) <<
+			"RDB$PG_RELATION_ID expects an exact metadata name (1..63 characters, no NUL or trailing space)" <<
+			Arg::SqlState("22023")).raise();
+	}
+
+	// No SQL parsing, folding or trimming: dots and quotes are name characters.
+	QualifiedName relName(MetaName(name.c_str(), name.length()));
+	attachment->qualifyExistingName(tdbb, relName, {obj_relation});
+	const auto relation = MetadataCache::getVersioned<Cached::Relation>(tdbb, relName, CacheFlag::AUTOCREATE);
+	if (!relation)
+		return nullptr;
+
+	impure->vlu_misc.vlu_long = relation->getId();
+	impure->vlu_desc.makeLong(0, &impure->vlu_misc.vlu_long);
+	return &impure->vlu_desc;
+}
+
+
 dsc* evlMakeDbkey(Jrd::thread_db* tdbb, const SysFunction* function, const NestValueArray& args, Jrd::impure_value* impure)
 {
 	// MAKE_DBKEY ( REL_NAME | REL_ID, RECNUM [, DPNUM [, PPNUM] ] )
@@ -7049,6 +7126,7 @@ const SysFunction SysFunction::functions[] =
 		{"RAND", 0, 0, 0, NULL, makeDoubleResult, evlRand, NULL},
 		{RDB_GET_CONTEXT, 2, 2, DETERMINISTIC, setParamsGetSetContext, makeGetSetContext, evlGetContext, NULL},
 		{"RDB$GET_TRANSACTION_CN", 1, 1, 0, setParamsInt64, makeGetTranCN, evlGetTranCN, NULL},
+		{"RDB$PG_RELATION_ID", 1, 1, 0, setParamsPgRelationId, makePgRelationId, evlPgRelationId, NULL},
 		{"RDB$ROLE_IN_USE", 1, 1, DETERMINISTIC, setParamsAsciiVal, makeBooleanResult, evlRoleInUse, NULL},
 		{RDB_RESET_CONTEXT, 1, 1, 0, setParamsResetContext, makeLongResult, evlResetContext, NULL},
 		{RDB_SET_CONTEXT, 3, 3, 0, setParamsGetSetContext, makeGetSetContext, evlSetContext, NULL},

@@ -67,17 +67,42 @@ PG4 folds unquoted ASCII names to lowercase; quoted names are exact. Native dial
 1/2/3 still use uppercase. Existing employee objects therefore require quoted native
 schema/table/column names. There is no uppercase fallback and no automatic migration.
 
-Before unqualified CREATE or unquoted catalog queries, install the five SQL scripts
+For unqualified CREATE on the default path or unquoted catalog queries, install the five SQL scripts
 in the [application bootstrap order](1c/README.md#app-13-имена-и-установка-lowercase-профиля)
 on a separate test database. An intact APP-10/11/12+compat.sql database only needs
 `1c/sql/install_pg_names.sql`. Use the owner/admin; credentials stay outside SQL.
 The installer refuses an existing lowercase pg_catalog and preserves an existing
 lowercase public and its data. Application CREATE/DML grants are separate.
 
+For APP-14 relation visibility, run `1c/sql/install_relation_visibility.sql` once
+after that bootstrap, on a runtime with `RDB$PG_RELATION_ID`. It adds
+`pg_catalog.pg_table_is_visible(BIGINT)` with BOOLEAN results. The supported path
+must explicitly contain lowercase pg_catalog, grant USAGE on every existing
+schema, and contain no $user/pg_temp; this attachment must have no active native
+local temporary tables. See the [visibility contract](COMPATIBILITY.md#app-14-видимость-постоянных-отношений).
+
 PgWire sets `"public", "pg_catalog", "SYSTEM"` before successful startup and after
 direct ALTER SESSION RESET. User SET SEARCH_PATH persists between commands.
 This is a public-first native profile; implicit PG catalog priority, `$user`, full
 USAGE/path semantics and transactional SET search_path are not implemented.
+
+For manual SQL against an existing native database, you can instead select its
+uppercase schema for this connection; the application bootstrap is not needed
+for these ordinary queries:
+
+```sql
+SET SEARCH_PATH TO "PUBLIC", "SYSTEM";
+SELECT * FROM "COUNTRY";
+CREATE TABLE hoba1 (id INTEGER);
+```
+
+The CREATE makes `"PUBLIC"."hoba1"` with column `"id"`; PG4 name folding still
+applies. Reconnect or ALTER SESSION RESET restores the default path. Without the
+lowercase bootstrap or an explicit path change, CREATE can select SYSTEM as the
+first existing schema and fail because user objects cannot be created there.
+Check the target with `SELECT CURRENT_SCHEMA;`. Some errors currently have only
+the generic message `Firebird SQL operation failed`; psql `\errverbose` shows
+the SQLSTATE of the preceding error.
 
 ## Run SQL
 

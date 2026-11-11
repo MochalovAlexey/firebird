@@ -1,12 +1,20 @@
 # План реализации wire-плагинов и PgWire
 
-## APP-13 — реализация на review, 11.11.2026
+## APP-13 принят; реализация APP-14, 11.11.2026
 
-На базе `13f64d0e00` подготовлен единый diff: normalization identifiers → canonical
-native SQL source → отдельный lowercase bootstrap → initial/RESET path → libpq/native
-DDL/DML, source reprepare и регрессии. Git staging/commit выполняет пользователь.
+Ревизия `4520f371e9` прошла review и независимые names/strings проверки:
+normalization identifiers → canonical native SQL source → lowercase bootstrap →
+initial/RESET path → libpq/native DDL/DML и source reprepare.
 [Контракт](1c/README.md#app-13-имена-и-установка-lowercase-профиля),
-[приёмка](VALIDATION.md#app-13-11-ноября-2026-правила-имён-pg4).
+[review](VALIDATION.md#11-ноября-2026-архитектурный-review-правил-имён-pg4).
+
+Реализован [APP-14](1c/RELATION_VISIBILITY_TASK.md): согласована catalog visibility
+постоянных отношений с фактическим lookup/SELECT на поддержанном явном пути.
+Один небольшой engine helper переиспользует native resolver/SCL и живое состояние
+attachment; SQL-обёртка реализует pg_table_is_visible над APP-12/13. Вне профиля
+прав/пути/LTT — явный отказ. Новый публичный OO API, ODS и PG type metadata не нужны.
+Регистрация builtin выбрана вместо расширения system-package metadata старых баз.
+APP-14 оставлен для review; результаты проверок и baseline NAT-05 записаны в VALIDATION. SQL-09 отдельно фиксирует ведущий `_` в именах 1С.
 
 Следующие крупные этапы формировать вокруг законченного прикладного сценария.
 Regnamespace/oid/name, visibility/temp и полный search_path требуют отдельного
@@ -48,7 +56,7 @@ view/helper в самостоятельный этап и не выполнят�
 
 Реализован [APP-12: pg_class для постоянных таблиц/views](1c/CLASS_CATALOG_TASK.md): четыре поля из RDB$RELATIONS с JOIN PG_NAMESPACE, OID=native relation ID+1, без нового registry/hook. Ревизия `13f64d0e00` прошла review без замечаний и независимую приёмку: 5 групп установки, 4 native/libpq группы, 228 results, права/lifecycle/exclusions и normal shutdown. APP-12 закрыт в native профиле; reuse допустим, restore не проверен. C++/API/codecs прежние.
 
-Реализованный для review [APP-13: PG-правила имён](1c/PG_IDENTIFIER_NAMES_TASK.md) согласован пользователем: unquoted identifiers в PG4 становятся lowercase, quoted сохраняют точное представимое имя, native1/2/3 прежние. Один этап объединяет parser/source canonicalization для native reprepare, реальные lowercase schemas/catalog wrappers, initial search path/RESET, savepoint history и DDL/DML/native readback. Старые native uppercase objects доступны PG4 с точными quoted именами; автоматической миграции/fallback нет. Свежая сборка и затронутые регрессии описаны в VALIDATION. Полные search_path/USAGE, regnamespace, visibility/temp namespace — следующий контракт, без заглушек; selected04 и APP-01/02/03/04/06 остаются открытыми.
+Реализованный [APP-13: PG-правила имён](1c/PG_IDENTIFIER_NAMES_TASK.md) принят в `4520f371e9`: unquoted identifiers в PG4 становятся lowercase, quoted сохраняют точное представимое имя, native1/2/3 прежние. Один этап объединяет parser/source canonicalization для native reprepare, реальные lowercase schemas/catalog wrappers, initial search path/RESET, savepoint history и DDL/DML/native readback. Старые native uppercase objects доступны PG4 с точными quoted именами; автоматической миграции/fallback нет. Сборка, регрессии и независимый review описаны в VALIDATION. APP-14 реализует ограниченную visibility; полные search_path/USAGE, regnamespace и temp namespace остаются открытыми, как selected04 и APP-01/02/03/04/06.
 
 Путь до открытия реальной 1С и Гилёва, покрытие 24 примеров и оставшиеся блокеры описаны в [1c/PROGRESS](1c/PROGRESS.md). Wire/базовый SQL/Bind приняты в ограниченном профиле; сквозного открытия информационной базы и теста Гилёва ещё нет. Каталоги, реальные типы/данные, locks и temporary DDL — прикладной критический путь; их порядок уточняется фактическими отказами клиента.
 

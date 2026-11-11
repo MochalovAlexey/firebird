@@ -1,5 +1,20 @@
 # План приёмки wire plugins и PostgreSQL endpoint
 
+## APP-14: приёмка visibility
+
+`tools/pgwire_1c_smoke.py --visibility --firebird-dir NEW_RUNTIME --previous-firebird-dir APP13_RUNTIME --work-dir NEW_TMP --timeout 180`
+использует прежние isolated runtime/libpq/native helpers и OO probe одного
+подготовленного statement. [Задание и полная матрица](1c/RELATION_VISIBILITY_TASK.md)
+проверяют pg_table_is_visible на текущем persistent catalog: совпадение с новым
+Prepare реального SELECT, shadowing/перестановка пути, неизвестные OIDs, text/binary
+BOOLEAN, права вызывающего, Simple/Extended/RESET и явные отказы вне профиля.
+LTT guard проверяется после создания LTT в той же транзакции, когда MON snapshot
+уже получен. Проверка старой базы под новым runtime исключает скрытую зависимость
+от новой system-package metadata. Исходный selected04 не объявлять PASS:
+regnamespace/temp namespace и полный PG search_path остаются отдельными задачами.
+Финальный APP-14: 174 libpq results и 46 OO assertions PASS; cache/NAT-05
+вынесен в отдельное baseline evidence, это не доказательство его исправления.
+
 ## APP-13: PG names и native source
 
 Свежая developer build, отдельные /tmp runtime/security/application databases.
