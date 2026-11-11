@@ -240,9 +240,9 @@ rollback/recovery и отсутствие строк через native observer.
 любых side effects. Unsupported TEXT/другие BLOB subtype по-прежнему дают 0A000
 на metadata до исполнения.
 
-Входные BLOB/bytea, SQL type/cast `bytea`, literals, сравнения/индексы/OCTETS,
-large-object API и SET bytea_output не добавлены. InputCodec не менялся: Bind
-остаётся до startImplicit, создавать BLOB там этот этап не разрешает.
+APP-07 не добавлял input и не менял InputCodec; bounded input добавлен в APP-08
+ниже. SQL type/cast `bytea`, literals, сравнения/индексы/OCTETS, large-object API
+и SET bytea_output остаются вне обоих этапов. Bind остаётся до startImplicit.
 Engine/parser/публичные API/зависимости также не менялись.
 
 `pgwire_1c_smoke.py --blobs` использует прежние libpq/raw/native wrappers и небольшой
@@ -304,9 +304,17 @@ review и повторную целевую приёмку, см. VALIDATION.
 расширенный LIMIT/OFFSET остаётся открытым SQL-02 в [BACKLOG](../BACKLOG.md).
 
 Реализована [выдача binary BLOB как bytea](BINARY_BLOB_OUTPUT_TASK.md), APP-07:
-ResultCodec + штатный IBlob, text/binary output и общий предел DataRow. Проверки
-прошли, незакоммиченные изменения оставлены на review пользователя. Входные BLOB,
-bytea grammar и полный APP-02 остаются открытыми, как и каталоговый APP-01.
+ResultCodec + штатный IBlob, text/binary output и общий предел DataRow. Ревизия
+`5478a589d8` прошла review и повторную целевую приёмку; APP-07 закрыт. Большие
+входные BLOB, bytea grammar и полный APP-02 остаются открытыми, как и каталоговый APP-01.
+
+Реализован [bytea input через native VARCHAR OCTETS](BINARY_BLOB_INPUT_TASK.md),
+APP-08: text hex/escape и raw binary до 65533 decoded bytes на параметр,
+physical layout по фактическим длинам Bind. Engine создаёт BLOB штатным MOVE
+при Execute; новых handles/transaction lifecycle в плагине не требуется.
+Проверены libpq/raw/native readback, selected23 на синтетической PUBLIC.FILES
+и 68 BLOB среди 92 mixed параметров; APP-08 оставлен на review. Большие значения
+остаются APP-09; исходные SQL bytea types/casts и APP-05 не закрываются.
 
 Срез [фиксированной диагностики](FIXED_DIAGNOSTICS_TASK.md) реализован через
 существующий SetPgSessionNode: только `escape_string_warning=off` и
@@ -318,9 +326,43 @@ bytea grammar и полный APP-02 остаются открытыми, как
 | 1. Начало сессии | SELECT без FROM, ограниченная identity-функция, последовательные скрипты и все семь startup SET принимаются; реальные эффекты enable_mergejoin, cpu_operator_cost и lock_timeout отложены |
 | 2. SQL и параметры | Simple Query выполняет скрипты совместимого SQL; PG BEGIN без опций и последовательные типизированные `$n` поддержаны; postfix `::` добавлен для native builtin types; literal LIMIT 0…2147483647 поддержан; произвольная нумерация и общий LIMIT/OFFSET ещё не реализованы |
 | 3. Открытие базы | pg_class/pg_database/visibility и служебные таблицы 1С ещё не реализованы; нужны настоящие metadata и данные |
-| 4. Типы и функции | Binary BLOB output выдаётся как bytea; input и SQL bytea type/casts/storage/index semantics не добавлены. mchar/mvarchar, regnamespace и BINROWVER остаются открытыми |
+| 4. Типы и функции | Binary BLOB output выдаётся как bytea; input до 65533 decoded bytes поддержан. Большие input и SQL bytea type/casts/storage/index semantics не добавлены. mchar/mvarchar, regnamespace и BINROWVER остаются открытыми |
 | 5. Транзакции/конкуренция | PG BEGIN без опций использует реальные READ CONSISTENCY транзакции; native controls сохраняются; advisory locks и PG timeout semantics ещё не реализованы |
 | 6. Временные объекты/нагрузка | PG temporary DDL, serial4, ANALYZE и fasttrun_ext ещё не реализованы; нужен эталон их эффектов |
+
+## Bytea input: ограниченный APP-08
+
+InputCodec принимает выведенный engine SQL_BLOB subtype 0, scale 0, ISC_QUAD;
+ParameterDescription — OID 17, Parse hint отсутствующий/0/17. Другой hint —
+0A000, `SELECT $1` без native типа — прежний HY004. Только transport descriptor
+меняется на VARCHAR OCTETS: constructor задаёт capacity 0, portal Bind — реальную
+decoded длину каждого BLOB. Native layout пересчитывается через IMetadataBuilder,
+с проверкой prefixes, соседних scalar fields, null offsets и общей длины.
+Prepared metadata не меняется, scalar-only encode сохраняет прежнюю metadata.
+При ошибке encode прежний descriptor остаётся пригоден для прежнего buffer.
+
+Text Bind — уже значение: `\x` в начале включает hex, оба регистра цифр,
+space/tab/LF/CR только перед/между/после полных пар. В остальных значениях
+обычные bytes сохраняются, `\\` даёт backslash, `\ooo` (0…3/0…7/0…7) — байт.
+Нет trim, снятия SQL quotes или зависимости от standard_conforming_strings.
+Malformed hex — 22023, malformed escape — 22P02; raw text UTF8/NUL validation
+даёт 22021. Binary и уже decoded bytes сохраняют NUL/invalid UTF8. NULL отличается
+от empty text/`\x`/empty binary, которые дают ненулевой пустой BLOB.
+
+Предел одного значения — 65533 decoded bytes (native descriptor, не DDL VARCHAR);
+65534 — 0A000 на Bind. Лимиты frame/native message/cache остаются 1 MiB/1 MiB/8 MiB;
+cache overflow — прежний 54000. Slots не резервируют максимум на каждый BLOB,
+сохраняется только итоговый buffer. Никаких plugin BLOB handles, API или новой
+transaction state: штатный MOVE создаёт BLOB при Execute в текущей transaction.
+Parse/Bind/Describe/Flush/close без Execute не создают transaction/данные/sequence effects.
+
+Приёмка: `pgwire_1c_smoke.py --blob-input`, настоящий libpq и native readback
+после commit; обе wire формы до 65533, selected23 UPDATE 1/0 с synthetic 40444 bytes,
+68 BLOB из 92 параметров, independent portals/suspension/cache, singleton PROCEDURE,
+RETURNING, rollback/savepoint/E/25P02/disconnect. Правила text сверены с отдельным
+Postgres Pro 18.6. Это проверка исходной формы SQL на synthetic schema/values;
+исходный Bind format не записан, конфигурация 1С не восстановлена и база не открывалась.
+Большие input — APP-09; APP-02/SQL-06/APP-05 и все прочие открытые задачи сохраняются.
 
 ## PG BEGIN через штатную транзакцию Firebird
 

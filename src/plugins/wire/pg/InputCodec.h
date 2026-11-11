@@ -35,7 +35,7 @@ public:
 	std::size_t retainedBytes() const noexcept;
 	const std::vector<std::uint32_t>& parameterTypes() const noexcept { return types; }
 	std::vector<unsigned char> encode(const std::vector<std::optional<std::string>>& values = {},
-		const std::vector<std::int16_t>& formats = {}) const;
+		const std::vector<std::int16_t>& formats = {});
 
 private:
 	struct Field
@@ -44,8 +44,11 @@ private:
 		int scale;
 	};
 
+	static unsigned layout(IMessageMetadata* metadata, std::vector<Field>& fields);
+
 	RefPtr<IMessageMetadata> bindMetadata;
 	unsigned length = 0;
+	bool hasBlobs = false;
 	std::vector<std::uint32_t> types;
 	std::vector<Field> fields;
 };

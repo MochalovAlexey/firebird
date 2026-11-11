@@ -84,9 +84,19 @@ Binary BLOB subtype 0 теперь выдаётся как bytea (OID 17, size/t
 NUL/invalid UTF8 в payload допустимы. Simple/Extended, RETURNING и native PSQL
 используют текущую transaction и IBlob только на время decode одной строки.
 Общий бюджет DataRow учитывает все поля и фактический frameBytes; превышение —
-0A000 без частичного DataRow. Другие BLOB subtypes и input остаются отвергнутыми;
+0A000 без частичного DataRow. Другие BLOB subtypes остаются отвергнутыми;
 SQL type/cast bytea и SET bytea_output не добавлены. Контракт и синтетическая
 selected06-проверка — в [1c/README](1c/README.md), evidence — в [VALIDATION](VALIDATION.md).
+
+APP-08 добавляет bytea input OID 17 для выведенного движком BLOB subtype 0:
+raw binary или text hex/escape, до 65533 декодированных байт на параметр.
+InputCodec задаёт physical VARCHAR OCTETS по фактической длине Bind;
+BLOB создаётся штатным преобразованием движка при Execute в текущей transaction.
+NULL и empty различаются; Parse/Bind не создают BLOB/application transaction.
+Общие лимиты frame/native message/cache сохранены: 1 MiB / 1 MiB / 8 MiB.
+Проверены selected23 на синтетической PUBLIC.FILES и 68 BLOB среди 92 параметров;
+большие входные BLOB остаются APP-09, SQL bytea grammar и открытие 1С не приняты.
+
 
 ## Клиентская приёмка P9/M2
 

@@ -200,8 +200,10 @@ def blobs_client(config, client):
     for statement in ('SELECT BT FROM BLOB_ROWS','SELECT BX FROM BLOB_ROWS',
                       "INSERT INTO BLOB_COPY VALUES(300,CAST('x' AS BLOB)) RETURNING CAST('x' AS BLOB SUB_TYPE TEXT)"):
         query(statement,error='0A000')
-    params('SELECT CAST($1 AS BLOB SUB_TYPE BINARY)',['data'],error='0A000')
-    params('SELECT CAST($1 AS BLOB SUB_TYPE BINARY)',[None],error='0A000')
+    params('SELECT CAST($1 AS BLOB SUB_TYPE BINARY)',['data'],rows=[['\\x64617461']],oids=[17])
+    params('SELECT CAST($1 AS BLOB SUB_TYPE BINARY)',[None],rows=[[None]],oids=[17])
+    params('SELECT CAST($1 AS BLOB SUB_TYPE TEXT)',['data'],error='0A000')
+    params('SELECT CAST($1 AS BLOB SUB_TYPE 2)',['data'],error='0A000')
     query('SELECT 1::bytea',error='42601')
     query("SET bytea_output='hex'",error='42601')
     seen([])
@@ -257,7 +259,7 @@ def blobs_protocols(h):
         raw.exchange(packet(b'Q',b'SELECT B FROM BLOB_ROWS WHERE ID IN (2,11) ORDER BY ID\0'),b'TDEZ',error='0A000',rows=[[encoded(2)]])
         raw.run('SELECT 42',rows=[['42']])
         checks.append('later_row_failure_sends_no_partial_datarow_simple_and_extended')
-        for sql in ('SELECT BT FROM BLOB_ROWS','SELECT BX FROM BLOB_ROWS','SELECT CAST($1 AS BLOB)','SELECT 1::bytea'):
+        for sql in ('SELECT BT FROM BLOB_ROWS','SELECT BX FROM BLOB_ROWS','SELECT CAST($1 AS BLOB SUB_TYPE TEXT)','SELECT 1::bytea'):
             error='42601' if sql.endswith('::bytea') else '0A000'
             raw.exchange(parse('bad',sql)+parse('discarded','INSERT INTO BLOB_COPY VALUES(900,NULL)')+
                          bind('discarded','discarded')+execute('discarded')+packet(b'S'),b'EZ',error=error)

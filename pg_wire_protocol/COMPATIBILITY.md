@@ -68,11 +68,44 @@ Handle закрывается до DataRow, при ошибке освобожд
 Protocol сохраняет preflight. Ошибка результата может следовать за engine effects:
 implicit сегмент откатывается, T переходит в E до recovery.
 
-TEXT/прочие subtype остаются metadata refusal 0A000. Input BLOB (включая NULL
-input), SQL bytea type/casts/literals, сравнения/индексы/OCTETS/large-object API
-и SET bytea_output не добавлены. Parser/engine/API/InputCodec/зависимости прежние.
+TEXT/прочие subtype остаются metadata refusal 0A000. SQL bytea type/casts/literals,
+сравнения/индексы/OCTETS/large-object API и SET bytea_output не добавлены.
+APP-07 не меняет parser/engine/API/InputCodec/зависимости; input добавлен в APP-08 ниже.
 Контракт — [1c/README](1c/README.md), проверки — [VALIDATION](VALIDATION.md).
 APP-07 закрывает только output; APP-02/SQL-06 и исходный сценарий 1С остаются открыты.
+
+## Bytea input через native VARCHAR OCTETS
+
+APP-08 принимает logical SQL_BLOB subtype 0, scale 0, длина ISC_QUAD.
+OID 17 выводится движком; Parse hints отсутствующий/0/17 допустимы, mismatch —
+0A000. `SELECT $1` без native типа остаётся HY004. Обычный SQL OCTETS не добавлен.
+
+Binary Bind передаёт байты без преобразований. Text Bind принимает `\x` в начале
+и hex (оба регистра); space/tab/LF/CR допустимы перед/между/после пар, но не между
+цифрами пары. Иначе применяется escape: обычные UTF8 bytes сохраняются,
+`\\` даёт backslash, `\ooo` с первой цифрой 0…3 и остальными 0…7 — один байт.
+SQL quotes не снимаются, trim и повторный SQL unescape не применяются;
+standard_conforming_strings не влияет. Malformed hex — 22023, escape — 22P02,
+NUL/invalid UTF8 в сыром text — 22021. Декодированные и binary bytes могут
+содержать NUL/invalid UTF8. NULL, empty text, `\x` и empty binary различаются
+по null indicator; последние три создают ненулевой пустой BLOB.
+
+Максимум одного decoded value — 65533; 65534 и больше дают 0A000 на Bind.
+Это предел native varying descriptor, не DDL VARCHAR. Physical metadata:
+SQL_VARYING / charset CS_BINARY / subtype=scale=0; capacity при Parse равна 0,
+при Bind — длине конкретного значения. После builder проверяются все offsets,
+null offsets, prefixes, alignment и общий native message <=1 MiB до allocation.
+Metadata принадлежит portal, scalar-only Bind её не перестраивает. При ошибке
+encode прежняя metadata остаётся согласованной с прежним buffer. Временные
+decoded values не сохраняются. Cache учитывает фактический buffer, лимит 8 MiB
+и SQLSTATE 54000 прежние; wire frame <=1 MiB проверяется независимо.
+
+Parse/Bind/Describe/Flush не создают application transaction или BLOB.
+При Execute штатный engine MOVE преобразует VARCHAR OCTETS в BLOB текущей
+transaction. Plugin handles/materialization/lifecycle не добавлены; engine,
+parser, ResultCodec, API и зависимости не меняются. Native readback подтверждает
+байты после commit, rollback/savepoint/disconnect и отсутствие ранних эффектов.
+Большие значения — APP-09; APP-02/SQL-06/APP-05 остаются открытыми.
 
 ## Literal LIMIT в PG4
 
@@ -214,7 +247,7 @@ P7 включает native cleanup fix нескольких requests одног�
 
 Numeric не проходит через float и не округляется: overflow, непредставимая дробь и numeric NaN/Infinity дают 22003. Malformed numeric binary — 22P03, включая ненулевые digits, скрываемые dscale; malformed text — 22P02. Float decimal overflow/underflow вне представимого диапазона — 22003, malformed text — 22P02, неверная binary length — 22P03.
 
-Temporal text принимает строгий ISO `YYYY-MM-DD`, `HH:MM:SS[.ffffff]`, `YYYY-MM-DD HH:MM:SS[.ffffff]` либо разделитель `T`. Дробь содержит до шести цифр; пятая/шестая должны быть нулевыми для точного 100 µs native значения. Binary µs также должны делиться на 100 без остатка. Invalid text format — 22007; календарные/временные границы, непредставимая точность и infinity — 22008; неверная binary length — 22P03. Текстовые BC/TZ suffix не входят в ISO grammar и дают 22007; binary даты до 0001 года, 24:00 и leap second дают 22008. `integer_datetimes=on` отражает binary layout; TimeZone не публикуется. Binary BLOB output добавлен отдельным APP-07; input/прочие BLOB subtype, ARRAY/OCTETS/DECFLOAT/TZ остаются отдельной работой.
+Temporal text принимает строгий ISO `YYYY-MM-DD`, `HH:MM:SS[.ffffff]`, `YYYY-MM-DD HH:MM:SS[.ffffff]` либо разделитель `T`. Дробь содержит до шести цифр; пятая/шестая должны быть нулевыми для точного 100 µs native значения. Binary µs также должны делиться на 100 без остатка. Invalid text format — 22007; календарные/временные границы, непредставимая точность и infinity — 22008; неверная binary length — 22P03. Текстовые BC/TZ suffix не входят в ISO grammar и дают 22007; binary даты до 0001 года, 24:00 и leap second дают 22008. `integer_datetimes=on` отражает binary layout; TimeZone не публикуется. Binary BLOB output добавлен в APP-07, bounded input — в APP-08; большие input/прочие BLOB subtype, ARRAY/OCTETS/DECFLOAT/TZ остаются отдельной работой.
 
 ## P9: клиентский профиль и подтверждённые ограничения
 
@@ -268,7 +301,7 @@ EMPTY определяется ограниченным lexer только дл�
 | Named/unnamed statements и portals | Нет | Нет | Да, с лимитами и проверенным lifetime | Да |
 | Bind с native `?` либо zero parameters | Нет | Нет | Да, по engine metadata | Да |
 | Postfix casts `::` | Исторически parser error | Исторически parser error | PG4: native non-array builtin targets + postfix-only INT8, только корневые SELECT/DML | Custom targets/сохранённый SQL требуют отдельного этапа |
-| Binary BLOB output | Исторически metadata refusal | Исторически metadata refusal | Subtype 0 → bytea OID 17, text hex / raw binary, общий DataRow budget | Input/SQL type/casts и остальные subtypes не добавлены |
+| Binary BLOB output | Исторически metadata refusal | Исторически metadata refusal | Subtype 0 → bytea OID 17, text hex / raw binary, общий DataRow budget | Bounded input — APP-08; SQL type/casts и остальные subtypes не добавлены |
 | Literal `LIMIT n` | Исторически parser error | Исторически parser error | PG4 SELECT tail, integer 0…2147483647 в корневых SELECT/DML; native RowsClause | Общий LIMIT/OFFSET и сохранённый SQL требуют отдельного этапа |
 | SQL `$n` | Исторически parser error | Исторически parser error | PG4: только последовательные уникальные inputs в SELECT/INSERT/UPDATE/DELETE/MERGE | Произвольная нумерация требует отдельного этапа |
 | I/T/E, native SET TRANSACTION/COMMIT/ROLLBACK | Implicit Query transaction | Да, plugin-local controls после engine prepare | Да, включая implicit cycle до Sync | Да |
@@ -327,7 +360,7 @@ EMPTY определяется ограниченным lexer только дл�
 - PostgreSQL grammar/functions/catalog compatibility — будущий engine этап. Если он станет обязательным для целевого приложения, M3 этого приложения зависит от него явно.
 - Protocol 3.2, direct TLS negotiation, GSS encryption, PostgreSQL SCRAM/MD5 и channel binding — отдельные возможности. M3 начинает с password exchange внутри TLS и существующих Firebird credentials.
 - Полный предварительный разбор Simple Query остаётся отложенным: поддержаны последовательные скрипты с остановкой на первой окончательной ошибке. COPY, libpq pipeline mode, SQL named cursors, large-object API, LISTEN/NOTIFY и replication — отдельные wire/session contracts.
-- Binary BLOB subtype 0 выдаёт содержимое как bytea; input/прочие BLOB subtype, SQL bytea type/casts, ARRAY, OCTETS, DECFLOAT, типы с часовыми поясами и PostgreSQL custom types остаются отдельной работой. Firebird BLOB handle не выдаётся за bytea.
+- Binary BLOB subtype 0 выдаёт содержимое как bytea и принимает input до 65533 decoded bytes; большие input/прочие BLOB subtype, SQL bytea type/casts, ARRAY, OCTETS, DECFLOAT, типы с часовыми поясами и PostgreSQL custom types остаются отдельной работой. Firebird BLOB handle не выдаётся за bytea.
 - Remote security database и базы, требующие ключ шифрования от native клиента, не входят в начальный authentication profile.
 - Текущая платформа — Linux/Super. SuperClassic/Classic пока диагностируются с сохранением native; для них требуется отдельная работа и приёмка. Windows host wiring/runtime отсутствуют; `.dll` входит в архитектуру plugin ABI, но не доказывает готовность Windows build.
 

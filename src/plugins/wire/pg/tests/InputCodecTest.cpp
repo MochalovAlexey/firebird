@@ -194,6 +194,7 @@ void text()
 	auto metadata = describe({{SQL_TEXT, 16, 0, 0, 4}, {SQL_VARYING, 16, 0, 0, 4},
 		{SQL_TEXT, 4}, {SQL_VARYING, 8, 0, 0, 2}});
 	InputCodec codec(metadata, {25, 1042, 1043});
+	auto* originalMetadata = codec.metadata();
 	metadata = nullptr;
 	require(codec.parameterTypes() == std::vector<std::uint32_t>({25, 1042, 1043, 1043}),
 		"Accepted explicit text OIDs were not retained");
@@ -215,11 +216,110 @@ void text()
 	expectError([&] { codec.encode({"", "", "12345", ""}); }, "22001");
 	buffer = codec.encode({"", "", "Я", ""});
 	require(textValue(codec, buffer, 2) == "Я", "NONE input did not preserve UTF8 bytes");
+	require(codec.metadata() == originalMetadata, "Scalar Bind unnecessarily rebuilt metadata");
+}
+
+void blobs()
+{
+	auto metadata = describe({{SQL_LONG, 4}, {SQL_BLOB, sizeof(ISC_QUAD)}, {SQL_SHORT, 2},
+		{SQL_BLOB, sizeof(ISC_QUAD)}});
+	InputCodec codec(metadata, {0, 17});
+	require(codec.parameterTypes() == std::vector<std::uint32_t>({23, 17, 21, 17}), "BLOB OIDs differ");
+	expectError([&] { InputCodec other(metadata, {0, 25}); }, "0A000");
+	FbLocalStatus status;
+	require(codec.metadata()->getType(&status, 1) == SQL_VARYING &&
+		codec.metadata()->getLength(&status, 1) == 0 && codec.metadata()->getCharSet(&status, 1) == 1 &&
+		codec.metadata()->getSubType(&status, 1) == 0 && codec.metadata()->getScale(&status, 1) == 0,
+		"BLOB did not start with an empty OCTETS slot");
+	check(&status);
+	std::string allBytes;
+	for (unsigned i = 0; i < 256; ++i)
+		allBytes.push_back(i);
+	std::vector<unsigned char> buffer;
+	for (const auto& input : std::vector<std::optional<std::string>>{std::string(65533, '\xff'),
+		std::nullopt, "", allBytes, "x", std::string(65533, '\0')})
+	{
+		buffer = codec.encode({"123", input, "-7", "\\x00FF"}, {0, 1, 0, 0});
+		require(buffer.size() == codec.messageLength() &&
+			codec.metadata()->getLength(&status, 1) == (input ? input->size() : 0), "BLOB layout retained old capacity");
+		check(&status);
+		require(value<ISC_LONG>(codec, buffer, 0) == 123 && value<ISC_SHORT>(codec, buffer, 2) == -7,
+			"Scalar neighbours changed after BLOB resize");
+		require(value<ISC_SHORT>(codec, buffer, 1, true) == (input ? 0 : -1), "BLOB NULL differs from empty");
+		if (input)
+			require(textValue(codec, buffer, 1) == *input, "Binary BLOB bytes changed");
+		require(textValue(codec, buffer, 3) == std::string("\0\xff", 2), "Other BLOB slot changed");
+	}
+	const auto oldLength = codec.messageLength();
+	auto* oldMetadata = codec.metadata();
+	expectError([&] { codec.encode({"invalid", "short", "0", ""}); }, "22P02");
+	require(codec.metadata() == oldMetadata && codec.messageLength() == oldLength &&
+		textValue(codec, buffer, 1) == std::string(65533, '\0'), "Failed encode changed the retained layout");
+	InputCodec single(describe({{SQL_BLOB, sizeof(ISC_QUAD)}}));
+	for (const auto& test : std::vector<std::pair<std::string, std::string>>{
+		{"", ""}, {"\\x", ""}, {"\\x \t\r\n", ""}, {"\\x 00 aB\tCd\nEf\r ", std::string("\0\xab\xcd\xef", 4)},
+		{"\\000\\377\\200\\\\'", std::string("\0\xff\x80\\'", 5)}, {" 'Я' ", " 'Я' "},
+		{" \\\\x41", " \\x41"}, {"\\x5c303030", "\\000"}})
+	{
+		buffer = single.encode({test.first});
+		require(textValue(single, buffer, 0) == test.second, "Text bytea decoding differs");
+	}
+	for (const auto text : {"\\x0", "\\x 0 ", "\\xgg", "\\x0 0", "\\x00\v", "\\x\f00", "\\x00z0"})
+		expectError([&] { single.encode({text}); }, "22023");
+	for (const auto text : {"\\", "\\0", "\\00", "\\400", "\\378", "\\q", " \\x41", "\\X00", "\\ x00"})
+		expectError([&] { single.encode({text}); }, "22P02");
+	for (const auto& text : {std::string("a\0b", 3), std::string("\xc0\x80", 2)})
+		expectError([&] { single.encode({text}); }, "22021");
+	for (const unsigned size : {0, 1, 32765, 32766, 40444, 65533})
+	{
+		buffer = single.encode({std::string(size, '\xff')}, {1});
+		require(textValue(single, buffer, 0) == std::string(size, '\xff'), "Binary boundary changed bytes");
+		buffer = single.encode({"\\x" + std::string(size * 2, 'f')});
+		require(textValue(single, buffer, 0) == std::string(size, '\xff'), "Hex boundary changed bytes");
+	}
+	expectError([&] { single.encode({std::string(65534, 'a')}, {1}); }, "0A000");
+	expectError([&] { single.encode({"\\x" + std::string(65534 * 2, 'a')}); }, "0A000");
+	expectError([&] { single.encode({std::string(65534, 'a')}); }, "0A000");
+
+	// 68 independently sized BLOBs amongst 92 fields must not reserve 68 maximum slots.
+	std::vector<Spec> specs;
+	std::vector<std::optional<std::string>> inputs;
+	for (unsigned i = 0; i < 92; ++i)
+	{
+		const bool blob = i % 4 != 3 && i != 90;
+		specs.push_back(blob ? Spec{SQL_BLOB, sizeof(ISC_QUAD)} : Spec{SQL_LONG, 4});
+		inputs.push_back(blob ? (i % 8 == 0 ? std::nullopt : std::optional<std::string>(std::string(i % 17, 'a' + i % 26))) : "42");
+	}
+	InputCodec mixed(describe(specs));
+	buffer = mixed.encode(inputs);
+	require(buffer.size() < 2048, "Short BLOBs reserved maximum slots");
+	for (unsigned i = 0; i < inputs.size(); ++i)
+	{
+		if (specs[i].type == SQL_LONG)
+			require(value<ISC_LONG>(mixed, buffer, i) == 42, "Mixed scalar differs");
+		else if (inputs[i])
+			require(textValue(mixed, buffer, i) == *inputs[i], "Mixed BLOB differs");
+		else
+			require(value<ISC_SHORT>(mixed, buffer, i, true) == -1, "Mixed BLOB NULL differs");
+	}
+	// Include prefixes, NULL indicators and scalar alignment in the 1 MiB limit.
+	specs.assign(16, {SQL_BLOB, sizeof(ISC_QUAD)});
+	specs.push_back({SQL_SHORT, 2});
+	InputCodec boundary(describe(specs));
+	inputs.assign(16, std::string(65532, 'a'));
+	inputs[15] = std::string(65528, 'b');
+	inputs.push_back("1");
+	buffer = boundary.encode(inputs);
+	require(buffer.size() == 1024 * 1024 && value<ISC_SHORT>(boundary, buffer, 16) == 1,
+		"Exact native message boundary differs");
+	inputs[15] = std::string(65530, 'b');
+	expectError([&] { boundary.encode(inputs); }, "0A000");
 }
 
 void metadataValidation()
 {
-	const Spec unsupported[] = {{SQL_BLOB, 8}, {SQL_DEC16, 8}, {SQL_INT128, 16, -39, 1},
+	const Spec unsupported[] = {{SQL_BLOB, 8, 0, 1}, {SQL_BLOB, 8, 0, 2}, {SQL_BLOB, 8, 1},
+		{SQL_DEC16, 8}, {SQL_INT128, 16, -39, 1},
 		{SQL_DOUBLE, 8, -2, 1}, {SQL_TYPE_DATE, 4, -1},
 		{SQL_INT64, 8, -19, 1}, {SQL_INT64, 8, 1, 1}, {SQL_LONG, 4, 0, 3},
 		{SQL_BOOLEAN, 1, -1}, {SQL_BOOLEAN, 1, 0, 1}, {SQL_VARYING, 8, 0, 0, 1},
@@ -229,7 +329,7 @@ void metadataValidation()
 		auto metadata = describe({spec});
 		expectError([&] { InputCodec codec(metadata); }, "0A000");
 	}
-	for (const auto& spec : {Spec{SQL_LONG, 2}, Spec{SQL_BOOLEAN, 2}})
+	for (const auto& spec : {Spec{SQL_LONG, 2}, Spec{SQL_BOOLEAN, 2}, Spec{SQL_BLOB, 4}})
 	{
 		auto metadata = describe({spec});
 		expectError([&] { InputCodec codec(metadata); }, "XX000");
@@ -256,6 +356,7 @@ int main()
 		decimals();
 		booleans();
 		text();
+		blobs();
 		metadataValidation();
 		std::printf("PgWire input codec tests passed (%u checks)\n", checks);
 		return 0;

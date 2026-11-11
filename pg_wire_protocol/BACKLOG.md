@@ -1,6 +1,6 @@
 # Незавершённые задачи PgWire и профиля 1С
 
-Актуализировано 11 ноября 2026 года: review `ccd81f6473` (literal LIMIT) и реализация binary BLOB output поверх этой ревизии, оставленная на review.
+Актуализировано 11 ноября 2026 года: APP-07 принят в `5478a589d8`, APP-08 реализован и оставлен на review.
 Это единый список незакрытых работ и ограничений. [PLAN](PLAN.md) задаёт порядок,
 [COMPATIBILITY](COMPATIBILITY.md) — действующий контракт,
 [VALIDATION](VALIDATION.md) — доказательства. Подробности профиля — в [1c/README](1c/README.md).
@@ -52,12 +52,14 @@
 | ID | Статус | Что осталось / условие закрытия | Основание |
 |---|---|---|---|
 | APP-01 | Открыто | Настоящие pg_class/pg_database/namespaces/visibility, current_database, pg_my_temp_schema и требуемые catalog queries. Согласованные объекты, данные и права; не пустые успешные ответы. | [Следующие этапы 1С](1c/README.md#следующие-небольшие-этапы) |
-| APP-02 | Открыто | bytea/BLOB, mchar/mvarchar, regnamespace, BINROWVER и используемые функции/агрегаты; форматы, сравнения, сортировка, metadata и codecs. Первый выходной срез реализован в APP-07; input/SQL types/casts/comparisons/index semantics им не закрываются. | [Профиль 1С](1c/README.md), [COMPATIBILITY](COMPATIBILITY.md) |
+| APP-02 | Открыто | bytea/BLOB, mchar/mvarchar, regnamespace, BINROWVER и используемые функции/агрегаты; форматы, сравнения, сортировка, metadata и codecs. Output закрыт в APP-07, input ≤65533 реализован в APP-08, большие значения — APP-09; SQL types/casts/comparisons/index semantics ими не закрываются. | [Профиль 1С](1c/README.md), [COMPATIBILITY](COMPATIBILITY.md) |
 | APP-03 | Открыто | Shared/exclusive advisory locks и их transaction/session lifetime; реальные конфликты между соединениями. Таймаут настройки отдельно в SES-03. | [Профиль 1С](1c/README.md) |
 | APP-04 | Открыто | PG temporary DDL/pg_temp, serial4, WITHOUT OIDS, ANALYZE и fasttrun_ext; сначала установить требуемые реальные эффекты. | [Профиль 1С](1c/README.md) |
 | APP-05 | Открыто | Чтение настоящих служебных таблиц/конфигурации и DML на исходной схеме/типах 1С. Синтетический поиск и 92 параметра этого не подтверждают. | [NUMBERED_PARAMETERS_TASK](1c/NUMBERED_PARAMETERS_TASK.md), [VALIDATION](VALIDATION.md) |
 | APP-06 | Открыто | Сквозной сценарий 1С/Гилёва с зафиксированными версиями, настройками и фактической библиотекой клиента. Открытие базы и нагрузка ещё не приняты. | [Профиль 1С](1c/README.md), P11/P12 в [PLAN](PLAN.md) |
-| APP-07 | Закрыто по реализации, 11.11.2026; ожидает review | База `ccd81f6473`, незакоммиченный diff: subtype 0 → bytea OID 17 через IBlob, text/binary, общий DataRow budget, lifetime/cleanup. Native/libpq/raw/unit и обязательные регрессии PASS. InputCodec/engine/API/dependencies прежние; APP-02/SQL-06 остаются открыты. | [BINARY_BLOB_OUTPUT_TASK](1c/BINARY_BLOB_OUTPUT_TASK.md), [проверки](VALIDATION.md#11-ноября-2026-binary-blob-output) |
+| APP-07 | Закрыто, 11.11.2026 | `5478a589d8`: subtype 0 → bytea OID 17 через IBlob, text/binary, общий DataRow budget, lifetime/cleanup. Review без замечаний; независимые libpq/raw/native/unit и scalar codecs PASS. InputCodec/engine/API/dependencies прежние; APP-02/SQL-06 остаются открыты. | [BINARY_BLOB_OUTPUT_TASK](1c/BINARY_BLOB_OUTPUT_TASK.md), [review](VALIDATION.md#11-ноября-2026-архитектурный-review-binary-blob-output) |
+| APP-08 | Реализовано, на review | Input bytea → native BLOB subtype 0 через physical VARCHAR OCTETS и штатный MOVE при Execute. Text hex/escape и binary; ≤65533 decoded bytes на значение, layout по фактическим длинам Bind. libpq/raw/native проверяют selected23, 68 BLOB из 92 mixed параметров, реальные boundaries/cache, rollback/savepoint/disconnect. Production только InputCodec.cpp/h; engine/API прежние. | [BINARY_BLOB_INPUT_TASK](1c/BINARY_BLOB_INPUT_TASK.md) |
+| APP-09 | Открыто | Входные BLOB больше 65533 decoded bytes: выбрать отдельный native путь с корректным transaction/portal lifetime и bounded memory. Не повышать общие лимиты вместо решения. APP-08 этого не закрывает; выходной предел APP-07 остаётся общим DataRow budget. | [BINARY_BLOB_INPUT_TASK](1c/BINARY_BLOB_INPUT_TASK.md) |
 
 Для APP-01 исследование выявило отдельные архитектурные вопросы: RDB$SCHEMAS
 не содержит числового schema ID; простое LOWER(native name) неоднозначно при

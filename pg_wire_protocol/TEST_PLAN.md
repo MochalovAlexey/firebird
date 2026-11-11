@@ -4,6 +4,42 @@
 
 Python scaffold мигрирован под текущий контракт: 58 live cases прошли в P6. Начальные host tests расположены в src/common/tests/WireProtocolConfigTest.cpp, src/remote/server/wire/tests и isolated tools harness. P2/P3/P4 приёмка сохранена в VALIDATION. Предыдущая P5-ревизия прошла целевую Linux/Super приёмку с native ограничением READ CONSISTENCY + AUTO COMMIT; P6 повторил сборку, unit tests и целевые регрессии по [VALIDATION.md](VALIDATION.md). Целевой P6/M1 Linux/Super принят с известными native ограничениями, включая отдельно исключённый ON CONNECT shutdown. P7 Extended Query прошёл целевую Linux/Super приёмку: 16 групп. P8 codecs прошли целевую Linux/Super приёмку: восемь групп. P9 прошёл 17 групп с реальными C libpq, raw-wire и ограниченным профилем Psycopg 3; целевой M2 Linux/Super для совместимого SQL и реализованных codecs принят. Следующий этап — P10. PASS относится к зафиксированным cases/fixtures, а наличие строки в полной матрице не означает её прохождения.
 
+## Подэтап 1С: bytea input через VARCHAR OCTETS
+
+`pgwire_1c_smoke.py --blob-input` / `pgwire_blob_input_checks.py` используют прежний
+libpq/raw/native harness. У существующего `pgwire_blob_fixture.cpp` добавлен режим
+`DB --read MANIFEST`: новое native TCP attachment читает BLOB по SELECT и сверяет
+все bytes с synthetic hex/NULL manifest, без PgWire output codec.
+
+- OID 17, absent/zero/17 hint и mismatch, subtype/scale/ISC_QUAD descriptor gate,
+  SQL-04 HY004, обычный OCTETS и ::bytea negatives. PQexecParams и named prepared.
+- Text hex/escape, оба регистра и четыре whitespace только между парами;
+  malformed 22023/22P02, raw UTF8/NUL 22021; NULL/empty, 256 bytes, decoded invalid
+  UTF8/NUL/backslash/quote, printable UTF8, отсутствие trim/SQL unescape и эффекта
+  standard_conforming_strings. Отдельный Postgres Pro 18.6 через libpq как reference.
+- Длины 0/1/32765/32766/40444/65533 в обоих formats, 65534 -> 0A000 до Execute.
+  Layout ровно 1 MiB и overflow с scalar neighbours/alignment; actual cache 8 MiB.
+  68 BLOB среди 92 mixed params, 20 одновременно bound short-value portals.
+- Unit long -> NULL/empty -> short -> long, согласованность buffer/metadata,
+  неизменная metadata scalar-only codec, сохранение прежнего layout после ошибки.
+- Дословный selected23 UPDATE на synthetic PUBLIC.FILES: все пять параметров,
+  UPDATE 1/0, WHERE и native byte/scalar readback, payload 40444 synthetic bytes.
+- Parse/Bind/Describe/Flush и Close без Execute: нет transaction/table/sequence
+  effects; invalid bytea/unsupported output и discarded messages до Sync.
+- INSERT/UPDATE RETURNING, typed SELECT и singleton native `?` EXECUTE PROCEDURE;
+  независимые длинный/короткий portals, mixed formats, suspend/resume, execute-once,
+  prepared reuse через commit/rollback. I/T/E/25P02/savepoint/disconnect с native
+  visibility, ровно одна application transaction в T и отсутствие её после cleanup.
+  Engine duplicate-key error 23505 после conversion отличается от Bind refusal:
+  BEFORE INSERT sequence фиксирует исполнение, данные откатываются.
+
+Обязательные проверки APP-08: make -j2, make -C gen -j2 TARGET=Debug pgwire_tests,
+девять pgwire units и wire_socket_test, --blob-input, прежний --blobs,
+pgwire_codec_smoke.py, Extended Query и --parameters. Production diff ограничен
+InputCodec.cpp/h, engine/parser/ResultCodec/API не меняются; DT_NEEDED прежний.
+APP-09/APP-02/SQL-06/APP-05 остаются открытыми; Psycopg 3 SKIP, старый VAL-02 FAIL
+и known native crash exclusions не переоцениваются этим прогоном.
+
 ## Подэтап 1С: binary BLOB output
 
 `pgwire_1c_smoke.py --blobs` / `pgwire_blob_checks.py` используют существующий
@@ -25,7 +61,7 @@ fixtures и перечитывает их с нового native attachment по
   Ошибка следующей строки сохраняет предыдущую DataRow, новую частично не посылает.
 - Ошибки результата в I/T, Simple script rollback/stop, Extended E/25P02/Sync,
   DML RETURNING overflow и native readback после rollback; SELECT recovery.
-  TEXT/другие subtype, input BLOB (также NULL), ::bytea и SET bytea_output отказаны.
+  TEXT/другие subtype, ::bytea и SET bytea_output отказаны; subtype-0 input/NULL теперь проверяются положительно (APP-08).
 - ResultCodec/Protocol units: уменьшенный фактический frameLimit, общий budget,
   scalar после BLOB, пустые сегменты, EOF после полного бюджета и последующий
   непустой сегмент, ID zero без NULL indicator, malformed descriptor/context.
@@ -35,7 +71,7 @@ fixtures и перечитывает их с нового native attachment по
 
 Обязательные регрессии: все pgwire unit executables, wire_socket_test,
 pgwire_codec_smoke.py, Simple/Extended и --casts. Меняются только непосредственно
-затронутые negative expectations binary BLOB; InputCodec и parser/core diff пустые.
+затронутые negative expectations binary BLOB; для APP-07 InputCodec и parser/core diff пустые.
 readelf DT_NEEDED сравнивается с baseline. Historical P3 VARCHAR FAIL (VAL-02)
 и known native crash repro не включаются в переоценку. APP-07 закрывает только
 output; APP-02/SQL-06, оригинальная схема/Bind и запуск 1С остаются вне приёмки.
@@ -133,7 +169,7 @@ Baseline этапа numbered inputs — 154/11; текущий postfix-срез 
 Generated numbering actions защищены `!yytrial`.
 Обязательны штатные SQL/Session/isql units, Extended и --settings/--begin/--strings.
 C/Python negative cases меняются только в новом контракте: недостаточный контекст
-остаётся HY004 даже с supplied OID; input/non-binary BLOB, custom types и DEALLOCATE ALL limits сохранены. Postfix casts проверяются отдельным срезом ниже.
+остаётся HY004 даже с supplied OID; non-binary BLOB, custom types и DEALLOCATE ALL limits сохранены. Postfix casts проверяются отдельным срезом ниже.
 Psycopg 3 запускается при наличии; отсутствие — SKIP без установки зависимостей.
 Фактические команды, SHA и PASS/FAIL/skip — в VALIDATION. Known crash repro исключены.
 

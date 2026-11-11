@@ -53,6 +53,63 @@ void validateText(std::string_view text)
 	}
 }
 
+std::string byteaText(std::string_view text, std::size_t remaining)
+{
+	validateText(text);
+	std::string bytes;
+	const auto append = [&](unsigned char byte)
+	{
+		if (bytes.size() >= MAX_VARYING || bytes.size() >= remaining)
+			throw ProtocolError("0A000", "Binary BLOB parameter exceeds supported limits");
+		bytes.push_back(byte);
+	};
+	if (text.size() >= 2 && text[0] == '\\' && text[1] == 'x')
+	{
+		const auto hex = [](char c) -> int
+		{
+			if (c >= '0' && c <= '9') return c - '0';
+			if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+			if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+			return -1;
+		};
+		for (std::size_t i = 2; i < text.size();)
+		{
+			const char c = text[i];
+			if (c == ' ' || c == '\t' || c == '\n' || c == '\r')
+			{
+				++i;
+				continue;
+			}
+			if (i + 1 == text.size() || hex(c) < 0 || hex(text[i + 1]) < 0)
+				throw ProtocolError("22023", "Invalid hexadecimal bytea parameter");
+			append((hex(c) << 4) | hex(text[i + 1]));
+			i += 2;
+		}
+	}
+	else
+	{
+		for (std::size_t i = 0; i < text.size(); ++i)
+		{
+			if (text[i] != '\\')
+				append(text[i]);
+			else if (i + 1 < text.size() && text[i + 1] == '\\')
+			{
+				append('\\');
+				++i;
+			}
+			else if (i + 3 < text.size() && text[i + 1] >= '0' && text[i + 1] <= '3' &&
+				text[i + 2] >= '0' && text[i + 2] <= '7' && text[i + 3] >= '0' && text[i + 3] <= '7')
+			{
+				append((text[i + 1] - '0') * 64 + (text[i + 2] - '0') * 8 + text[i + 3] - '0');
+				i += 3;
+			}
+			else
+				throw ProtocolError("22P02", "Invalid escape in bytea parameter");
+		}
+	}
+	return bytes;
+}
+
 bool space(char c)
 {
 	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v';
@@ -235,6 +292,15 @@ InputCodec::InputCodec(IMessageMetadata* logicalMetadata, const std::vector<std:
 				invalidMetadata();
 			oid = 16;
 			break;
+		case SQL_BLOB:
+			if (subtype || scale)
+				throw ProtocolError("0A000", "BLOB parameter subtype or scale is not supported");
+			if (capacity != sizeof(ISC_QUAD))
+				invalidMetadata();
+			oid = 17;
+			charset = CS_BINARY;
+			hasBlobs = true;
+			break;
 		case SQL_TEXT:
 		case SQL_VARYING:
 		{
@@ -279,27 +345,51 @@ InputCodec::InputCodec(IMessageMetadata* logicalMetadata, const std::vector<std:
 		check(&status);
 		checkRange(offset, physicalSize, logicalLength);
 		checkRange(nullOffset, sizeof(ISC_SHORT), logicalLength);
+		if (type == SQL_BLOB)
+		{
+			// The engine converts OCTETS to a BLOB at Execute, in the current transaction.
+			// Bind sizes this physical slot; Parse never reserves the maximum payload.
+			builder->setType(&status, i, SQL_VARYING);
+			check(&status);
+			builder->setSubType(&status, i, 0);
+			check(&status);
+			builder->setScale(&status, i, 0);
+			check(&status);
+			builder->setCharSet(&status, i, CS_BINARY);
+			check(&status);
+			builder->setLength(&status, i, 0);
+			check(&status);
+		}
 		types.push_back(oid);
-		fields.push_back({type == SQL_TEXT ? SQL_VARYING : type, capacity, 0, 0, charset, scale});
+		fields.push_back({type == SQL_TEXT ? SQL_VARYING : type,
+			type == SQL_BLOB ? 0 : capacity, 0, 0, charset, scale});
 	}
 	bindMetadata.assignRefNoIncr(builder->getMetadata(&status));
 	check(&status);
-	if (!bindMetadata)
+	length = layout(bindMetadata, fields);
+}
+
+unsigned InputCodec::layout(IMessageMetadata* metadata, std::vector<Field>& fields)
+{
+	if (!metadata)
 		invalidMetadata();
-	length = bindMetadata->getMessageLength(&status);
+	FbLocalStatus status;
+	const auto length = metadata->getMessageLength(&status);
 	check(&status);
 	if (length > MAX_MESSAGE)
 		throw ProtocolError("0A000", "Parameter message exceeds supported limits");
-	for (unsigned i = 0; i < count; ++i)
+	for (unsigned i = 0; i < fields.size(); ++i)
 	{
 		auto& field = fields[i];
-		field.offset = bindMetadata->getOffset(&status, i);
+		field.offset = metadata->getOffset(&status, i);
 		check(&status);
-		field.nullOffset = bindMetadata->getNullOffset(&status, i);
+		field.nullOffset = metadata->getNullOffset(&status, i);
 		check(&status);
-		checkRange(field.offset, field.length + (field.type == SQL_VARYING ? sizeof(ISC_USHORT) : 0), length);
+		checkRange(field.offset, field.length +
+			(field.type == SQL_VARYING || field.type == SQL_BLOB ? sizeof(ISC_USHORT) : 0), length);
 		checkRange(field.nullOffset, sizeof(ISC_SHORT), length);
 	}
+	return length;
 }
 
 std::size_t InputCodec::retainedBytes() const noexcept
@@ -308,7 +398,7 @@ std::size_t InputCodec::retainedBytes() const noexcept
 }
 
 std::vector<unsigned char> InputCodec::encode(const std::vector<std::optional<std::string>>& values,
-	const std::vector<std::int16_t>& formats) const
+	const std::vector<std::int16_t>& formats)
 {
 	if (values.size() != fields.size())
 		throw ProtocolError("08P01", "Bind parameter count does not match the prepared statement");
@@ -319,10 +409,48 @@ std::vector<unsigned char> InputCodec::encode(const std::vector<std::optional<st
 		if (format != 0 && format != 1)
 			throw ProtocolError("08P01", "Bind parameter format code is invalid");
 	}
-	std::vector<unsigned char> buffer(length);
+	// Stage the new descriptor locally so an unsuccessful encode preserves the old layout.
+	RefPtr<IMessageMetadata> nextMetadata;
+	std::vector<Field> nextFields;
+	std::vector<std::string> decoded;
+	unsigned nextLength = length;
+	if (hasBlobs)
+	{
+		FbLocalStatus status;
+		RefPtr<IMetadataBuilder> builder(REF_NO_INCR, bindMetadata->getBuilder(&status));
+		check(&status);
+		nextFields = fields;
+		decoded.resize(fields.size());
+		std::size_t remaining = MAX_MESSAGE;
+		for (unsigned i = 0; i < fields.size(); ++i)
+		{
+			if (fields[i].type != SQL_BLOB)
+				continue;
+			std::size_t size = 0;
+			if (values[i])
+			{
+				const auto format = formats.empty() ? 0 : formats[formats.size() == 1 ? 0 : i];
+				if (values[i]->size() > MAX_MESSAGE)
+					throw ProtocolError("0A000", "Parameter value exceeds supported limits");
+				if (!format)
+					decoded[i] = byteaText(*values[i], remaining);
+				size = format ? values[i]->size() : decoded[i].size();
+				if (size > MAX_VARYING || size > remaining)
+					throw ProtocolError("0A000", "Binary BLOB parameter exceeds supported limits");
+			}
+			remaining -= size;
+			nextFields[i].length = size;
+			builder->setLength(&status, i, size);
+			check(&status);
+		}
+		nextMetadata.assignRefNoIncr(builder->getMetadata(&status));
+		check(&status);
+		nextLength = layout(nextMetadata, nextFields);
+	}
+	std::vector<unsigned char> buffer(nextLength);
 	for (unsigned i = 0; i < fields.size(); ++i)
 	{
-		const auto& field = fields[i];
+		const auto& field = hasBlobs ? nextFields[i] : fields[i];
 		if (!values[i])
 		{
 			store<ISC_SHORT>(buffer.data() + field.nullOffset, -1);
@@ -332,7 +460,7 @@ std::vector<unsigned char> InputCodec::encode(const std::vector<std::optional<st
 		if (value.size() > MAX_MESSAGE)
 			throw ProtocolError("0A000", "Parameter value exceeds supported limits");
 		const auto format = formats.empty() ? 0 : formats[formats.size() == 1 ? 0 : i];
-		if (!format)
+		if (!format && field.type != SQL_BLOB)
 			validateText(value);
 		auto* address = buffer.data() + field.offset;
 		switch (field.type)
@@ -379,12 +507,23 @@ std::vector<unsigned char> InputCodec::encode(const std::vector<std::optional<st
 			}
 			if (value.size() > field.length)
 				throw ProtocolError("22001", "Text parameter is too long");
-			store<ISC_USHORT>(address, value.size());
-			std::memcpy(address + sizeof(ISC_USHORT), value.data(), value.size());
+			[[fallthrough]];
+		case SQL_BLOB:
+		{
+			const std::string_view bytes = field.type == SQL_BLOB && !format ? decoded[i] : value;
+			store<ISC_USHORT>(address, bytes.size());
+			std::memcpy(address + sizeof(ISC_USHORT), bytes.data(), bytes.size());
 			break;
+		}
 		default:
 			invalidMetadata();
 		}
+	}
+	if (hasBlobs)
+	{
+		bindMetadata = nextMetadata;
+		fields.swap(nextFields);
+		length = nextLength;
 	}
 	return buffer;
 }

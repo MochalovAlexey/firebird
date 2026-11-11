@@ -1,5 +1,248 @@
 # Проверки реализации
 
+## 11 ноября 2026: bytea input через native VARCHAR OCTETS
+
+[APP-08](1c/BINARY_BLOB_INPUT_TASK.md) реализован поверх
+`5478a589d8fc403618d7b05bb00a19d3ed3d08fe`, ветка `pg_wire_protocol`;
+изменения оставлены на review без git add/commit. Исходные незакоммиченные
+README/BACKLOG/PLAN/VALIDATION и файл задания сохранены и дополнены.
+Production diff — только `src/plugins/wire/pg/InputCodec.cpp/h`.
+Engine/parser/ResultCodec/Extended/public API diff пустой; новых зависимостей нет.
+
+InputCodec принимает logical BLOB subtype=scale=0, length=ISC_QUAD, wire OID 17.
+Через существующий IMetadataBuilder создаётся physical VARCHAR OCTETS: capacity 0
+при Parse, фактические decoded lengths при Bind. Portal-specific metadata и buffer
+меняются вместе только после успешного encode; scalar-only metadata прежняя.
+Временные decoded strings уничтожаются после encode. Штатный native MOVE создаёт
+BLOB при Execute в текущей transaction, без handles/materialization в плагине.
+Исходный SQL не переписывается.
+
+SHA256 проверенной сборки/исходников:
+
+| Артефакт | SHA256 |
+|---|---|
+| `git diff HEAD -- src` | `43a70c205521047805c177c2aa02f1a76805b69404add8aa9964ba2225e061ad` |
+| Production diff InputCodec.cpp/h | `1a6d77e7961d7934e43d9e7681de48b40d5f668030abe2f247a9d30991836ca8` |
+| `libPgWire.so` | `0e4b2a4a90bc9f86d091d6019e01854906ea0ae5e532eda92961f0542cc6b405` |
+| `libEngine14.so`, неизменённый | `36de1e2dcf6320439195e79efa153b4f18acace6a1b1326ab46e0ec4d3bf4cb9` |
+| `pgwire_1c_smoke.py` | `2fc0b37ad968f6263b665d5839871df0292003218bd259e80b618c4c70c0aa50` |
+| `pgwire_blob_input_checks.py` | `bf831dc8088c839f0561470978b32f7e17cc9961639dba717c241fbf3873fceb` |
+| `pgwire_blob_checks.py` | `a0c65feac46c51e46e974518d1f0a00afd533495e68923a89642953df302689e` |
+| `pgwire_blob_fixture.cpp` | `85b9b7d2b6cd2766372f7b47c9aa4f87bf3eb227ee56aeca6a0b33ecbb528e07` |
+
+`readelf -d` сравнивался с предыдущим PgWire SHA
+`b38d3389ce8235b31bc2c3f89a1fa6ad5b41f4192bf2a99075f3b587f069a5ee`
+в `/tmp/pgwire-input-native-probe-20261111/runtime/plugins`.
+DT_NEEDED одинаков: `libfbclient.so.2`, `libtommath.so.0`, `libtomcrypt.so.1`,
+`libm.so.6`, `libgcc_s.so.1`, `libc.so.6`, `ld-linux-x86-64.so.2`.
+
+Baseline `/tmp/firebird-pgwire-bytea-input-baseline-02/summary.json` подтвердил
+0A000 на `SELECT CAST($1 AS BLOB SUB_TYPE BINARY)` с binary input 00ff80,
+при уже работающем output OID 17 для native bytes 005c27ffc080. Сервер exit 0.
+Native bridge исследован ранее в `/tmp/pgwire-input-native-probe-20261111`;
+ниже сохранены его результаты до 65533 bytes и dynamic 68-BLOB layout.
+Новый harness дополнительно читает записанные PgWire bytes через отдельное
+native TCP attachment и IBlob, без использования ResultCodec для сравнения.
+
+Команды выполнялись из корня репозитория (build — в указанном каталоге):
+
+```sh
+make -C /tmp/firebird-pgwire-1c-build -j2
+make -C /tmp/firebird-pgwire-1c-build/gen -j2 TARGET=Debug pgwire_tests
+
+# Девять executables pgwire_*_test; LD_LIBRARY_PATH указывает на build/lib.
+# Дополнительно wire_socket_test. Результаты: /tmp/firebird-pgwire-bytea-units.json.
+
+python3 -B pg_wire_protocol/tools/pgwire_1c_smoke.py \
+  --firebird-dir /tmp/firebird-pgwire-1c-build/gen/Debug/firebird \
+  --work-dir /tmp/firebird-pgwire-bytea-input-05 --blob-input \
+  --capture-dir /home/aleksey/dev/1c/captures/20261109T105635Z --timeout 180
+python3 -B pg_wire_protocol/tools/pgwire_1c_smoke.py \
+  --firebird-dir /tmp/firebird-pgwire-1c-build/gen/Debug/firebird \
+  --work-dir /tmp/firebird-pgwire-bytea-output-02 --blobs --timeout 180
+python3 -B pg_wire_protocol/tools/pgwire_1c_smoke.py \
+  --firebird-dir /tmp/firebird-pgwire-1c-build/gen/Debug/firebird \
+  --work-dir /tmp/firebird-pgwire-bytea-parameters-02 --parameters --timeout 180
+python3 -B pg_wire_protocol/tools/pgwire_codec_smoke.py \
+  --firebird-dir /tmp/firebird-pgwire-1c-build/gen/Debug/firebird \
+  --work-dir /tmp/firebird-pgwire-bytea-codecs \
+  --libpq-include-dir /tmp/firebird-pgwire-1c-deps/libpq-dev/usr/include/postgresql \
+  --libpq-library /lib/x86_64-linux-gnu/libpq.so.5 --timeout 180
+python3 -B pg_wire_protocol/tools/pgwire_extended_query_smoke.py \
+  --firebird-dir /tmp/firebird-pgwire-1c-build/gen/Debug/firebird \
+  --work-dir /tmp/firebird-pgwire-bytea-extended \
+  --libpq-include-dir /tmp/firebird-pgwire-1c-deps/libpq-dev/usr/include/postgresql \
+  --libpq-library /lib/x86_64-linux-gnu/libpq.so.5 --timeout 180
+python3 -B /tmp/pgwire-bytea-reference.py
+```
+
+| Проверка | Результат |
+|---|---|
+| Build + pgwire_tests | PASS; `/tmp/firebird-pgwire-bytea-build.log`, `/tmp/firebird-pgwire-bytea-tests-build.log` |
+| Units | PASS: все 9 pgwire executables; InputCodec 559, float 112, numeric 502, temporal 313, SqlInfo 575, session 5; wire_socket_test PASS |
+| `--blob-input` | PASS: 125 libpq checks, 7 raw groups, 9 независимых native readback/visibility observations |
+| `--blobs` | PASS: 92 checks, 32 PQunescapeBytea roundtrips, 9 native observations, 7 raw groups |
+| `--parameters` | PASS: 73 checks, 13 native observations, 29 raw refusal/recovery cases |
+| Scalar codecs | PASS: 8 групп, включая syscall trace без backend TCP hop |
+| Extended Query | PASS: 16 групп, включая object/cache limits, cleanup и syscall trace |
+| Postgres Pro reference | PASS: 66 libpq cases; `/tmp/pgwire-bytea-reference-m4m_zu6t/summary.json` |
+| Psycopg 3 | SKIP: клиент отсутствует; новый профиль bytea не принят этим драйвером |
+| VAL-02 | Сохраняется historical P3 VARCHAR FAIL; отдельный suite не перепроверялся |
+
+Reference использует отдельный кластер `/opt/pgpro/1c-18`, server version 18.6,
+libpq 14.24 (140024), UTF8; зависимости не устанавливались. Hex whitespace/case,
+escape/odd nibble/invalid digits, неполные escapes и `\400` совпали с byteain:
+22023 для hex, 22P02 для escape, 22021 для raw invalid UTF8. Оба значения
+standard_conforming_strings дают одинаковые parameter bytes. PostgreSQL принимает
+65534 bytes; локальный отказ 0A000 при этой длине — заявленный предел native
+transport descriptor, не ограничение PostgreSQL. PQunescapeBytea не использовался
+как эталон malformed input. Источники правил:
+[PG 18 bytea](https://www.postgresql.org/docs/18/datatype-binary.html),
+[byteain](https://github.com/postgres/postgres/blob/REL_18_STABLE/src/backend/utils/adt/varlena.c),
+[hex_decode_safe](https://github.com/postgres/postgres/blob/REL_18_STABLE/src/backend/utils/adt/encode.c).
+
+Binary и text hex/escape проверены через настоящий PQexecParams и
+PQprepare/PQexecPrepared. NULL/empty, все 256 bytes, decoded NUL/invalid UTF8,
+quotes/backslash и printable UTF8 сохраняются; raw text NUL проверен raw Bind
+(обычный libpq text parameter использует NUL terminator). Parse/Describe возвращают
+OID 17; absent/0/17 hints приняты, mismatch 0A000. TEXT/custom BLOB и обычный OCTETS
+остались неподдержанными, SQL bytea cast — parser refusal. Unit проверяет scale,
+размер ISC_QUAD и повторный encode long → NULL/empty → short → long, включая
+scalar neighbours и сохранение старого layout после неуспешного encode.
+
+Реальные границы: 0/1/32765/32766/40444/65533 bytes в обоих formats приняты
+и перечитаны native после commit; 65534 отказан до Execute. Unit достигает
+ровно 1 MiB с 16 BLOB и SMALLINT. Raw wire достигает того же размера с 31 scalar
+VARCHAR capacity 32760 и BLOB payload 32888: `31*32764 + 32888 + 4 = 1048576`.
+При 32889 payload native alignment увеличивает message ещё на 2 bytes — Bind 0A000.
+Bind frame при этом значительно меньше лимита, поэтому проверяется именно layout.
+68 BLOB среди 92 mixed parameters записаны с короткими разными values/NULL и
+независимо прочитаны; 20 таких portals одновременно Bind проходят без исполнения.
+8 MiB cache сохраняет 111 дополнительных portals с payload 65533 при уже retained
+prepared descriptors, следующий Bind даёт прежний 54000; Sync и короткий Bind
+восстанавливаются. Максимального slot reservation на каждый BLOB нет.
+
+Selected23 использован дословно и сопоставлен с external capture SQL: UPDATE 1/0,
+все пять parameters (1114/20/17/1043/23), WHERE filename/partno, synthetic payload
+40444 bytes. Native isql проверяет timestamp/datasize/filename/partno и нетронутые
+соседние строки; IBlob helper сравнивает все bytes. Synthetic PUBLIC.FILES не
+выдаётся за original schema; исходный format code/Bind и конфигурация не восстановлены.
+
+Raw Parse/Bind/Describe/Flush/Close не создают application transaction и не меняют
+таблицу/sequence. Invalid bytea и unsupported output отказывают до execution,
+последующие Parse/Bind/Execute отброшены до Sync. Независимые long/short portals
+с mixed formats проходят suspension/resume; повторный Execute завершённого
+RETURNING portal не повторяет DML. SELECT cursor, INSERT/UPDATE RETURNING и
+singleton `EXECUTE PROCEDURE BIN_PROC(?)` проверены. Prepared работает через
+commit/rollback. Native observer видит ровно одну application transaction в T,
+не видит uncommitted rows, подтверждает commit/rollback/savepoint/disconnect.
+В E возвращается 25P02; ROLLBACK TO восстанавливает T. Duplicate-key 23505 после
+native conversion выполняет BEFORE INSERT sequence, но не сохраняет данные:
+этот случай явно отделён от Bind preflight refusal.
+
+Все успешные Firebird runs (включая две trace-фазы codecs/Extended) завершились
+с exit 0, без forced kill, shutdown около 0.164 s; private PostgreSQL exit 0.
+Рабочие серверы/БД/employee/pgwire_test/1С не изменялись. Known native crash repro
+не запускались. APP-08 закрыт по реализации и ожидает review; APP-09, APP-02,
+SQL-06, APP-05, VAL-02/VAL-04 и фактическое открытие 1С остаются открытыми.
+
+Промежуточные FAIL сохранены отдельно: baseline-01 использовал INSERT без grant;
+input-01 ожидал общий 23000 вместо native 23505; input-02 использовал пустую
+WIRE_HOST_ROWS для cursor fixture; input-04 пытался задавать DDL VARCHAR сверх
+native SQL предела для проверки message boundary (HY004). Все исправления —
+в harness/fixtures, production после первой успешной сборки не менялся.
+Input-03 и первые output/parameters copies не стартовали из-за ENOSPC; часть
+пустых summary не удалось записать. Для освобождения места удалены только
+дубликаты binaries собственных завершённых/незапущенных bytea runtimes; logs,
+summaries и тестовые БД сохранены. После исправлений input-05/output-02/
+parameters-02 прошли полностью; прошедшие codecs/Extended повторно не запускались.
+
+
+## 11 ноября 2026: архитектурный review binary BLOB output
+
+Проверена ревизия `5478a589d8fc403618d7b05bb00a19d3ed3d08fe` относительно
+`ccd81f6473` по [APP-07](1c/BINARY_BLOB_OUTPUT_TASK.md). Замечаний к ограниченному
+контракту не обнаружено. Проверены subtype/descriptor gate, оба формата bytea,
+NULL/empty, четыре decode paths с текущей transaction, общий DataRow budget,
+EOF на точной границе, consuming close/RefPtr::clear и cleanup при ошибках.
+Parser/core/InputCodec и публичные интерфейсы не изменены.
+
+Рабочее дерево перед review чистое. Использована существующая Debug/Linux/Super
+сборка `/tmp/firebird-pgwire-1c-build/gen/Debug/firebird`, без новой сборки.
+Хеши обоих source diffs, Engine/PgWire и трёх BLOB harness files совпали с
+отчётом реализации ниже. PgWire:
+`b38d3389ce8235b31bc2c3f89a1fa6ad5b41f4192bf2a99075f3b587f069a5ee`;
+Engine: `36de1e2dcf6320439195e79efa153b4f18acace6a1b1326ab46e0ec4d3bf4cb9`.
+
+| Независимо повторённая проверка | Результат |
+|---|---|
+| Девять pgwire unit executables | PASS: Protocol, ErrorStatus, ResultCodec, Input 154, Float 112, Numeric 502, Temporal 313, SQL 575, Session 5 |
+| `--blobs` | PASS: 90 libpq checks, 31 PQunescapeBytea round-trip, 9 native observations, 7 raw groups, native fixture/readback |
+| `pgwire_codec_smoke.py` | PASS: 8 групп скалярных codecs, включая no-server-network-hop |
+
+Unit logs: `/tmp/pgwire-blob-review-pgwire_*_test.log`; executable из tests/
+указанной сборки, LD_LIBRARY_PATH указывает на её lib/. TCP-команды из корня
+репозитория с разрешённым локальным TCP:
+
+```sh
+python3 -B pg_wire_protocol/tools/pgwire_1c_smoke.py --blobs --firebird-dir /tmp/firebird-pgwire-1c-build/gen/Debug/firebird --work-dir /tmp/firebird-pgwire-blob-review-20261111 --libpq /lib/x86_64-linux-gnu/libpq.so.5 --timeout 120
+python3 -B pg_wire_protocol/tools/pgwire_codec_smoke.py --firebird-dir /tmp/firebird-pgwire-1c-build/gen/Debug/firebird --work-dir /tmp/firebird-pgwire-blob-codecs-review-20261111 --libpq-include-dir /tmp/firebird-pgwire-1c-deps/libpq-dev/usr/include/postgresql --libpq-library /lib/x86_64-linux-gnu/libpq.so.5 --timeout 120
+```
+
+Итоговые summaries успешны, revision=5478a589d8; BLOB report фиксирует пустой
+production diff. Все три server runs завершились exit_code=0, forced_kill=false.
+Только отдельные runtime/security/test DB в /tmp, рабочие базы не затрагивались.
+Simple/Extended/casts заново не запускались: их итоговые отчёты и покрытие
+проверены, новых оснований для повторения после целевой приёмки не найдено.
+
+APP-07 закрыт. Native live I/O fault injection остаётся VAL-04; ABI mocks
+проверяют ownership, но не заменяют такие faults. APP-02, SQL bytea types/casts,
+input, каталоги и исходный запуск 1С этим не закрываются. Изменения текущего
+архитектурного диалога — только документация; feature implementation и commit
+не выполнялись.
+
+### Native probe для архитектуры следующего input-этапа
+
+Отдельная native OO проверка подтвердила существующий путь SQL_VARYING/CS_BINARY
+input descriptor → engine BLOB subtype 0 без создания IBlob в PgWire. Исходники
+плагина не менялись. Использована изолированная копия указанной сборки с
+Providers=Engine14, своими locks/tmp и новыми базами; сервер и TCP не запускались.
+
+Команды исследования:
+
+```sh
+python3 -B /tmp/pgwire-input-native-probe-20261111/run.py
+python3 -B /tmp/pgwire-input-native-probe-20261111/run_dynamic.py
+```
+
+Скрипты создавали новые probe.fdb/dynamic_probe.fdb и завершились 0; повторять
+их следует с новыми путями, а не поверх этих баз. Первый probe задавал physical
+capacity 65533. Второй начинал с capacity 0 и перестраивал metadata по длине
+перед Execute на одном IStatement. NULL, empty и размеры 1/256/32765/32766/40444/
+65532/65533 прошли в обоих; independent readback после commit и нового attachment
+сравнивает все bytes, включая NUL/невалидные UTF8-последовательности.
+
+Дополнительно dynamic probe: 68 BLOB плюс INTEGER/SMALLINT, смесь NULL/empty/
+16-byte payload, physical message 1162 bytes, persisted readback PASS. Исходная
+таблица selected19 имеет 68 bytea из 92 параметров: фиксированный максимум на
+каждый давал бы более 4 MiB. Поэтому [APP-08](1c/BINARY_BLOB_INPUT_TASK.md)
+использует layout конкретного Bind. Probe не выполнял исходный selected19 и
+не проверял mchar/mvarchar/индексы; APP-05 остаётся открытым.
+
+SHA256 файлов в `/tmp/pgwire-input-native-probe-20261111`:
+
+- probe.cpp: `ce14978d36a745bfa363eb4dffc14b01520618d51e25718085c3aa848387225b`;
+- probe_dynamic.cpp: `16b29c868ef7ae34edc41b3ad062d5203bff14b11ee120095ee295354bc560ab`;
+- run_dynamic.py: `42a832f451d1fef01267f82b3f097efb518e5b65d61e6d8c43e36fca7c2a85e9`;
+- dynamic_result.log: `e28d0bbc92c339c1c422b6037eb5452843a0223bf7192732de9db407f0208a74`.
+
+Engine SHA тот же; fbclient:
+`c89d18fd00f443fef848040a144d55282ab9cb7f5dfc6086195d41d892a3c422`.
+65534+ native API не отправлялись: ограничение 65533 следует из 16-битной длины
+descriptor с двухбайтовым prefix. Отказ codec на превышение — обязательная
+проверка будущей реализации. Эти probes подтверждают архитектуру APP-08,
+а не готовность PgWire input; большие входные значения записаны как APP-09.
+
 ## 11 ноября 2026: binary BLOB output
 
 [APP-07](1c/BINARY_BLOB_OUTPUT_TASK.md) реализован поверх
