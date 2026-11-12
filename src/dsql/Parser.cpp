@@ -677,7 +677,28 @@ int Parser::yylexAux()
 		return TOK_NUMBERED_PARAMETER;
 	}
 
-	if (tok_class & CHR_INTRODUCER)
+	// In PG an underscore begins an identifier unless a charset name is
+	// immediately followed by a string literal. Reuse comment/space scanning.
+	bool pgIntroducer = false;
+	if (pgDialect && (tok_class & CHR_INTRODUCER))
+	{
+		const auto saved = lex;
+		if (lex.ptr < lex.end && *lex.ptr == '"')
+			pgIntroducer = true; // native quoted charset introducer
+		else
+		{
+			while (lex.ptr < lex.end && (classes(*lex.ptr) & CHR_IDENT))
+				++lex.ptr;
+			if (yylexSkipSpaces())
+			{
+				const auto next = UPPER(lex.ptr[-1]);
+				pgIntroducer = next == '\'' ||
+					((next == 'Q' || next == 'X') && lex.ptr < lex.end && *lex.ptr == '\'');
+			}
+		}
+		lex = saved;
+	}
+	if ((tok_class & CHR_INTRODUCER) && (!pgDialect || pgIntroducer))
 	{
 		if (lex.ptr >= lex.end)
 			return -1;
@@ -1458,7 +1479,7 @@ int Parser::yylexAux()
 
 	// end of number-recognition code
 
-	if (tok_class & CHR_LETTER)
+	if ((tok_class & CHR_LETTER) || (pgDialect && (tok_class & CHR_INTRODUCER)))
 	{
 		char* p = string;
 		check_copy_incr(p, UPPER (c), string);
@@ -1500,6 +1521,8 @@ int Parser::yylexAux()
 		lex.line_start_bk = lex.line_start;
 		lex.lines_bk = lex.lines;
 		// LIMIT is reserved only in PG; INT8 remains a non-reserved postfix type alias.
+		if (pgDialect && str == "OIDS")
+			return TOK_OIDS;
 		if (pgDialect && str == "LIMIT")
 			return TOK_LIMIT;
 		return pgDialect && str == "INT8" ? TOK_INT8 : TOK_SYMBOL;

@@ -105,6 +105,8 @@ def visibility_fixture(h, previous):
         'previous_engine_sha256':hashlib.sha256((previous/'plugins/libEngine14.so').read_bytes()).hexdigest(),
         'ods_before_and_after':old_ods,'old_process_exit':old.returncode,'new_process_exit':upgraded['exit']}
 
+    native(config,'visibility_app15_install',VISIBILITY_INSTALLER.with_name('install_temporary_relations.sql').read_text(),admin=True)
+
 
 def visibility_client(config,client):
     from pgwire_1c_smoke import Libpq
@@ -184,36 +186,33 @@ def visibility_client(config,client):
         query('BEGIN',state=2); path(B_PATH,state=2); query('ROLLBACK')
         visible(a,'f')  # Native SET SEARCH_PATH has session lifetime.
         path(A_PATH)
-        query('CREATE LOCAL TEMPORARY TABLE public.other_ltt(v INTEGER) ON COMMIT PRESERVE ROWS',connection=second)
+        query('CREATE TEMP TABLE other_ltt(v INTEGER) ON COMMIT PRESERVE ROWS',connection=second)
         visible(a,'t')
-        query('DROP TABLE public.other_ltt',connection=second)
+        query('DROP TABLE pg_temp.other_ltt',connection=second)
     finally: second.close()
     record('simple_named_extended_binary_reset_independent_attachments_session_set')
     for bad in ('', 'same ', 'same\x00suffix', 'x'*64, 'Я'*64, 'x'*253):
         check(client.params('SELECT RDB$PG_RELATION_ID(CAST($1 AS VARCHAR(300)))',[bad],oids=[1043],formats=[1]),error='22021' if '\x00' in bad else '22023')
     check(client.params('SELECT RDB$PG_RELATION_ID($1)',['va.same']),rows=[[None]])
-    for order,reason in (('"va", "SYSTEM"','explicit pg_catalog'),
-                         ('"va", "$user", "pg_catalog", "SYSTEM"','$user'),
-                         ('"va", "pg_temp", "pg_catalog", "SYSTEM"','pg_temp')):
+    for order in ('"va", "SYSTEM"','"va", "$user", "pg_catalog", "SYSTEM"',
+                  '"va", "pg_temp", "pg_catalog", "SYSTEM"'):
         path(order)
         query('SELECT v FROM same',rows=[['11']])
-        visible(away,None,error='0A000')
-        observed=native(config,'visibility_path_guard_'+reason.replace(' ','_').replace('$',''),
-            f"SET SEARCH_PATH TO {order};\nSELECT RDB$PG_RELATION_ID('same') FROM SYSTEM.RDB$DATABASE;\n",error=True)
-        require(observed['sqlstates']==['0A000'] and reason in observed['output'],'Missing native guard reason')
+        visible(away,'f'); visible(a,'t')
         visible(None,None); visible('0',None)
     path(A_PATH)
     query('BEGIN',state=2)
     query('SELECT COUNT(*) FROM "SYSTEM"."MON$LOCAL_TEMPORARY_TABLES"',state=2,rows=[['0']])
-    query('CREATE LOCAL TEMPORARY TABLE va.live_ltt(v INTEGER) ON COMMIT PRESERVE ROWS',state=2)
-    query(f'SELECT {FUNCTION}({a})',error='0A000',state=3)
+    query('CREATE TEMP TABLE live_ltt(v INTEGER) ON COMMIT PRESERVE ROWS',state=2)
+    query(f'SELECT {FUNCTION}({a})',rows=[['t']],state=2)
+    query('SELECT 1/0',error='22012',state=3)
     query('SELECT 1',error='25P02',state=3)
     query('ROLLBACK')
     # LTT DDL follows native lifetime rules; the API probe tests live DROP on one transaction.
-    query('CREATE LOCAL TEMPORARY TABLE va.drop_ltt(v INTEGER) ON COMMIT PRESERVE ROWS')
+    query('CREATE TEMP TABLE drop_ltt(v INTEGER) ON COMMIT PRESERVE ROWS')
     query('SELECT v FROM same',rows=[['11']])
-    query(f'SELECT {FUNCTION}({away})',error='0A000')
-    query('DROP TABLE va.drop_ltt')
+    query(f'SELECT {FUNCTION}({away})',rows=[['f']])
+    query('DROP TABLE pg_temp.drop_ltt')
     visible(a,'t')
     record('invalid_names_path_guards_live_ltt_and_error_recovery')
     path('"vpublic", "pg_catalog", "SYSTEM"')
@@ -227,21 +226,21 @@ def visibility_client(config,client):
     report['no_select_sqlstate']=denied['sqlstate']
     path('"va", "vhidden", "pg_catalog", "SYSTEM"')
     query('SELECT v FROM same',rows=[['11']])
-    query(f'SELECT {FUNCTION}({a})',error='42501')
+    query(f'SELECT {FUNCTION}({a})',rows=[['t']])
     path('"vhidden", "pg_catalog", "SYSTEM"')
-    denied=query(f'SELECT {FUNCTION}({secret})',error='42501')
+    denied=query(f'SELECT {FUNCTION}({secret})',rows=[['f']])
     report['no_usage_sqlstate']=denied['sqlstate']
-    for role,code in (('"NONE"','42501'),('"VISIBILITY_ROLE"','')):
+    for role,visible_value in (('"NONE"','f'),('"VISIBILITY_ROLE"','t')):
         query('SET ROLE '+role)
         path('"vrole", "pg_catalog", "SYSTEM"')
-        query(f'SELECT {FUNCTION}({role_id})',rows=None if code else [['t']],error=code)
+        query(f'SELECT {FUNCTION}({role_id})',rows=[[visible_value]])
     query('SET ROLE "NONE"')
     native_role=native(config,'visibility_native_role','SET ROLE VISIBILITY_ROLE;\n'
         'SET SEARCH_PATH TO "vrole", "pg_catalog", "SYSTEM";\n'
         "SELECT RDB$PG_RELATION_ID('role_table') AS N FROM SYSTEM.RDB$DATABASE;\nROLLBACK;\nQUIT;\n")
     require(numbers(native_role['output'])==[int(role_id)-1],'Native role SCL disagrees')
     native_denied=native(config,'visibility_native_no_usage','SET SEARCH_PATH TO "vhidden", "pg_catalog", "SYSTEM";\n'
-        'SELECT RDB$PG_RELATION_ID(\'hidden\') AS N FROM SYSTEM.RDB$DATABASE;\n',error=True)
+        'SELECT \"v\" FROM \"vhidden\".\"hidden\";\n',error=True)
     require(native_denied['sqlstates']==['28000'],'Native SCL denial changed')
     for grant in (True,False):
         native(config,'visibility_usage_'+str(grant),
@@ -250,7 +249,7 @@ def visibility_client(config,client):
         fresh=Libpq(config)
         try:
             path('"vhidden", "pg_catalog", "SYSTEM"',connection=fresh)
-            query(f'SELECT {FUNCTION}({secret})',connection=fresh,rows=[['f']] if grant else None,error='' if grant else '42501')
+            query(f'SELECT {FUNCTION}({secret})',connection=fresh,rows=[['f']])
         finally: fresh.close()
     report['acl_cache_scope']='GRANT/REVOKE verified with fresh attachments (native cache boundary)'
     record('native_scl_owner_public_role_invoker_no_select_and_grant_revoke')
@@ -266,7 +265,7 @@ def visibility_client(config,client):
     query("SELECT COUNT(*) FROM pg_catalog.pg_class WHERE relname='must_not_exist'",rows=[['0']])
     query(f'SELECT 1::INT8 FROM pg_catalog.pg_class WHERE {FUNCTION}(oid) '
         f"AND relkind='r' AND relname='same' AND oid={a} LIMIT 1",rows=[['1']],oids=[20])
-    report['selected04']='SKIP: original regnamespace/pg_my_temp_schema are still unsupported; synthetic query only'
+    report['selected04']='SKIP: original regnamespace is still unsupported; synthetic query only'
     record('ddl_rollback_drop_savepoint_guard_and_synthetic_predicate')
     return report
 

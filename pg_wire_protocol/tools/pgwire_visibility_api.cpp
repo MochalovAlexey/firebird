@@ -101,14 +101,14 @@ int main(int argc, char** argv)
 			"EXECUTE STATEMENT 'SET SEARCH_PATH TO VB, SYSTEM'; RETURN NULL; END");
 		transaction->commit(&status);
 		transaction = attachment->startTransaction(&status, 0, nullptr);
-		// Prepare without a supported path must succeed, Execute must fail.
+		// Prepare is independent of the current effective relation path.
 		persistent = attachment->prepare(&status, transaction, 0,
 			"SELECT RDB$PG_RELATION_ID('SAME') FROM SYSTEM.RDB$DATABASE", 3, 0);
 		auto metadata = persistent->getOutputMetadata(&status);
 		require(metadata->getType(&status, 0) == SQL_LONG && metadata->isNullable(&status, 0),
 			"Helper metadata is not nullable INTEGER");
 		metadata->release();
-		reject();
+		require(!fetch(persistent), "Missing implicit-path lookup is not NULL");
 		exec("SET SEARCH_PATH TO VA, VB, \"pg_catalog\", SYSTEM");
 		try
 		{
@@ -141,9 +141,9 @@ int main(int argc, char** argv)
 			for (unsigned i = 0; i < 2; ++i)
 			{
 				exec("SET SEARCH_PATH TO VA, \"pg_catalog\", SYSTEM");
-				reject(changingArgument);
+				require(fetch(changingArgument) == second, "Helper resolved before evaluating argument");
 				require(query("SELECT V FROM SAME") == 22, "Argument did not change search path");
-				reject();
+				require(fetch(persistent) == second, "Prepared helper ignored changed path");
 			}
 			changingArgument->free(&status);
 		}
@@ -155,16 +155,37 @@ int main(int argc, char** argv)
 			"SELECT RDB$PG_RELATION_ID(PUBLIC.NULL_PATH()) FROM SYSTEM.RDB$DATABASE", 3, 0);
 		try
 		{
-			// A NULL result must not bypass guards, including a path changed by
-			// its expression. Preserve the original guard-before-NULL contract.
-			reject(nullArgument);
+			// An implicit catalog path is now supported, including after expression evaluation.
+			require(!fetch(nullArgument), "NULL path result is not NULL");
+			require(fetch(persistent) == second, "NULL argument did not change path");
 			nullArgument->free(&status);
 		}
 		catch (...) { nullArgument->release(); throw; }
+		exec("CREATE FUNCTION PUBLIC.NULL_LTT RETURNS VARCHAR(4) AS BEGIN "
+            "EXECUTE STATEMENT 'CREATE LOCAL TEMPORARY TABLE VA.ARG_LTT(V INTEGER)'; RETURN NULL; END");
+        auto guardedNull = attachment->prepare(&status, transaction, 0,
+            "SELECT RDB$PG_RELATION_ID(PUBLIC.NULL_LTT()) FROM SYSTEM.RDB$DATABASE", 3, 0);
+        try { reject(guardedNull); guardedNull->free(&status); }
+        catch (...) { guardedNull->release(); throw; }
+        // A NULL name still validates the effective path after expression
+        // evaluation. Real schemas may not impersonate a virtual temp namespace.
+        exec("CREATE SCHEMA \"pg_temp_999999\"");
+        exec("SET SEARCH_PATH TO \"pg_temp_999999\", VA, \"pg_catalog\", SYSTEM");
+        bool collisionRejected = false;
+        try { query("SELECT RDB$PG_RELATION_ID(CAST(NULL AS VARCHAR(4))) FROM SYSTEM.RDB$DATABASE"); }
+        catch (const FbException& error)
+        {
+            char message[1024]; master->getUtilInterface()->formatStatus(message, sizeof(message), error.getStatus());
+            require(std::strstr(message, "real schema collides"), "Wrong NULL path guard");
+            collisionRejected = true;
+        }
+        require(collisionRejected, "NULL skipped effective-path validation");
+        exec("SET SEARCH_PATH TO VA, \"pg_catalog\", SYSTEM");
+        exec("DROP SCHEMA \"pg_temp_999999\"");
 		exec("SET SEARCH_PATH TO MISSING, \"pg_catalog\", SYSTEM");
 		require(!fetch(persistent), "Missing lookup is not NULL");
-		exec("SET SEARCH_PATH TO VA, \"$user\", \"pg_catalog\", SYSTEM"); reject();
-		exec("SET SEARCH_PATH TO VA, \"pg_temp\", \"pg_catalog\", SYSTEM"); reject();
+		exec("SET SEARCH_PATH TO VA, \"$user\", \"pg_catalog\", SYSTEM"); require(fetch(persistent) == first, "Expanded path changed lookup");
+		exec("SET SEARCH_PATH TO VA, \"pg_temp\", \"pg_catalog\", SYSTEM"); require(fetch(persistent) == first, "Expanded path changed lookup");
 		exec("SET SEARCH_PATH TO VA, \"pg_catalog\", SYSTEM");
 		require(query("SELECT COUNT(*) FROM SYSTEM.MON$LOCAL_TEMPORARY_TABLES") == 0, "Unexpected LTT");
 		exec("CREATE LOCAL TEMPORARY TABLE VA.LIVE_LTT(V INTEGER) ON COMMIT PRESERVE ROWS");

@@ -17,6 +17,7 @@ SCRIPTS = (
     "sql/install_class_catalog.sql",
     "sql/install_pg_names.sql",
     "sql/install_relation_visibility.sql",
+    "sql/install_temporary_relations.sql",
 )
 
 

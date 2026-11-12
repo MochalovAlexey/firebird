@@ -633,6 +633,11 @@ Savepoint* Savepoint::rollback(thread_db* tdbb, Savepoint* prior, bool preserveL
 		}
 
 		m_lttActions.rollback(tdbb, m_transaction);
+		if (m_pgTempNamespace)
+		{
+			m_transaction->tra_attachment->finishPgTempNamespace(true);
+			m_pgTempNamespace = false;
+		}
 
 		tdbb->setTransaction(old_tran);
 	}
@@ -715,9 +720,15 @@ Savepoint* Savepoint::rollforward(thread_db* tdbb, Savepoint* prior)
 
 		// Keep the complete reverse chronology, including across row-root release.
 		if (m_next)
+		{
 			m_next->m_lttActions.prepend(m_lttActions);
+			collectPgTempNamespaceUndo(m_next->m_pgTempNamespace);
+		}
 		else
+		{
 			m_transaction->tra_ltt_undo.prepend(m_lttActions);
+			collectPgTempNamespaceUndo(m_transaction->tra_pg_temp_namespace_undo);
+		}
 
 		tdbb->setTransaction(old_tran);
 		tdbb->tdbb_flags &= ~TDBB_verb_cleanup;

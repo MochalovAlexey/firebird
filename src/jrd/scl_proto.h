@@ -53,7 +53,8 @@ bool SCL_check_function(Jrd::thread_db* tdbb, const Jrd::QualifiedName& name, Jr
 void SCL_check_filter(Jrd::thread_db* tdbb, const Jrd::MetaName& name, Jrd::SecurityClass::flags_t);
 void SCL_check_relation(Jrd::thread_db* tdbb, const Jrd::QualifiedName& name, Jrd::SecurityClass::flags_t,
 	bool protectSys = true);
-bool SCL_check_schema(Jrd::thread_db* tdbb, const Jrd::MetaName&, Jrd::SecurityClass::flags_t);
+bool SCL_check_schema(Jrd::thread_db* tdbb, const Jrd::MetaName&, Jrd::SecurityClass::flags_t,
+	bool throwOnDenied = true);
 bool SCL_check_view(Jrd::thread_db* tdbb, const Jrd::QualifiedName& name, Jrd::SecurityClass::flags_t);
 void SCL_check_role(Jrd::thread_db* tdbb, const Jrd::MetaName&, Jrd::SecurityClass::flags_t);
 Jrd::SecurityClass* SCL_get_class(Jrd::thread_db*, const Jrd::MetaName& name);

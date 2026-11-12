@@ -5483,33 +5483,10 @@ dsc* evlPgRelationId(thread_db* tdbb, const SysFunction*, const NestValueArray& 
 	const auto value = EVL_expr(tdbb, tdbb->getRequest(), args[0]);
 
 	const auto attachment = tdbb->getAttachment();
-	const auto& path = *attachment->att_schema_search_path;
-	bool catalogPresent = false;
-	for (const auto& schema : path)
-	{
-		if (schema == "$user" || schema == "pg_temp")
-		{
-			(Arg::Gds(isc_wish_list) << Arg::Gds(isc_random) <<
-				"RDB$PG_RELATION_ID does not support $user or pg_temp in SEARCH_PATH").raise();
-		}
-		catalogPresent |= schema == "pg_catalog";
-	}
-	if (!catalogPresent)
-	{
-		(Arg::Gds(isc_wish_list) << Arg::Gds(isc_random) <<
-			"RDB$PG_RELATION_ID requires explicit pg_catalog in SEARCH_PATH").raise();
-	}
-	if (attachment->att_local_temporary_tables.count())
-	{
-		(Arg::Gds(isc_wish_list) << Arg::Gds(isc_random) <<
-			"RDB$PG_RELATION_ID does not support active local temporary tables").raise();
-	}
-	for (const auto& schema : path)
-	{
-		// SCL returns false for missing schemas, and raises native access errors.
-		// Do not check SELECT or mask other failures (including damaged ACLs).
-		SCL_check_schema(tdbb, schema, SCL_usage);
-	}
+	// Preserve the guard-before-NULL/error contract after evaluating the argument.
+	// The effective path also validates reserved-schema collisions and native ACLs.
+	ObjectsArray<MetaString> path(*tdbb->getDefaultPool());
+	attachment->pgRelationPath(tdbb, path);
 
 	if (!value)
 		return nullptr;
@@ -5528,7 +5505,7 @@ dsc* evlPgRelationId(thread_db* tdbb, const SysFunction*, const NestValueArray& 
 
 	// No SQL parsing, folding or trimming: dots and quotes are name characters.
 	QualifiedName relName(MetaName(name.c_str(), name.length()));
-	attachment->qualifyExistingName(tdbb, relName, {obj_relation});
+	attachment->qualifyPgRelationName(tdbb, relName, {obj_relation});
 	const auto relation = MetadataCache::getVersioned<Cached::Relation>(tdbb, relName, CacheFlag::AUTOCREATE);
 	if (!relation)
 		return nullptr;

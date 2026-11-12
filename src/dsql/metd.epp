@@ -33,6 +33,7 @@
  */
 
 #include "firebird.h"
+#include "../dsql/DsqlStatementCache.h"
 #include <string.h>
 #include "../dsql/dsql.h"
 #include "ibase.h"
@@ -143,6 +144,7 @@ void METD_drop_collation(jrd_tra* transaction, const QualifiedName& name)
 
 void METD_drop_relation(jrd_tra* transaction, const QualifiedName& name)
 {
+
 /**************************************
  *
  *  M E T D _ d r o p _ r e l a t i o n
@@ -159,6 +161,15 @@ void METD_drop_relation(jrd_tra* transaction, const QualifiedName& name)
  *      accessing it.
  *
  **************************************/
+	// PG temporary DDL changes name resolution even for statements previously
+	// bound to a permanent homonym. Use the existing attachment cache purge.
+	const auto attachment = transaction->getAttachment();
+	if (name.schema == "PGWIRE_TEMP" && attachment->att_pg_temp_namespace &&
+		attachment->att_dsql_instance && attachment->att_dsql_instance->dbb_statement_cache)
+	{
+		attachment->att_dsql_instance->dbb_statement_cache->purge(JRD_get_thread_data(), false);
+	}
+
 	thread_db* tdbb = JRD_get_thread_data();
 
 	dsql_rel* relation;

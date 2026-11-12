@@ -276,7 +276,13 @@ namespace Jrd
 		void createLttAction(LttUndoItem::UndoType type, const QualifiedName& name,
 			LocalTemporaryTable* original = nullptr);
 		void collectLttUndo(LttUndo& target) { target.append(m_lttActions); }
-		void discardLttUndo() { m_lttActions.clear(); }
+		void discardLttUndo() { m_lttActions.clear(); m_pgTempNamespace = false; }
+		void createPgTempNamespaceUndo() { m_pgTempNamespace = true; }
+		void collectPgTempNamespaceUndo(bool& target)
+		{
+			target |= m_pgTempNamespace;
+			m_pgTempNamespace = false;
+		}
 
 		void cleanupTempData();
 		void discardTempFrameActions(const jrd_rel* relation, FB_UINT64 tempInstanceId);
@@ -378,6 +384,7 @@ namespace Jrd
 		Savepoint* m_next = nullptr;			// next savepoint in the list
 		VerbAction* m_actions = nullptr;		// verb action list
 		VerbAction* m_freeActions = nullptr;	// free verb actions
+		bool m_pgTempNamespace = false;
 		LttUndo m_lttActions;			// LTT undo action list
 	};
 

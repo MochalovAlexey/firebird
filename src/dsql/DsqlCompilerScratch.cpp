@@ -66,6 +66,12 @@ void DsqlCompilerScratch::qualifyNewName(QualifiedName& name) const
 {
 	const auto tdbb = JRD_get_thread_data();
 
+	if (pgDialect)
+	{
+		dbb->dbb_attachment->qualifyPgNewName(tdbb, name, false);
+		return;
+	}
+
 	if (!dbb->dbb_attachment->qualifyNewName(tdbb, name))
 	{
 		if (name.schema.isEmpty())
@@ -77,6 +83,15 @@ void DsqlCompilerScratch::qualifyNewName(QualifiedName& name) const
 
 void DsqlCompilerScratch::qualifyExistingName(QualifiedName& name, std::initializer_list<ObjectType> objectTypes)
 {
+	if (pgDialect && name.object.hasData() &&
+		(std::find(objectTypes.begin(), objectTypes.end(), obj_relation) != objectTypes.end() ||
+		 std::find(objectTypes.begin(), objectTypes.end(), obj_view) != objectTypes.end() ||
+		 std::find(objectTypes.begin(), objectTypes.end(), obj_index) != objectTypes.end()))
+	{
+		dbb->dbb_attachment->qualifyPgRelationName(JRD_get_thread_data(), name, objectTypes);
+		return;
+	}
+
 	if (!(name.schema.isEmpty() && name.object.hasData()))
 		return;
 

@@ -14,7 +14,8 @@ guessed Bind values. No captured SQL, parameter DETAIL or result data is saved.
 --namespaces checks the optional native schema identity registry.
 --namespace-catalog checks its public PG_NAMESPACE projection with native types.
 --class-catalog checks persistent schema-level tables/views in PG_CLASS.
---visibility checks installed persistent relation visibility and live native lookup.
+--visibility checks installed relation visibility and live native lookup.
+--temporary checks the PG temporary table lifecycle and live catalogs.
 --pg-names checks PG identifiers, native-safe source and lowercase bootstrap.
 The external subprocess watchdog configures no server timeout.
 """
@@ -357,7 +358,10 @@ def client_child():
     try:
         connection = Libpq(config)
         output = {'libpq_version': connection.pq.PQlibVersion(), 'cases': []}
-        if config.get('visibility'):
+        if config.get('temporary'):
+            from pgwire_temporary_checks import temporary_client
+            output['temporary'] = temporary_client(config, connection)
+        elif config.get('visibility'):
             from pgwire_visibility_checks import visibility_client
             output['visibility'] = visibility_client(config, connection)
         elif config.get('pg_names'):
@@ -617,7 +621,7 @@ class OneCHarness(StartupHarness):
             ready.close()
         self.native_probe('native_before')
         config = {'port':pg,'password':self.password,'baseline':args.baseline,'settings':args.settings,'strings':args.strings,
-                  'begin':args.begin, 'parameters':args.parameters, 'casts':args.casts, 'limits':args.limits, 'blobs':args.blobs, 'blob_input':args.blob_input, 'namespaces':args.namespaces, 'namespace_catalog':args.namespace_catalog, 'class_catalog':args.class_catalog, 'pg_names':args.pg_names, 'visibility':args.visibility,
+                  'begin':args.begin, 'parameters':args.parameters, 'casts':args.casts, 'limits':args.limits, 'blobs':args.blobs, 'blob_input':args.blob_input, 'namespaces':args.namespaces, 'namespace_catalog':args.namespace_catalog, 'class_catalog':args.class_catalog, 'pg_names':args.pg_names, 'visibility':args.visibility, 'temporary':args.temporary,
                   'capture_dir':str(args.capture_dir),'libpq':args.libpq, 'native_port':native,
                   'runtime':str(self.runtime),'work':str(self.work),'timeout':self.timeout}
         client_env = {key:value for key,value in self.env.items() if not key.startswith('PG')}
@@ -631,6 +635,10 @@ class OneCHarness(StartupHarness):
         if args.visibility:
             from pgwire_visibility_checks import visibility_api
             self.summary['visibility_api'] = visibility_api(self)
+        elif args.temporary:
+            from pgwire_temporary_checks import temporary_api, temporary_protocols
+            self.summary['temporary_protocols'] = temporary_protocols(self)
+            self.summary['temporary_api'] = temporary_api(self)
         elif args.namespace_catalog or args.class_catalog or args.pg_names:
             pass  # This mode's native/libpq checks run in the child; APP-10 owns restart coverage.
         elif args.namespaces:
@@ -698,8 +706,9 @@ def main():
     mode.add_argument('--parameters',action='store_true',help='test consecutive numbered parameters')
     mode.add_argument('--casts',action='store_true',help='test PG postfix casts through native CastNode')
     mode.add_argument('--limits',action='store_true',help='test PG literal SELECT limits through native RowsClause')
+    mode.add_argument('--temporary',action='store_true',help='test PG temporary relations and catalogs')
     mode.add_argument('--visibility',action='store_true',help='test persistent relation visibility')
-    parser.add_argument('--previous-firebird-dir',type=Path,help='APP-13 runtime for the visibility upgrade check')
+    parser.add_argument('--previous-firebird-dir',type=Path,help='accepted previous runtime for visibility/temporary upgrade checks')
     mode.add_argument('--pg-names',action='store_true',help='test PG naming, native-safe sources and lowercase bootstrap')
     mode.add_argument('--class-catalog',action='store_true',help='test persistent schema-level PG_CLASS rows with native types')
     mode.add_argument('--namespace-catalog',action='store_true',help='test public namespace view with native BIGINT/VARCHAR types')
@@ -714,8 +723,8 @@ def main():
         parser.error('--work-dir must be new and outside --firebird-dir')
     if not re.fullmatch(r'[A-Za-z0-9_./-]+',str(work)) or not 0 < args.timeout <= 300:
         parser.error('use an ASCII work path and an external timeout in (0,300] seconds')
-    if args.visibility and not args.previous_firebird_dir:
-        parser.error('--visibility requires --previous-firebird-dir')
+    if (args.visibility or args.temporary) and not args.previous_firebird_dir:
+        parser.error('--visibility/--temporary requires --previous-firebird-dir')
     if args.baseline and not args.capture_dir:
         parser.error('--baseline requires --capture-dir')
     if args.capture_dir:
@@ -726,8 +735,8 @@ def main():
     work.mkdir(mode=0o700)
     harness = OneCHarness(source,work.resolve(),args.timeout)
     harness.summary.pop('passed')
-    harness.summary.update(completed=False, mode='visibility' if args.visibility else 'pg_names' if args.pg_names else 'class_catalog' if args.class_catalog else 'namespace_catalog' if args.namespace_catalog else 'namespaces' if args.namespaces else 'blob_input' if args.blob_input else 'blobs' if args.blobs else 'limits' if args.limits else 'casts' if args.casts else 'parameters' if args.parameters else 'begin' if args.begin else 'strings' if args.strings else 'settings' if args.settings else 'baseline' if args.baseline else 'select_without_from',
-        stage='Persistent relation visibility' if args.visibility else 'PG identifiers and native-safe stored SQL' if args.pg_names else 'Persistent relation catalog with native IDs and types' if args.class_catalog else 'Public namespace projection with native types' if args.namespace_catalog else 'Native schema identity registry' if args.namespaces else 'Bytea input via native VARCHAR OCTETS' if args.blob_input else 'Binary BLOB output as bytea' if args.blobs else 'PG literal SELECT limits' if args.limits else 'PG postfix casts' if args.casts else 'Consecutive numbered parameters' if args.parameters else 'PG BEGIN / native transactions' if args.begin else 'standard_conforming_strings / revision 2' if args.strings else
+    harness.summary.update(completed=False, mode='temporary' if args.temporary else 'visibility' if args.visibility else 'pg_names' if args.pg_names else 'class_catalog' if args.class_catalog else 'namespace_catalog' if args.namespace_catalog else 'namespaces' if args.namespaces else 'blob_input' if args.blob_input else 'blobs' if args.blobs else 'limits' if args.limits else 'casts' if args.casts else 'parameters' if args.parameters else 'begin' if args.begin else 'strings' if args.strings else 'settings' if args.settings else 'baseline' if args.baseline else 'select_without_from',
+        stage='PG temporary relations and catalogs' if args.temporary else 'Persistent relation visibility' if args.visibility else 'PG identifiers and native-safe stored SQL' if args.pg_names else 'Persistent relation catalog with native IDs and types' if args.class_catalog else 'Public namespace projection with native types' if args.namespace_catalog else 'Native schema identity registry' if args.namespaces else 'Bytea input via native VARCHAR OCTETS' if args.blob_input else 'Binary BLOB output as bytea' if args.blobs else 'PG literal SELECT limits' if args.limits else 'PG postfix casts' if args.casts else 'Consecutive numbered parameters' if args.parameters else 'PG BEGIN / native transactions' if args.begin else 'standard_conforming_strings / revision 2' if args.strings else
             'Fixed profiles and syntax-only startup settings' if args.settings else '1C observations / first engine slice',
         capture_dir=str(args.capture_dir), workers=6,
         module_sha256=hashlib.sha256((source/'plugins/libPgWire.so').read_bytes()).hexdigest(),
@@ -739,7 +748,10 @@ def main():
         ['git','diff','HEAD','--','src'],cwd=repo)).hexdigest()
     try:
         harness.prepare()
-        if args.visibility:
+        if args.temporary:
+            from pgwire_temporary_checks import temporary_fixture
+            temporary_fixture(harness,args.previous_firebird_dir)
+        elif args.visibility:
             from pgwire_visibility_checks import visibility_fixture
             visibility_fixture(harness,args.previous_firebird_dir)
         elif args.pg_names:
@@ -789,7 +801,9 @@ def main():
             harness.summary['compat_script_sha256'] = hashlib.sha256(compat.read_bytes()).hexdigest()
         harness.run(args)
         harness.summary['completed'] = True
-        if args.visibility:
+        if args.temporary:
+            harness.summary['temporary_passed'] = True
+        elif args.visibility:
             harness.summary['visibility_passed'] = True
         elif args.pg_names:
             harness.summary['pg_names_passed'] = True

@@ -117,6 +117,7 @@ public:
 		  procedures(p),
 		  functions(p)
 	{
+		pgDialect = aMainScratch && aMainScratch->pgDialect;
 	}
 
 protected:
@@ -338,6 +339,7 @@ public:
 	USHORT inHavingClause = 0;				// processing "having clause"
 	USHORT inOrderByClause = 0;				// processing "order by clause"
 	USHORT errorHandlers = 0;				// count of active error handlers
+	bool pgDialect = false;
 	USHORT clientDialect = 0;				// dialect passed into the API call
 	USHORT inOuterJoin = 0;					// processing inside outer-join part
 	Firebird::ObjectsArray<QualifiedName> aliasRelationPrefix;	// prefix for every relation-alias.

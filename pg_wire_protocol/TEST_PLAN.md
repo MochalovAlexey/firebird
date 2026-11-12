@@ -1,27 +1,30 @@
 # План приёмки wire plugins и PostgreSQL endpoint
 
-## APP-15: ожидает review native prerequisite NAT-06
+## APP-15: полный согласованный профиль
 
-12 ноября [native undo fix](1c/LTT_METADATA_UNDO_TASK.md) прошёл 44 SQL сценария,
-38 OO assertions, fault probes и существующие transaction/visibility регрессии.
-Baseline теми же проверками: 23 FAIL / 21 PASS. Покрыты threshold (оба пути в GDB),
-DDL до/после root release, ALTER/DROP ordering, NO AUTO UNDO, retaining и force rollback.
-Новые native probes: `tools/native_ltt_undo_checks.py` и `tools/native_ltt_undo_api.cpp`;
-точные команды, expected/actual и ограничения — в VALIDATION. Полная матрица APP-15
-ниже остаётся невыполненной. Native user-savepoint LTT DDL сейчас отвергается;
-positive PG-owned проверки добавляются в APP-15 вместе с SQL-10.
-P2 APP-14 исправлен отдельно; существующий OO probe дополнен повторным Execute
-PSQL-аргумента, меняющего путь, NULL/error contract и cleanup ветки неуспеха.
-Oracle и точные результаты — в начале [VALIDATION](VALIDATION.md).
+Реализация и локальная приёмка выполнены; рабочий diff ждёт review. Повторяемая
+команда — `tools/pgwire_1c_smoke.py --temporary --firebird-dir RUNTIME
+--previous-firebird-dir ACCEPTED_NAT06_RUNTIME --work-dir NEW_TMP_DIR --timeout 300`.
+Продолжает существующий harness: `pgwire_temporary_checks.py`, raw ExtendedClient
+и `pgwire_temporary_api.cpp`, без отдельного test framework.
 
-[Инструкция и полная матрица](1c/TEMPORARY_RELATIONS_TASK.md): PG TEMP через native
-LTT, PRESERVE/DELETE и отказ ON COMMIT DROP, DML/индексы, undo/rollback/savepoints,
-две сессии, pg_temp и shadowing, живые каталоги после MON, pg_my_temp_schema и
-visibility, права, cache/RESET/cleanup, installer/upgrade без ODS change.
-Регрессия P2 APP-14 включена в существующий visibility OO probe.
-Проверить rollback также после большого DML, способного освободить root savepoint.
-APP-15 ещё не реализован. Исходные selected04/12/13 не объявлять PASS на изменённых
-fixtures: regnamespace и типы 1С остаются отдельным крупным этапом.
+Проверены все TEMP spellings, qualifier/unsupported boundaries, `_`/quoted/Unicode,
+source reprepare, DML/indexes/коллизии, PRESERVE/DELETE/savepoints/rollback, две
+сессии, namespace undo/empty state/IDs, live catalogs после MON, NULL/text/binary,
+read-only views, path/USAGE/$user/PUBLIC/role и SCL без SELECT. Cache включён:
+named Bind после DDL/path/RESET, Parse/Describe/Close без allocation, paused portal,
+1030 public IDs при reuse 1024 native IDs и отдельный old native prepared handle.
+OO: NO AUTO UNDO, force, retaining, большой root (300000 rows), native1/2/3 defaults,
+DDL guard/stale target, MAKE_DBKEY и allocator exhaustion. Installer: fresh через
+install_compat.py, upgrade с принятого runtime/ODS14.0, rollback/repeat/collisions,
+низкий/высокий counter, native container guard, exact provider contract negatives.
+
+Существующие names/strings/visibility/BEGIN регрессии PASS; P2 guard-after-argument
+сохранён и проверен, включая NULL после создания unmanaged LTT аргументом.
+NAT-01…04 не повторялись; исходный NAT-05 reproducer не изменён и не объявлен
+исправленным. Oracle 18.6 переиспользован. Точные commands/hashes/результаты и
+cleanup — [VALIDATION](VALIDATION.md). Исходные selected04/12/13 и реальная 1С/Гилёв
+не входят в PASS этой матрицы.
 
 ## APP-14: приёмка visibility
 

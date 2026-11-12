@@ -270,8 +270,21 @@ void DsqlStatementCache::buildStatementKey(thread_db* tdbb, RefStrPtr& key, cons
 	const SSHORT charSetId = isInternalRequest ? CS_METADATA : attachment->att_charset;
 	const int debugOptions = (int) attachment->getDebugOptions().getDsqlKeepBlr();
 
+	// PG name resolution skips schemas without USAGE and expands $user.
+	// Roles therefore affect the selected relation, not only access to a
+	// previously compiled plan. Reuse the existing permission identity key.
+	string pgIdentity;
+	if (clientDialect == SQL_DIALECT_PG)
+	{
+		buildVerifyKey(tdbb, pgIdentity, isInternalRequest);
+		pgIdentity += '\0';
+		pgIdentity += attachment->getUserName().c_str();
+		pgIdentity += '\0';
+		pgIdentity += attachment->getEffectiveUserName().c_str();
+	}
+
 	key = FB_NEW_POOL(getPool()) RefString(getPool());
-	key->resize(2 + sizeof(charSetId) + text.length() + 1 + searchPathLen + 1);
+	key->resize(2 + sizeof(charSetId) + text.length() + 1 + searchPathLen + pgIdentity.length() + 1);
 
 	char* p = key->begin();
 	*p++ = pgStringEscapes;
@@ -287,7 +300,8 @@ void DsqlStatementCache::buildStatementKey(thread_db* tdbb, RefStrPtr& key, cons
 		p += pathItem.length() + 1;
 	}
 
-	*p = '\0';
+	memcpy(p, pgIdentity.c_str(), pgIdentity.length() + 1);
+	p += pgIdentity.length();
 
 	fb_assert(p + 1 == key->end());
 }

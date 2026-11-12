@@ -207,6 +207,7 @@ public:
 	// Raise an exception for bad permission.
 	// If returns false permissions will be check in old style at vio level as well as while direct RDB$ tables modify.
 	virtual void checkPermission(thread_db* tdbb) = 0;
+	virtual bool isPgTemporaryDdl(thread_db* tdbb) const { return false; }
 
 	// Set the scratch's transaction when executing a node. Fact of accessing the scratch during
 	// execution is a hack.

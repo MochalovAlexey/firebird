@@ -610,6 +610,8 @@ public:
 
 	Firebird::LeftPooledMap<QualifiedName, LocalTemporaryTable*> att_local_temporary_tables;
 	std::optional<USHORT> att_next_ltt_id;		// Next available LTT relation ID
+	FB_UINT64 att_pg_temp_namespace = 0;
+	jrd_tra* att_pg_temp_initializer = nullptr;
 
 	Firebird::RefPtr<Firebird::IReplicatedSession> att_replicator;
 	Firebird::AutoPtr<Replication::TableMatcher> att_repl_matcher;
@@ -795,6 +797,22 @@ public:
 
 	bool qualifyNewName(thread_db* tdbb, QualifiedName& name,
 		const Firebird::ObjectsArray<Firebird::MetaString>* schemaSearchPath = nullptr);
+	static bool isPgTempSchema(const MetaName& name);
+	MetaName pgTempSchemaName() const;
+	void checkPgRelationProfile(thread_db* tdbb) const;
+	void pgRelationPath(thread_db* tdbb, Firebird::ObjectsArray<Firebird::MetaString>& path,
+		const Firebird::ObjectsArray<Firebird::MetaString>* explicitPath = nullptr);
+	void qualifyPgRelationName(thread_db* tdbb, QualifiedName& name,
+		std::initializer_list<ObjectType> objTypes,
+		const Firebird::ObjectsArray<Firebird::MetaString>* explicitPath = nullptr);
+	void qualifyPgNewName(thread_db* tdbb, QualifiedName& name, bool temporary);
+	FB_UINT64 allocatePgTempId(thread_db* tdbb);
+	void finishPgTempNamespace(bool rollback)
+	{
+		if (rollback)
+			att_pg_temp_namespace = 0;
+		att_pg_temp_initializer = nullptr;
+	}
 
 	void qualifyExistingName(thread_db* tdbb, QualifiedName& name,
 		std::initializer_list<ObjectType> objTypes,

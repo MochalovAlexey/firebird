@@ -1,18 +1,18 @@
 # Записанный профиль 1С: этапы совместимости
 
-12 ноября: [APP-15: рабочий цикл PG temporary tables](TEMPORARY_RELATIONS_TASK.md)
-ожидает review [native undo fix NAT-06](LTT_METADATA_UNDO_TASK.md). Исправлены потеря
-metadata undo после освобождения row-root и порядок ALTER→DROP; 44 SQL сценария,
-OO/fault probes и transaction/visibility регрессии PASS. После review продолжить APP-15; необходимые PG-owned
-user-savepoint DDL guards теперь описаны явно (SQL-10).
-P2 APP-14 в `11dee63d2a` прошёл review: аргумент вычисляется до чтения attachment
-state и guards. Oracle, reproducer и проверки — в начале [VALIDATION](../VALIDATION.md).
+
+12 ноября: **APP-15 реализован, оставлен для review без коммита** поверх принятого
+NAT-06 (`516f55bbb5`) и P2 APP-14 (`11dee63d2a`). PG TEMP использует native LTT:
+PRESERVE/DELETE, DML/индексы, rollback/savepoints, свой pg_temp namespace и живые
+каталоги. Поиск SELECT и visibility согласован по temp/path/USAGE/$user.
+[Контракт](../COMPATIBILITY.md#app-15-временные-отношения) · [проверки](../VALIDATION.md#12-ноября-2026-app-15-полный-цикл-поддержанных-pg-temporary-tables).
+Типы 1С, regnamespace, ON COMMIT DROP и реальная 1С/Гилёв остаются открытыми.
 
 ## Общая установка SQL совместимости
 
-[install_compat.py](install_compat.py) устанавливает все шесть текущих SQL-скриптов
+[install_compat.py](install_compat.py) устанавливает все семь текущих SQL-скриптов
 в порядке зависимостей на указанную существующую базу. Нужны Python 3 и native
-`isql` из этого fork с поддержкой APP-14; запускать владельцем/администратором
+`isql` из этого fork с поддержкой APP-15; запускать владельцем/администратором
 без конкурентного DDL. Например, через родной сетевой порт Firebird:
 
 ```sh
@@ -28,7 +28,7 @@ python3 pg_wire_protocol/1c/install_compat.py \
 самого установщика, поэтому запуск не зависит от текущего каталога.
 
 Порядок: namespace registry → compat.sql → namespace catalog → class catalog →
-lowercase PG names → relation visibility. Каждый файл выполняется native isql
+lowercase PG names → relation visibility → temporary relations. Каждый файл выполняется native isql
 с BAIL ON, отключённым AUTODDL, UTF8 и client dialect 3. При первой ошибке следующие
 файлы не запускаются; сообщение содержит имя неуспешного шага и ненулевой exit code.
 **Это первоначальная установка, не повторяемая миграция:** повтор полного набора
@@ -41,6 +41,31 @@ lowercase PG names → relation visibility. Каждый файл выполня
 При добавлении нового SQL installer включать его в список SCRIPTS общего
 установщика и проверять порядок зависимостей. Отдельные скрипты ниже остаются
 доступны для явно выбранного этапа установки.
+
+## APP-15: временные отношения
+
+Реализован весь согласованный профиль; рабочий diff оставлен для review. Native LTT
+обеспечивают PG TEMP/pg_temp, PRESERVE/DELETE, DML/индексы, rollback/savepoints и
+изоляцию сессий. Живые pg_class/pg_namespace/pg_my_temp_schema и visibility читают
+тот же attachment state. `_` names, effective relation path, USAGE/$user и cache
+проверены вместе с lifecycle, установкой и native регрессиями.
+
+На исправной базе APP-14 выполнить владельцем/администратором без concurrent DDL:
+
+```sh
+isql -bail -user OWNER -i pg_wire_protocol/1c/sql/install_temporary_relations.sql DATABASE_ALIAS
+```
+
+Это один атомарный переход, без автоматического repair и без ODS migration.
+Повтор/чужой контейнер/изменённые prerequisite projections дают отказ. Прежние
+IDs/grants сохраняются; sequence gaps после rollback допустимы. Общий установщик
+включает новый файл седьмым для первоначальной установки.
+
+[Полный контракт и права allocator](../COMPATIBILITY.md#app-15-временные-отношения),
+[приёмка и hashes](../VALIDATION.md#12-ноября-2026-app-15-полный-цикл-поддержанных-pg-temporary-tables).
+ON COMMIT DROP, regnamespace, типы 1С/serial/defaults, ANALYZE/fasttrun и исходные
+selected04/12/13 остаются открытыми. Отдельно найден прежний assertion persistent
+view без FROM (NAT-07); сохранён reproducer, исправление не включено в APP-15.
 
 ## APP-13: имена и установка lowercase профиля
 
@@ -96,8 +121,7 @@ ALTER SESSION RESET восстанавливает public-first профиль. 
 SEARCH_PATH действует до явного изменения/reset. Полный PG search_path/USAGE,
 regnamespace/oid/name, visibility/temp и selected04/10/11 остаются открытыми.
 Quoted trailing space/NUL отвергаются, native длины/лексика сохранены; нет U&/ICU
-или усечения 63 bytes. Начальный `_` в unquoted имени пока трактуется как introducer:
-SQL-09 фиксирует необходимое расширение для имён 1С вроде `_ExtensionsInfo`.
+или усечения 63 bytes. APP-15 разрешает начальный `_` в unquoted PG имени, сохраняя charset introducers (SQL-09).
 Stored SQL quotes folded identifiers и сохраняет literal
 канонизацию, в том числе strings=off. Старые `$n`/`::`/LIMIT root guards остаются.
 
@@ -122,21 +146,20 @@ OID → NULL, отсутствие в пути или shadowing → FALSE, со�
 SQL SECURITY INVOKER; наличие SELECT права не проверяется. Helper использует
 штатные SCL и resolver, без нового API/BLR opcode/ODS/registry/codecs.
 
-Профиль требует явного lowercase `pg_catalog`, отсутствия `$user`/`pg_temp` и
-native LTT в этом attachment; нарушение → 0A000. Каждая существующая schema пути
-должна иметь USAGE по native SCL, иначе обычный отказ в доступе; отсутствующие
-schemas пропускаются. Проверки выполняются на каждом Execute. Порядок
-`"public", "pg_catalog", "SYSTEM"` и session lifetime SET/RESET прежние.
-Native подготовленный SELECT может сохранять прежнюю привязку: SELECT oracle
-после смены пути готовится заново, helper этого не требует.
+После APP-15 общий resolver поддерживает implicit/explicit pg_temp, implicit
+pg_catalog, exact $user и пропуск missing/no-USAGE schemas. Unmanaged native LTT/GTT
+и packaged relations остаются за профилем с явным отказом. Порядок explicit path,
+initial/RESET и session lifetime SET сохранены. Helper читает состояние на Execute;
+старый native SELECT может сохранять прежнюю привязку, свежий Prepare/wire Bind
+разрешает имя заново.
 
 Полный [контракт](../COMPATIBILITY.md#app-14-видимость-постоянных-отношений),
 [задание](RELATION_VISIBILITY_TASK.md), результаты — [VALIDATION](../VALIDATION.md).
 Review `8ffd22cb76`: 174 libpq results / 46 OO checks PASS; найденный P2 при
-аргументе, меняющем состояние attachment, исправлен 12 ноября в рабочем diff.
+аргументе, меняющем состояние attachment, исправлен в принятом `11dee63d2a`.
 Текущий guard проверяет состояние после EVL_expr, в том числе при NULL результате.
-Исходный selected04 всё ещё требует regnamespace и pg_my_temp_schema; синтетическая
-замена namespace predicate не считается его PASS. APP-01/02/03/04/06 и SQL-09 открыты.
+Исходный selected04 всё ещё требует regnamespace; pg_my_temp_schema добавлен APP-15; синтетическая
+замена namespace predicate не считается его PASS. APP-01/02/03/04/06 остаются открытыми.
 
 Незавершённые этапы, ограничения частичных реализаций и пробелы приёмки ведутся
 в общем [BACKLOG](../BACKLOG.md). Обновлять его после каждого этапа и review.
@@ -456,7 +479,7 @@ physical layout по фактическим длинам Bind. Engine созда
 | 3. Открытие базы | APP-12 даёт pg_class для постоянных таблиц/views; полный catalog, pg_database/visibility и служебные таблицы 1С ещё требуют реализации и настоящих данных |
 | 4. Типы и функции | Binary BLOB output выдаётся как bytea; input до 65533 decoded bytes поддержан. Большие input и SQL bytea type/casts/storage/index semantics не добавлены. mchar/mvarchar, regnamespace и BINROWVER остаются открытыми |
 | 5. Транзакции/конкуренция | PG BEGIN без опций использует реальные READ CONSISTENCY транзакции; native controls сохраняются; advisory locks и PG timeout semantics ещё не реализованы |
-| 6. Временные объекты/нагрузка | PG temporary DDL, serial4, ANALYZE и fasttrun_ext ещё не реализованы; нужен эталон их эффектов |
+| 6. Временные объекты/нагрузка | PG TEMP поддержан в профиле APP-15; serial4, ANALYZE и fasttrun_ext ещё не реализованы |
 
 Реализован [APP-10: внутренний namespace registry](NAMESPACE_REGISTRY_TASK.md),
 ревизия `5bbdaa763d` прошла review и независимую приёмку, см. VALIDATION.
@@ -491,7 +514,7 @@ bootstrap/catalog labels, initial path/RESET и savepoint journal. Native1/2/3
 Ревизия `4520f371e9` прошла review и независимые names/strings проверки;
 установка и новый контракт описаны выше. APP-14 с ограниченной visibility
 проверен: целевая матрица PASS, P2 исправлен отдельно 12.11. Инструкция APP-15 выше
-нацелена на общий TEMP lifecycle, но ожидает review NAT-06; regnamespace/типы 1С,
+нацелена на общий TEMP lifecycle и готова к возобновлению после принятия NAT-06; regnamespace/типы 1С,
 transactional search_path и полные каталоги остаются открытыми.
 
 ## Постоянные таблицы и представления в PG_CLASS: APP-12

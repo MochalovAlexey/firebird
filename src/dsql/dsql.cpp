@@ -628,6 +628,7 @@ static RefPtr<DsqlStatement> prepareStatement(thread_db* tdbb, dsql_dbb* databas
 			Jrd::ContextPoolHolder scratchContext(tdbb, scratchPool);
 
 			scratch = FB_NEW_POOL(*scratchPool) DsqlCompilerScratch(*scratchPool, database, transaction);
+			scratch->pgDialect = clientDialect == SQL_DIALECT_PG;
 			scratch->clientDialect = clientDialect == SQL_DIALECT_PG ? SQL_DIALECT_V6 : clientDialect;
 
 			if (isInternalRequest)

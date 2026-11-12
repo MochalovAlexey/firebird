@@ -9657,6 +9657,84 @@ string CreateRelationNode::internalPrint(NodePrinter& printer) const
 	return "CreateRelationNode";
 }
 
+DdlNode* CreateRelationNode::dsqlPass(DsqlCompilerScratch* dsqlScratch)
+{
+	if (pgTemporary)
+	{
+		if (querySelectExpr || externalFile || name.package.hasData() || ssDefiner.isAssigned() || replicationState.isAssigned())
+			(Arg::Gds(isc_wish_list) << Arg::Gds(isc_random) << "PG TEMP supports explicit columns without SQL SECURITY or PUBLICATION").raise();
+		JRD_get_thread_data()->getAttachment()->qualifyPgNewName(JRD_get_thread_data(), name, true);
+		if (!tempRowsFlag)
+			tempRowsFlag = REL_temp_conn;
+	}
+	else
+		dsqlScratch->qualifyNewName(name);
+	protectSystemSchema(name.schema, obj_relation);
+	dsqlScratch->ddlSchema = name.schema;
+	return RelationNode::dsqlPass(dsqlScratch);
+}
+
+// The prepared AST carries intent, but ownership is always checked against the
+// current attachment map before DDL executes (including stale native handles).
+static bool pgLttTarget(thread_db* tdbb, const QualifiedName& name, bool index = false)
+{
+	const auto attachment = tdbb->getAttachment();
+	LocalTemporaryTable* ltt = nullptr;
+	if (index)
+	{
+		LocalTemporaryTable::Index* lttIndex = nullptr;
+		MET_get_ltt_index(attachment, name, &ltt, &lttIndex);
+	}
+	else if (const auto ptr = attachment->att_local_temporary_tables.get(name))
+		ltt = *ptr;
+	if (name.schema == "PGWIRE_TEMP" && ltt && !ltt->pgTemporary)
+		(Arg::Gds(isc_wish_list) << Arg::Gds(isc_random) << "PG DDL target is not a PG-owned temporary table").raise();
+	return ltt && ltt->pgTemporary;
+}
+
+bool AlterRelationNode::isPgTemporaryDdl(thread_db* tdbb) const
+{
+	return pgLttTarget(tdbb, name);
+}
+
+bool DropRelationNode::isPgTemporaryDdl(thread_db* tdbb) const
+{
+	return !view && pgLttTarget(tdbb, name);
+}
+
+bool CreateIndexNode::isPgTemporaryDdl(thread_db* tdbb) const
+{
+	return pgLttTarget(tdbb, relation->dsqlName);
+}
+
+bool AlterIndexNode::isPgTemporaryDdl(thread_db* tdbb) const
+{
+	return pgLttTarget(tdbb, indexName, true);
+}
+
+bool DropIndexNode::isPgTemporaryDdl(thread_db* tdbb) const
+{
+	return pgLttTarget(tdbb, indexName, true);
+}
+
+static void checkPgTempName(thread_db* tdbb, const QualifiedName& name)
+{
+	const auto attachment = tdbb->getAttachment();
+	for (const auto& entry : attachment->att_local_temporary_tables)
+	{
+		const auto ltt = entry.second;
+		if (!ltt->pgTemporary)
+			continue;
+		if (ltt->name == name)
+			(Arg::Gds(isc_no_dup) << name.toQuotedString()).raise();
+		for (const auto& index : ltt->indexes)
+		{
+			if (index.name == name)
+				(Arg::Gds(isc_no_dup) << name.toQuotedString()).raise();
+		}
+	}
+}
+
 void CreateRelationNode::checkPermission(thread_db* tdbb)
 {
 	SCL_check_create_access(tdbb, obj_relations, name.schema);
@@ -9673,6 +9751,21 @@ void CreateRelationNode::execute(thread_db* tdbb, DsqlCompilerScratch* dsqlScrat
 	auto* metaTransaction = tdbb->getAttachment()->getMetaTransaction(tdbb);
 
 	AutoSetRestoreFlag dfwFlags(&tdbb->tdbb_flags, TDBB_use_db_page_space, true);
+
+	if (pgTemporary)
+	{
+		attachment->checkPgRelationProfile(tdbb);
+		if (const auto existing = attachment->att_local_temporary_tables.get(name))
+		{
+			if (!(*existing)->pgTemporary)
+				(Arg::Gds(isc_wish_list) << Arg::Gds(isc_random) << "PG TEMP target is unmanaged").raise();
+			if (createIfNotExistsOnly)
+				return;
+		}
+		else if (MetadataCache::getVersioned<Cached::Relation>(tdbb, name, CacheFlag::AUTOCREATE))
+			(Arg::Gds(isc_wish_list) << Arg::Gds(isc_random) << "PG TEMP target is an unmanaged relation").raise();
+		checkPgTempName(tdbb, name);
+	}
 
 	if (createIfNotExistsOnly && !DYN_UTIL_check_unique_name_nothrow(tdbb, name, obj_relation))
 		return;
@@ -10248,7 +10341,8 @@ void CreateRelationNode::defineLocalTempTable(thread_db* tdbb, DsqlCompilerScrat
 				 Arg::Str("Too many local temporary tables exist already"));
 	}
 
-	const auto ltt = FB_NEW_POOL(attPool) LocalTemporaryTable(attPool, name);
+	AutoPtr<LocalTemporaryTable> owner(FB_NEW_POOL(attPool) LocalTemporaryTable(attPool, name));
+	const auto ltt = owner.get();
 	ltt->relationType = tempRowsFlag.value_or(REL_temp_tran) == REL_temp_tran ? rel_temp_delete : rel_temp_preserve;
 
 	USHORT position = 0;
@@ -10306,7 +10400,6 @@ void CreateRelationNode::defineLocalTempTable(thread_db* tdbb, DsqlCompilerScrat
 			fb_assert(false);
 	}
 
-	attachment->att_local_temporary_tables.put(name, ltt);
 
 	// Assign LTT relation ID
 
@@ -10335,8 +10428,33 @@ void CreateRelationNode::defineLocalTempTable(thread_db* tdbb, DsqlCompilerScrat
 
 	ltt->relationId = attachment->att_next_ltt_id.value();
 
+	if (pgTemporary)
+	{
+		if (attachment->att_pg_temp_initializer && attachment->att_pg_temp_initializer != transaction)
+			(Arg::Gds(isc_wish_list) << Arg::Gds(isc_random) << "PG temporary namespace is being initialized by another transaction").raise();
+		const auto namespaceId = attachment->att_pg_temp_namespace ? attachment->att_pg_temp_namespace :
+			attachment->allocatePgTempId(tdbb);
+		if (!attachment->att_pg_temp_namespace)
+		{
+			MetaName publicNamespace;
+			publicNamespace.printf("pg_temp_%" UQUADFORMAT, namespaceId);
+			if (MET_check_schema_exists(tdbb, publicNamespace))
+				(Arg::Gds(isc_random) << "A real schema collides with the new PG temporary namespace").raise();
+		}
+		ltt->pgRelationId = attachment->allocatePgTempId(tdbb);
+		ltt->pgTemporary = true;
+		if (!attachment->att_pg_temp_namespace)
+		{
+			transaction->tra_save_point->createPgTempNamespaceUndo();
+			attachment->att_pg_temp_namespace = namespaceId;
+			attachment->att_pg_temp_initializer = transaction;
+		}
+	}
+
 	// Register undo action with the savepoint
 	transaction->tra_save_point->createLttAction(LttUndoItem::LTT_UNDO_CREATE, name);
+	attachment->att_local_temporary_tables.put(name, ltt);
+	owner.release();
 
 	// Mark LTT as having uncommitted changes
 	ltt->hasPendingChanges = true;
@@ -10363,6 +10481,11 @@ void AlterRelationNode::checkPermission(thread_db* tdbb)
 void AlterRelationNode::execute(thread_db* tdbb, DsqlCompilerScratch* dsqlScratch,
 	jrd_tra* transaction)
 {
+	if (dsqlScratch->pgDialect && name.schema == "PGWIRE_TEMP" && !isPgTemporaryDdl(tdbb))
+	{
+		(Arg::Gds(isc_relnotdef) << name.toQuotedString()).raise();
+	}
+
 	const auto attachment = tdbb->getAttachment();
 	auto* metaTransaction = attachment->getMetaTransaction(tdbb);
 
@@ -11729,6 +11852,16 @@ void DropRelationNode::checkPermission(thread_db* tdbb)
 void DropRelationNode::execute(thread_db* tdbb, DsqlCompilerScratch* dsqlScratch,
 	jrd_tra* transaction)
 {
+	if (dsqlScratch->pgDialect && name.schema == "PGWIRE_TEMP" && !isPgTemporaryDdl(tdbb))
+	{
+		if (silent && !MetadataCache::getVersioned<Cached::Relation>(tdbb, name, CacheFlag::AUTOCREATE))
+			return;
+		(Arg::Gds(isc_relnotdef) << name.toQuotedString()).raise();
+	}
+
+	if (cascade && !isPgTemporaryDdl(tdbb))
+		(Arg::Gds(isc_wish_list) << Arg::Gds(isc_random) << "CASCADE is supported only for PG-owned temporary tables").raise();
+
 	// run all statements under savepoint control
 	AutoSavePoint savePoint(tdbb, transaction);
 
@@ -14133,6 +14266,11 @@ void CreateIndexNode::checkPermission(thread_db* tdbb)
 // Define an index.
 void CreateIndexNode::execute(thread_db* tdbb, DsqlCompilerScratch* dsqlScratch, jrd_tra* transaction)
 {
+	if (dsqlScratch->pgDialect && relation->dsqlName.schema == "PGWIRE_TEMP" && !isPgTemporaryDdl(tdbb))
+	{
+		(Arg::Gds(isc_relnotdef) << relation->dsqlName.toQuotedString()).raise();
+	}
+
 	AutoSetRestoreFlag dfwFlags(&tdbb->tdbb_flags, TDBB_use_db_page_space, true);
 
 	Attachment* const attachment = transaction->tra_attachment;
@@ -14256,6 +14394,9 @@ void CreateIndexNode::defineLocalTempIndex(thread_db* tdbb, DsqlCompilerScratch*
 		}
 	}
 
+	if (ltt->pgTemporary)
+		checkPgTempName(tdbb, name);
+
 	// Also check that the index name doesn't conflict with persistent indexes
 	// in the same schema
 	if (!DYN_UTIL_check_unique_name_nothrow(tdbb, name, obj_index))
@@ -14377,6 +14518,9 @@ void AlterIndexNode::checkPermission(thread_db* tdbb)
 
 void AlterIndexNode::execute(thread_db* tdbb, DsqlCompilerScratch* dsqlScratch, jrd_tra* transaction)
 {
+	if (dsqlScratch->pgDialect && indexName.schema == "PGWIRE_TEMP" && !isPgTemporaryDdl(tdbb))
+		(Arg::Gds(isc_wish_list) << Arg::Gds(isc_random) << "Index target is not a PG-owned temporary table").raise();
+
 	AutoSetRestoreFlag dfwFlags(&tdbb->tdbb_flags, TDBB_use_db_page_space, true);
 
 	// run all statements under savepoint control
@@ -14706,6 +14850,9 @@ void DropIndexNode::checkPermission(thread_db* tdbb)
 
 void DropIndexNode::execute(thread_db* tdbb, DsqlCompilerScratch* dsqlScratch, jrd_tra* transaction)
 {
+	if (dsqlScratch->pgDialect && indexName.schema == "PGWIRE_TEMP" && !isPgTemporaryDdl(tdbb))
+		(Arg::Gds(isc_wish_list) << Arg::Gds(isc_random) << "Index target is not a PG-owned temporary table").raise();
+
 	AutoSetRestoreFlag dfwFlags(&tdbb->tdbb_flags, TDBB_use_db_page_space, true);
 
 	// run all statements under savepoint control
@@ -18150,6 +18297,9 @@ string CreateAlterSchemaNode::internalPrint(NodePrinter& printer) const
 
 DdlNode* CreateAlterSchemaNode::dsqlPass(DsqlCompilerScratch* dsqlScratch)
 {
+	if (dsqlScratch->pgDialect && Attachment::isPgTempSchema(name))
+		(Arg::Gds(isc_dyn_cannot_create_reserved_schema) << name.toQuotedString()).raise();
+
 	if (create && (name == "INFORMATION_SCHEMA" || name == "DEFINITION_SCHEMA"))
 		status_exception::raise(Arg::Gds(isc_dyn_cannot_create_reserved_schema) << name.toQuotedString());
 

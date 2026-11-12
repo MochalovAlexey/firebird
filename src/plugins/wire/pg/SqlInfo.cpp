@@ -259,8 +259,10 @@ std::string_view ddlObject(Prefix& prefix, Token token)
 		token = prefix.next();
 		if (global && token.is("MAPPING"))
 			return "MAPPING";
-		return token.is("TEMPORARY") && prefix.next().is("TABLE") ? "TABLE" : "";
+		return (token.is("TEMPORARY") || token.is("TEMP")) && prefix.next().is("TABLE") ? "TABLE" : "";
 	}
+	if (token.is("TEMP") || token.is("TEMPORARY"))
+		return prefix.next().is("TABLE") ? "TABLE" : "";
 	if (token.is("UNIQUE") || direction(token))
 	{
 		if (token.is("UNIQUE"))

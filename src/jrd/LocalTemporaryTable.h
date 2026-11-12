@@ -132,6 +132,8 @@ namespace Jrd
 			  nextIndexId(other.nextIndexId),
 			  hasPendingChanges(other.hasPendingChanges)
 		{
+			pgTemporary = other.pgTemporary;
+			pgRelationId = other.pgRelationId;
 		}
 
 	public:
@@ -145,6 +147,8 @@ namespace Jrd
 		USHORT nextFieldId = 0;
 		USHORT nextIndexId = 0;
 		bool hasPendingChanges = false;
+		bool pgTemporary = false;
+		FB_UINT64 pgRelationId = 0;
 	};
 }	// namespace Jrd
 

@@ -470,6 +470,9 @@ void TRA_commit(thread_db* tdbb, jrd_tra* transaction, const bool retaining_flag
 		if (transaction->tra_save_point)
 			transaction->tra_save_point->discardLttUndo();
 		transaction->tra_ltt_undo.clear();
+		if (transaction->tra_attachment->att_pg_temp_initializer == transaction)
+			transaction->tra_attachment->finishPgTempNamespace(false);
+		transaction->tra_pg_temp_namespace_undo = false;
 
 		trace.finish(ITracePlugin::RESULT_SUCCESS);
 		return;
@@ -552,6 +555,9 @@ void TRA_commit(thread_db* tdbb, jrd_tra* transaction, const bool retaining_flag
 	REPL_trans_commit(tdbb, transaction);
 	TRA_set_state(tdbb, transaction, transaction->tra_number, tra_committed);
 	transaction->tra_ltt_undo.clear();
+	if (transaction->tra_pg_temp_namespace_undo)
+		transaction->tra_attachment->finishPgTempNamespace(false);
+	transaction->tra_pg_temp_namespace_undo = false;
 
 	// Perform any post commit work
 
@@ -1364,7 +1370,10 @@ void TRA_rollback(thread_db* tdbb, jrd_tra* transaction, const bool retaining_fl
 	// Gather metadata first: newest savepoint, older levels, previous root history.
 	LttUndo pendingLttUndo;
 	for (Savepoint::Iterator iter(transaction->tra_save_point); *iter; ++iter)
+	{
 		(*iter)->collectLttUndo(pendingLttUndo);
+		(*iter)->collectPgTempNamespaceUndo(transaction->tra_pg_temp_namespace_undo);
+	}
 	pendingLttUndo.append(transaction->tra_ltt_undo);
 	transaction->tra_ltt_undo.append(pendingLttUndo);
 
@@ -1456,6 +1465,9 @@ void TRA_rollback(thread_db* tdbb, jrd_tra* transaction, const bool retaining_fl
 	// TIP/GC cannot repair attachment metadata. Do not hide a backout error in
 	// the row-undo catch above, or release temporary pages before restoring LTTs.
 	transaction->tra_ltt_undo.rollback(tdbb, transaction);
+	if (transaction->tra_pg_temp_namespace_undo)
+		transaction->tra_attachment->finishPgTempNamespace(true);
+	transaction->tra_pg_temp_namespace_undo = false;
 
 	// If this is a rollback retain abort this transaction and start a new one.
 
@@ -2660,7 +2672,12 @@ static void retain_context(thread_db* tdbb, jrd_tra* transaction, bool commit, i
 	}
 
 	if (commit)
+	{
 		transaction->tra_ltt_undo.clear();
+		if (transaction->tra_pg_temp_namespace_undo)
+			transaction->tra_attachment->finishPgTempNamespace(false);
+		transaction->tra_pg_temp_namespace_undo = false;
+	}
 
 	MetadataCache::retain_temp_tables(tdbb, transaction, new_number);
 

@@ -1,66 +1,84 @@
 # Матрица совместимости PostgreSQL wire plugin
 
-12 ноября: [native fix NAT-06](1c/LTT_METADATA_UNDO_TASK.md) реализован и проверен:
-LTT metadata undo сохраняется независимо от row-root и NO AUTO UNDO, с правильным
-порядком ALTER/DROP и границами retaining/force. APP-15 ожидает review fix; PG TEMP,
-virtual namespace, effective path и живые temp catalogs ещё не реализованы.
-P2 APP-14 исправлен в `11dee63d2a` и прошёл review: EVL_expr выполняется до захвата path
-и guards; проверки сохраняются перед возвратом NULL. Регрессия использует PSQL
-аргумент, меняющий path, и повторный Execute одного native handle.
-[Доказательства и ограничения](VALIDATION.md); ниже — текущий профиль APP-14.
-Native LTT DDL под user SAVEPOINT сейчас получает 0A000: общий DSQL guard срабатывает
-до execution. APP-15 ещё должен добавить узкое разрешение для actual PG-owned LTT
-(SQL-10); прежнее предположение о готовой native поддержке не подтверждается.
+
+## APP-15: временные отношения
+
+Согласованный этап реализован поверх NAT-06 и оставлен для review. Для существующей
+исправной базы APP-14 выполнить владельцем/администратором без конкурентного DDL:
+
+```sh
+isql -bail -user OWNER -i pg_wire_protocol/1c/sql/install_temporary_relations.sql DATABASE_ALIAS
+```
+
+Это отдельный атомарный переход с BAIL ON/AUTODDL OFF и одним COMMIT. Он проверяет
+прежние projections/function, active namespace hook, allocator и отсутствие чужого
+контейнера/виртуальных schemas. ALTER сохраняет прежние IDs/grants. Повтор и чужая
+конфигурация дают отказ; автоматического repair/установки при attach нет. Sequence
+не транзакционна: gaps после rollback допустимы. Общий install_compat.py включает
+этот седьмой файл для первоначальной установки, не для повторного upgrade.
+
+| Возможность | Текущий контракт |
+|---|---|
+| CREATE | `[LOCAL|GLOBAL] TEMP[ORARY] TABLE [IF NOT EXISTS]`, native columns/NOT NULL, `WITHOUT OIDS`; default PRESERVE, явный DELETE/PRESERVE |
+| Имена | PG4 leading `_`, ASCII lowercase/exact quoted; native `_UTF8 '…'`, `q'…'`, `X'…'` и канонизация source сохранены |
+| Размещение | Один установленный PGWIRE_TEMP; каждая LTT в native attachment map. PG alias pg_temp и собственный pg_temp_N; TEMP public.t и ordinary CREATE с pg_temp target отвергаются |
+| DML/индексы | Native INSERT/UPDATE/DELETE/SELECT и простые/unique indexes; общая проверка имён temp tables/indexes; CASCADE только над своей PG LTT с native dependency checks |
+| Savepoints | PG4 CREATE TEMP intent или текущий фактический PG-owned target; stale prepared target проверяется на Execute. Native1/2/3 и persistent/GTT сохраняют общий DDL guard |
+| Namespace | 0 до первого успешного CREATE; rollback первой активации возвращает 0, CREATE+DROP commit оставляет пустой namespace. DROP/recreate получает новый public ID, rollback DROP восстанавливает прежний |
+| Каталоги | lower pg_class: permanent tables/views + свои PG temps; pg_namespace: permanent + свой виртуальный namespace; pg_my_temp_schema: BIGINT. Чужие temp rows, indexes/sequences не публикуются |
+| Метаданные | Native BIGINT/VARCHAR/BOOLEAN, wire20/1043/16; без retag в oid26/name19. Views read-only; wrappers SQL SECURITY INVOKER |
+| Поиск | Implicit temp первым, explicit pg_temp сохраняет позицию; implicit pg_catalog; `$user` — exact CURRENT_USER; missing/no-USAGE schemas пропускаются через native SCL decision. Ошибки повреждённой ACL не скрываются |
+| Cache/RESET | Cache включён; existing attachment purge при temp DDL/undo, PG key включает identity прав. Fresh Prepare/wire Bind видят новый путь. Старый native handle сохраняет скомпилированную привязку. RESET очищает данные, сохраняет committed definitions/IDs; named statements удаляются (26000 до нового Parse) |
+
+Public IDs temp namespace/relations выделяет один существующий
+`PGWIRE_COMPAT.NAMESPACE_SEQ`, выше persistent mapping 1…32768, максимум 4294967295.
+Вызовы: `SCL_check_schema`/`SCL_check_generator`, `MET_lookup_generator`, затем
+`DPM_gen_id(tdbb, id, false, 1)`; Parse/Describe/Close не выделяют IDs. PUBLIC получает
+USAGE на sequence и контейнер и CREATE TABLE на контейнер; UPDATE registry не нужен.
+DDL trigger запрещает persistent/GTT CREATE в контейнере. Native LTT от bootstrap
+не зависят. Read-only DB allocator не поддерживается. Для нескольких native
+транзакций одного attachment PG CREATE отвергается, пока другой transaction
+инициализирует ещё не зафиксированный namespace; wire имеет одну транзакцию.
+
+Живой источник — exact `PGWIRE_COMPAT.TEMP_ROWS_V1`, `ENGINE SYSTEM`, entrypoint
+`PGWIRE_TEMP_ROWS_V1`: проверяется schema/name/отсутствие package и layout шести
+native полей (SMALLINT, BIGINT, INTEGER, VARCHAR(63) UTF8, BIGINT, VARCHAR(63) UTF8).
+Provider копирует scalar rows при Open, не держит LTT pointers через Fetch и не
+использует MON snapshot. Новых API/BLR opcodes/ODS/dependencies нет. Namespace undo —
+один отдельный flag в savepoint/transaction поверх принятого NAT-06 journal.
+
+Явно вне профиля: ON COMMIT DROP, WITH OIDS, defaults/identity/serial, PK/FK/CHECK,
+CTAS/temp views, expression/partial indexes, persistent ссылки на LTT, unmanaged
+native LTT/GTT/package lookup. SQLSTATE остаётся в фиксированном native diagnostic
+профиле, в частности NOT NULL → 23000, неподдержанные native LTT clauses → 42000.
+Native DDL под user savepoint по-прежнему запрещён, включая отсутствие фактического
+PG-owned target у DROP IF EXISTS. DROP IF EXISTS вне savepoint — штатный no-op.
+SET SEARCH_PATH остаётся session setting, initial/RESET: public, pg_catalog, SYSTEM;
+implicit temp lookup не добавлен к функциям/операторам или полному поиску типов.
+Исходные selected04/12/13 не приняты: нужны regnamespace и типы/данные 1С.
+Persistent view над SELECT без FROM имеет прежний assertion (NAT-07); этот
+дополнительный сценарий не входит в PASS и не исправлен, reproducer в VALIDATION.
 
 ## APP-14: видимость постоянных отношений
 
-После отдельного [installer](1c/sql/install_relation_visibility.sql) поверх APP-10…13
-доступна `pg_catalog.pg_table_is_visible(BIGINT) RETURNS BOOLEAN` (wire20→16).
-Это профиль нынешнего pg_class: schema-level persistent tables/views с native ID+1.
-Аргумент не является полноценным PG oid; native BIGINT limits и прежние ограничения
-reuse/restore сохраняются. Indexes/sequences/external/virtual/GTT/LTT/package rows
-в каталог не добавляются.
+Принятый APP-14 добавил `pg_table_is_visible(BIGINT) RETURNS BOOLEAN` и builtin
+`RDB$PG_RELATION_ID(exact_name) RETURNS INTEGER`. APP-15 расширяет lookup и SQL
+projection как описано выше; постоянные public IDs по-прежнему native ID+1, для
+PG temps используется сохранённый public ID и private native-ID projection.
+NULL/unknown OID → NULL; имя вне пути или shadowing → FALSE; совпадение → TRUE.
+SELECT grant на таблицу не требуется для visibility, но её чтение проверяется SCL.
 
-| Состояние | Результат |
-|---|---|
-| NULL, отсутствующий OID, 0, отрицательный или большой BIGINT | NULL |
-| Известный OID, точное имя не найдено в пути | FALSE |
-| Первое одноимённое отношение имеет другой native ID | FALSE |
-| Native ID первого отношения равен oid−1 | TRUE |
-| USAGE есть, SELECT нет | Visibility по имени; реальное чтение отдельно отвергается |
-| Нет явного lowercase pg_catalog, есть $user/pg_temp или активная native LTT | 0A000 с причиной |
-| Нет USAGE существующей schema пути, ошибка SCL/metadata | Native error; не FALSE/NULL |
+Builtin не deterministic, своего cache нет. Exact name — значение, не SQL syntax:
+точки/кавычки не разбираются; 1…63 native characters/≤252 bytes, без NUL/trailing
+ASCII space. Неверное имя → 22023, wire input NUL → 22021 до helper. Проверка
+состояния выполняется после вычисления аргумента, в том числе при NULL (принятый
+P2 `11dee63d2a`). Изменяющий path PSQL-аргумент и NULL-аргумент, создающий unmanaged
+LTT, проверены повторным Execute native handle. Wrapper SQL SECURITY INVOKER,
+без dynamic SQL/autonomous transaction и записей при чтении.
 
-Явный путь сохраняет native порядок (initial/RESET: public, pg_catalog, SYSTEM).
-Отсутствующие schemas пропускаются; существующие проверяются через SCL_check_schema
-в контексте вызывающего. Нет PG filtering schemas без USAGE, implicit pg_catalog,
-$user expansion, temporary namespaces или transactional SET. Native permission
-SQLSTATE документируется в отчёте проверки; ошибки ACL не перехватываются.
-Причина guard входит в native status. На wire действует прежний фиксированный
-английский diagnostic profile: SQLSTATE 0A000 и общее сообщение без raw native DETAIL.
-Guard выполняется и для известного OID вне пути; неизвестный OID может вернуть
-NULL до helper. Остальные SELECT не запрещаются при неподдержанном visibility path/LTT.
-
-Builtin `RDB$PG_RELATION_ID(exact_name)` возвращает nullable INTEGER через штатный
-SysFunction/BLR dispatch. Он читает текущие attachment path/live LTT на Execute,
-проверяет SCL и использует qualifyExistingName/getVersioned/getId. Имя — значение,
-не SQL syntax: точка и кавычка не разбираются. Metadata UTF8 проверяется до MetaName:
-1…63 native characters/≤252 bytes, без NUL/конечного ASCII space; неверный аргумент
-даёт invalid_name с SQLSTATE 22023, ошибка charset сохраняет native diagnostics.
-Wire input codec отдельно отвергает NUL с 22021 до helper.
-Helper и wrapper не deterministic, собственного cache нет. Уже подготовленный
-native SELECT может хранить прежнюю привязку, поэтому SELECT oracle готовится
-заново. PgWire Bind/reprepare не изменён. Прямой RESET сохраняет прежнее удаление
-named statements (26000 до нового Parse). Известный cache crash NAT-05
-после сочетания catalog/RESET/LTT и позднего Extended catalog lookup не исправлен;
-он воспроизведён также без нового builtin на APP-13 нашего fork. Это не доказанный
-upstream/native-only дефект, см. VALIDATION.
-
-Wrapper — SQL SECURITY INVOKER, без dynamic SQL, autonomous transaction или записи
-при вызове. Engine не знает PG catalog/identity mapping. Installer plain CREATE
-FUNCTION атомарен, сохраняет прежние объекты/grants, выдаёт PUBLIC EXECUTE; runtime
-обновляется без ODS migration. Полный PG effective path/regnamespace/temp и исходный
-selected04 остаются в APP-01/04/SES-06; APP-02/03/06 и SQL-09 не закрываются.
+Исходный [APP-14 installer](1c/sql/install_relation_visibility.sql) остаётся
+предпосылкой отдельного APP-15 upgrade. Известный NAT-05 cache crash не объявлен
+исправленным; его сохранённый reproducer и историческое покрытие — в VALIDATION.
 
 ## APP-13: правила имён PG4
 
@@ -74,8 +92,7 @@ application_name не преобразуются. Для native security identit
 
 Native ограничения длины и лексики сохранены: нет усечения до PG 63 bytes, Unicode
 casefold или новых U&-форм. Unquoted Unicode остаётся за native lexical границей (42601).
-Начальный `_` также пока трактуется как introducer, а не начало unquoted identifier:
-имена вроде `_ExtensionsInfo` требуют отдельного расширения (SQL-09).
+APP-15 разрешает leading `_` в PG4 identifiers (SQL-09), сохраняя native charset introducers.
 Quoted Unicode, leading spaces и doubled quotes допустимы;
 quoted trailing ASCII space и NUL в PG4 отвергаются до эффектов, поскольку MetaName
 теряет эти различия. Native quoted-name semantics не изменены. Named native charsets

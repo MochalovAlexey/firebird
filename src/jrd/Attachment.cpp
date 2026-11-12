@@ -32,6 +32,8 @@
 #include "../jrd/PreparedStatement.h"
 #include "../jrd/tra.h"
 #include "../jrd/intl.h"
+#include "../jrd/LocalTemporaryTable.h"
+#include "../jrd/dpm_proto.h"
 
 #include "../jrd/blb_proto.h"
 #include "../jrd/exe_proto.h"
@@ -933,6 +935,170 @@ void Attachment::rollbackMetaTransaction(thread_db* tdbb)
 		att_meta_transaction = nullptr;
 		TRA_rollback(tdbb, trans_meta, false, true);
 	}
+}
+
+bool Attachment::isPgTempSchema(const MetaName& name)
+{
+	return name == "pg_temp" || (name.length() >= 8 && !memcmp(name.c_str(), "pg_temp_", 8));
+}
+
+MetaName Attachment::pgTempSchemaName() const
+{
+	MetaName name;
+	if (att_pg_temp_namespace)
+		name.printf("pg_temp_%" UQUADFORMAT, att_pg_temp_namespace);
+	return name;
+}
+
+void Attachment::checkPgRelationProfile(thread_db* tdbb) const
+{
+	for (const auto& entry : att_local_temporary_tables)
+	{
+		if (!entry.second->pgTemporary)
+			(Arg::Gds(isc_wish_list) << Arg::Gds(isc_random) <<
+				"PG relation lookup does not support unmanaged local temporary tables").raise();
+	}
+	if (MET_check_schema_exists(tdbb, "pg_temp") ||
+		(att_pg_temp_namespace && MET_check_schema_exists(tdbb, pgTempSchemaName())))
+	{
+		(Arg::Gds(isc_random) << "A real schema collides with a reserved PG temporary namespace").raise();
+	}
+}
+
+void Attachment::pgRelationPath(thread_db* tdbb, ObjectsArray<MetaString>& path,
+	const ObjectsArray<MetaString>* explicitPath)
+{
+	checkPgRelationProfile(tdbb);
+	if (!explicitPath)
+		explicitPath = att_schema_search_path;
+	bool temp = false, catalog = false;
+	for (const auto& schema : *explicitPath)
+	{
+		temp |= schema == "pg_temp" || (att_pg_temp_namespace && schema == pgTempSchemaName());
+		catalog |= schema == "pg_catalog";
+	}
+	const auto add = [&](MetaName schema)
+	{
+		if (schema == "$user")
+			schema = getUserName();
+		if (isPgTempSchema(schema))
+		{
+			if (MET_check_schema_exists(tdbb, schema))
+				(Arg::Gds(isc_random) << "A real schema collides with a reserved PG temporary namespace").raise();
+			if (schema != "pg_temp" && schema != pgTempSchemaName())
+				return; // Other sessions' temporary namespaces are never searched.
+			if (!att_pg_temp_namespace)
+				return;
+			schema = "PGWIRE_TEMP";
+		}
+		if (schema.hasData() && SCL_check_schema(tdbb, schema, SCL_usage, false))
+			path.add(schema.c_str());
+	};
+	if (!temp)
+		add("pg_temp");
+	if (!catalog)
+		add("pg_catalog");
+	for (const auto& schema : *explicitPath)
+		add(schema);
+}
+
+void Attachment::qualifyPgRelationName(thread_db* tdbb, QualifiedName& name,
+	std::initializer_list<ObjectType> objTypes, const ObjectsArray<MetaString>* explicitPath)
+{
+	if (name.object.isEmpty())
+		return;
+	checkPgRelationProfile(tdbb);
+	if (isPgTempSchema(name.schema))
+	{
+		if (MET_check_schema_exists(tdbb, name.schema))
+			(Arg::Gds(isc_random) << "A real schema collides with a reserved PG temporary namespace").raise();
+		if (name.schema != "pg_temp" && name.schema != pgTempSchemaName())
+			(Arg::Gds(isc_no_priv) << "USAGE" << "SCHEMA" << name.schema).raise();
+		name.schema = "PGWIRE_TEMP";
+	}
+	if (name.schema.isEmpty())
+	{
+		ObjectsArray<MetaString> path(*tdbb->getDefaultPool());
+		pgRelationPath(tdbb, path, explicitPath);
+		if (!MET_qualify_existing_name(tdbb, name, objTypes, &path) && path.hasData())
+			name.schema = path[0];
+	}
+	if (name.schema == "PGWIRE_TEMP")
+	{
+		// No persistent/GTT fallback behind virtual namespace aliases.
+		const auto ltt = att_local_temporary_tables.get(name);
+		LocalTemporaryTable* indexTable = nullptr;
+		LocalTemporaryTable::Index* index = nullptr;
+		const bool indexLookup = std::find(objTypes.begin(), objTypes.end(), obj_index) != objTypes.end();
+		if (indexLookup)
+			MET_get_ltt_index(this, name, &indexTable, &index);
+		if ((ltt && !(*ltt)->pgTemporary) || (indexTable && !indexTable->pgTemporary) ||
+			(!ltt && !indexTable && MetadataCache::getVersioned<Cached::Relation>(tdbb, name, CacheFlag::AUTOCREATE)))
+		{
+			(Arg::Gds(isc_wish_list) << Arg::Gds(isc_random) <<
+				"PG temporary namespace contains an unmanaged object").raise();
+		}
+	}
+	else if (std::find(objTypes.begin(), objTypes.end(), obj_relation) != objTypes.end())
+	{
+		const auto relation = MetadataCache::getVersioned<Cached::Relation>(tdbb, name, CacheFlag::AUTOCREATE);
+		if (relation && (relation->getPermanent()->isTemporary() || name.package.hasData()))
+			(Arg::Gds(isc_wish_list) << Arg::Gds(isc_random) <<
+				"PG relation lookup does not support native temporary or packaged relations").raise();
+	}
+}
+
+void Attachment::qualifyPgNewName(thread_db* tdbb, QualifiedName& name, bool temporary)
+{
+	if (temporary)
+	{
+		checkPgRelationProfile(tdbb);
+		if (name.package.hasData() || (name.schema.hasData() && name.schema != "pg_temp" &&
+			name.schema != pgTempSchemaName()))
+			(Arg::Gds(isc_wish_list) << Arg::Gds(isc_random) <<
+				"CREATE TEMP requires an unqualified name or the current pg_temp namespace").raise();
+		name.schema = "PGWIRE_TEMP";
+	}
+	else
+	{
+		if (name.schema.isEmpty())
+		{
+			for (const auto& element : *att_schema_search_path)
+			{
+				MetaName schema(element == "$user" ? getUserName() : element);
+				if (isPgTempSchema(schema))
+					(Arg::Gds(isc_wish_list) << Arg::Gds(isc_random) <<
+						"CREATE in pg_temp requires explicit TEMP").raise();
+				if (SCL_check_schema(tdbb, schema, SCL_usage, false))
+				{
+					name.schema = schema;
+					break;
+				}
+			}
+		}
+		if (isPgTempSchema(name.schema) || name.schema == "PGWIRE_TEMP")
+			(Arg::Gds(isc_wish_list) << Arg::Gds(isc_random) <<
+				"CREATE in pg_temp requires explicit TEMP").raise();
+	}
+	if (!MET_check_schema_exists(tdbb, name.schema))
+		(Arg::Gds(isc_dyn_schema_not_found) << name.schema.toQuotedString()).raise();
+}
+
+FB_UINT64 Attachment::allocatePgTempId(thread_db* tdbb)
+{
+	const QualifiedName sequence("NAMESPACE_SEQ", "PGWIRE_COMPAT");
+	SCL_check_schema(tdbb, sequence.schema, SCL_usage);
+	SCL_check_generator(tdbb, sequence, SCL_usage);
+	bool system = false;
+	SLONG increment = 0;
+	const auto id = MET_lookup_generator(tdbb, sequence, &system, &increment);
+	if (id < 0 || system || increment != 1)
+		(Arg::Gds(isc_random) << "PG temporary tables require the APP-15 namespace allocator").raise();
+	const auto value = DPM_gen_id(tdbb, id, false, 1);
+	if (value <= ::MAX_RELATION_ID + 1 || value > MAX_ULONG)
+		(Arg::Gds(isc_random) << "PG temporary identity allocator is outside the uint32 range" <<
+			Arg::SqlState("22003")).raise();
+	return value;
 }
 
 bool Attachment::qualifyNewName(thread_db* tdbb, QualifiedName& name, const ObjectsArray<MetaString>* schemaSearchPath)

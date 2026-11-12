@@ -350,6 +350,7 @@ using namespace Firebird;
 %token <metaNamePtr> RESTRICT
 %token <metaNamePtr> ROLE
 %token <metaNamePtr> TEMP
+%token <metaNamePtr> OIDS
 
 // New tokens added v6.0
 
@@ -1731,6 +1732,30 @@ create_clause
 			node->createIfNotExistsOnly = $2;
 			$$ = node;
 		}
+	| TEMP TABLE if_not_exists_opt ltt_table_clause
+		{
+			if (!pgDialect) yyabandon(YYPOSNARG(1), -104, Arg::Gds(isc_token_err) << "TEMP");
+			$4->createIfNotExistsOnly = $3;
+			$$ = $4;
+		}
+	| TEMPORARY TABLE if_not_exists_opt ltt_table_clause
+		{
+			if (!pgDialect) yyabandon(YYPOSNARG(1), -104, Arg::Gds(isc_token_err) << "TEMP");
+			$4->createIfNotExistsOnly = $3;
+			$$ = $4;
+		}
+	| GLOBAL TEMP TABLE if_not_exists_opt ltt_table_clause
+		{
+			if (!pgDialect) yyabandon(YYPOSNARG(1), -104, Arg::Gds(isc_token_err) << "TEMP");
+			$5->createIfNotExistsOnly = $4;
+			$$ = $5;
+		}
+	| LOCAL TEMP TABLE if_not_exists_opt ltt_table_clause
+		{
+			if (!pgDialect) yyabandon(YYPOSNARG(1), -104, Arg::Gds(isc_token_err) << "TEMP");
+			$5->createIfNotExistsOnly = $4;
+			$$ = $5;
+		}
 	| GLOBAL TEMPORARY TABLE if_not_exists_opt gtt_table_clause
 		{
 			const auto node = $5;
@@ -2536,7 +2561,8 @@ gtt_table_clause
 	: simple_table_name
 			{
 				$<createRelationNode>$ = newNode<CreateRelationNode>($1);
-				$<createRelationNode>$->tempFlag = REL_temp_gtt;
+				$<createRelationNode>$->tempFlag = pgDialect ? REL_temp_ltt : REL_temp_gtt;
+				$<createRelationNode>$->pgTemporary = pgDialect;
 			}
 		'(' table_elements($2) ')' gtt_subclauses_opt($2)
 			{
@@ -2544,7 +2570,8 @@ gtt_table_clause
 			}
 	| table_as_query_clause
 		{
-			$1->tempFlag = REL_temp_gtt;
+			$1->tempFlag = pgDialect ? REL_temp_ltt : REL_temp_gtt;
+			$1->pgTemporary = pgDialect;
 			$<createRelationNode>$ = $1;
 		}
 		gtt_subclauses_opt($2)
@@ -2563,6 +2590,8 @@ gtt_subclauses_opt($createRelationNode)
 gtt_subclauses($createRelationNode)
 	: gtt_subclause($createRelationNode)
 	| gtt_subclauses ',' gtt_subclause($createRelationNode)
+	| gtt_subclauses gtt_subclause($createRelationNode)
+		{ if (!pgDialect) yyabandon(YYPOSNARG(2), -104, Arg::Gds(isc_token_err) << "temporary table option"); }
 	;
 
 %type gtt_subclause(<createRelationNode>)
@@ -2570,12 +2599,15 @@ gtt_subclause($createRelationNode)
 	: sql_security_clause
 		{ setClause($createRelationNode->ssDefiner, "SQL SECURITY", $1); }
 	| temp_table_rows_type($createRelationNode)
+	| pg_without_oids
 	;
 
 %type temp_table_rows_type(<createRelationNode>)
 temp_table_rows_type($createRelationNode)
 	: ON COMMIT DELETE ROWS
 		{ setClause($createRelationNode->tempRowsFlag, "ON COMMIT DELETE ROWS", REL_temp_tran); }
+	| ON COMMIT DROP
+		{ yyabandon(YYPOSNARG(1), -104, Arg::Gds(isc_wish_list) << Arg::Gds(isc_random) << "ON COMMIT DROP is not supported"); }
 	| ON COMMIT PRESERVE ROWS
 		{ setClause($createRelationNode->tempRowsFlag, "ON COMMIT PRESERVE ROWS", REL_temp_conn); }
 	;
@@ -2586,6 +2618,7 @@ ltt_table_clause
 			{
 				$<createRelationNode>$ = newNode<CreateRelationNode>($1);
 				$<createRelationNode>$->tempFlag = REL_temp_ltt;
+				$<createRelationNode>$->pgTemporary = pgDialect;
 			}
 		'(' table_elements($2) ')' ltt_subclause_opt($2)
 			{
@@ -2594,6 +2627,7 @@ ltt_table_clause
 	| table_as_query_clause
 		{
 			$1->tempFlag = REL_temp_ltt;
+			$1->pgTemporary = pgDialect;
 			$<createRelationNode>$ = $1;
 		}
 		ltt_subclause_opt($2)
@@ -2643,8 +2677,15 @@ inline_table_index($createRelationNode)
 
 %type ltt_subclause_opt(<createRelationNode>)
 ltt_subclause_opt($createRelationNode)
-	: // nothing by default. Will be set "on commit delete rows" in dsqlPass
-	| temp_table_rows_type($createRelationNode)
+	:
+	| ltt_subclause_opt temp_table_rows_type($createRelationNode)
+	| ltt_subclause_opt pg_without_oids
+	;
+
+%type pg_without_oids
+pg_without_oids
+	: WITHOUT OIDS
+		{ if (!pgDialect) yyabandon(YYPOSNARG(1), -104, Arg::Gds(isc_token_err) << "TEMP"); }
 	;
 
 %type <stringPtr> external_file
@@ -5212,6 +5253,21 @@ alter_identity_clause_option($identityOptions)
 		{ setClause($identityOptions->increment, "SET INCREMENT BY", $4); }
 	;
 
+%type <boolVal> pg_drop_table_behaviour
+pg_drop_table_behaviour
+    : /* nothing */ { $$ = false; }
+    | RESTRICT
+        {
+            if (!pgDialect) yyabandon(YYPOSNARG(1), -104, Arg::Gds(isc_token_err) << "RESTRICT");
+            $$ = false;
+        }
+    | CASCADE
+        {
+            if (!pgDialect) yyabandon(YYPOSNARG(1), -104, Arg::Gds(isc_token_err) << "CASCADE");
+            $$ = true;
+        }
+    ;
+
 %type <boolVal> drop_behaviour
 drop_behaviour
 	:				{ $$ = false; }
@@ -5462,10 +5518,11 @@ drop_clause
 			node->silent = $2;
 			$$ = node;
 		}
-	| TABLE if_exists_opt symbol_table_name
+	| TABLE if_exists_opt symbol_table_name pg_drop_table_behaviour
 		{
 			const auto node = newNode<DropRelationNode>(*$3, false);
 			node->silent = $2;
+			node->cascade = $4;
 			$$ = node;
 		}
 	| TRIGGER if_exists_opt symbol_trigger_name
@@ -10736,6 +10793,7 @@ non_reserved_word
 	| OPTIMIZE
 	| QUARTER
 	| TARGET
+	| OIDS
 	| TEMP
 	| TIMEZONE_NAME
 	| UNICODE_CHAR

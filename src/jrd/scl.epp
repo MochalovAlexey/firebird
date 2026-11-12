@@ -136,7 +136,7 @@ static void raiseError(thread_db* tdbb, SecurityClass::flags_t mask, ObjectType 
 }
 
 
-void SCL_check_access(thread_db* tdbb,
+static bool checkAccess(thread_db* tdbb,
 					  const SecurityClass* s_class,
 					  SLONG obj_id,
 					  const QualifiedName& obj_name,
@@ -144,7 +144,7 @@ void SCL_check_access(thread_db* tdbb,
 					  ObjectType type,
 					  bool recursive,
 					  const QualifiedName& name,
-					  const MetaName& col_name)
+					  const MetaName& col_name, bool throwOnDenied)
 {
 /**************************************
  *
@@ -159,7 +159,7 @@ void SCL_check_access(thread_db* tdbb,
  **************************************/
 	SET_TDBB(tdbb);
 
-	const MetaName& userName = s_class->sclClassUser.second;
+	const MetaName userName(s_class ? s_class->sclClassUser.second : MetaName());
 
 	if (s_class && (s_class->scl_flags & SCL_corrupt))
 	{
@@ -176,18 +176,18 @@ void SCL_check_access(thread_db* tdbb,
 
 	// Make fast check first
 	if (mask & get_sys_privileges(tdbb))
-		return;
+		return true;
 
 	// Check global DDL permissions with ANY option which allow user to make changes non owned objects
 	if (isDdlObject(type) && (mask & SCL_get_object_mask(type, name.schema)))
-		return;
+		return true;
 
 	if (!s_class || (mask & s_class->scl_flags) )
-		return;
+		return true;
 
 	if (obj_name.object.hasData() && (compute_access(tdbb, s_class, obj_id, obj_name) & mask) )
 	{
-		return;
+		return true;
 	}
 
 	// Allow recursive procedure/function call
@@ -197,10 +197,20 @@ void SCL_check_access(thread_db* tdbb,
 		 (type == obj_functions && obj_id == id_function)) &&
 		obj_name == name)
 	{
-		return;
+		return true;
 	}
 
-	raiseError(tdbb, mask, type, name, col_name, userName);
+	if (throwOnDenied)
+		raiseError(tdbb, mask, type, name, col_name, userName);
+	return false;
+}
+
+
+void SCL_check_access(thread_db* tdbb, const SecurityClass* s_class, SLONG obj_id,
+	const QualifiedName& obj_name, SecurityClass::flags_t mask, ObjectType type,
+	bool recursive, const QualifiedName& name, const MetaName& col_name)
+{
+	checkAccess(tdbb, s_class, obj_id, obj_name, mask, type, recursive, name, col_name, true);
 }
 
 
@@ -793,7 +803,8 @@ void SCL_check_relation(thread_db* tdbb, const QualifiedName& name, SecurityClas
 }
 
 // Given a schema name, check for a set of privileges.
-bool SCL_check_schema(thread_db* tdbb, const MetaName& name, SecurityClass::flags_t mask)
+bool SCL_check_schema(thread_db* tdbb, const MetaName& name, SecurityClass::flags_t mask,
+	bool throwOnDenied)
 {
 	SET_TDBB(tdbb);
 
@@ -814,7 +825,8 @@ bool SCL_check_schema(thread_db* tdbb, const MetaName& name, SecurityClass::flag
 	}
 	END_FOR
 
-	return check_object(tdbb, found, s_class, 0, {}, mask, obj_schemas, QualifiedName(name));
+	return s_class ? checkAccess(tdbb, s_class, 0, {}, mask, obj_schemas, false,
+		QualifiedName(name), {}, throwOnDenied) : found;
 }
 
 bool SCL_check_view(thread_db* tdbb, const QualifiedName& name, SecurityClass::flags_t mask)

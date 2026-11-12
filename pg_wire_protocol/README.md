@@ -1,22 +1,12 @@
 # Wire-протоколы через плагины Firebird 6
 
-APP-13 принят в `4520f371e9`: в PG4 unquoted имена теперь ASCII lowercase,
-quoted имена точные; native 1/2/3 не меняются. Старые объекты требуют quotes,
-например `"PUBLIC"."TTT"` и `"SYSTEM"."RDB$DATABASE"`. Для unquoted CREATE/catalog
-запросов нужен отдельный [lowercase bootstrap](1c/README.md#app-13-имена-и-установка-lowercase-профиля).
-Сохранённый SQL канонизируется движком для native reprepare. Начальный/RESET path:
-`"public", "pg_catalog", "SYSTEM"`. Полный PG search_path/visibility/temp остаётся открытым.
-APP-14 добавляет [устанавливаемую pg_table_is_visible](1c/README.md#app-14-видимость-постоянных-отношений)
-для текущих постоянных tables/views: SQL wrapper и небольшой builtin штатного
-resolver/SCL, с проверкой явного пути и отсутствия LTT на Execute. Типы wire20→16;
-regnamespace/temp и исходный selected04 этим этапом не закрываются.
 
-12 ноября: P2 APP-14 исправлен в `11dee63d2a` и прошёл review — аргумент вычисляется до
-чтения и проверки состояния attachment. [APP-15](1c/TEMPORARY_RELATIONS_TASK.md)
-ожидает review [native fix NAT-06](1c/LTT_METADATA_UNDO_TASK.md): исправление undo
-реализовано, 44 SQL сценария, OO/fault probes и transaction/visibility регрессии PASS.
-После review продолжить APP-15. PG temporary lifecycle ещё не реализован. Oracle, reproducer, проверки P2 и
-границы результата — в начале [VALIDATION](VALIDATION.md).
+12 ноября: **APP-15 реализован, оставлен для review без коммита** поверх принятого
+NAT-06 (`516f55bbb5`) и P2 APP-14 (`11dee63d2a`). PG TEMP использует native LTT:
+PRESERVE/DELETE, DML/индексы, rollback/savepoints, свой pg_temp namespace и живые
+каталоги. Поиск SELECT и visibility согласован по temp/path/USAGE/$user.
+[Контракт](COMPATIBILITY.md#app-15-временные-отношения) · [проверки](VALIDATION.md#12-ноября-2026-app-15-полный-цикл-поддержанных-pg-temporary-tables).
+Типы 1С, regnamespace, ON COMMIT DROP и реальная 1С/Гилёв остаются открытыми.
 
 Что ещё нужно доделать и проверить: [единый BACKLOG](BACKLOG.md).
 Порядок этапов — [PLAN](PLAN.md), фактические проверки — [VALIDATION](VALIDATION.md).

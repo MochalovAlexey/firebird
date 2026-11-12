@@ -1,13 +1,213 @@
 # Проверки реализации
 
+## 12 ноября 2026: APP-15 полный цикл поддержанных PG temporary tables
+
+**Реализовано, оставлено для review без git add/commit.** Основа
+`516f55bbb5e310f0bb35377385f4004f78fee208` (NAT-06), принятый P2 `11dee63d2a`
+сохранён. Исходные пользовательские изменения документов о принятии NAT-06
+сохранены; начальный diff — `/tmp/app15-resume-initial.diff`.
+[Согласованная инструкция](1c/TEMPORARY_RELATIONS_TASK.md),
+[действующий контракт](COMPATIBILITY.md#app-15-временные-отношения).
+
+Результат: PG4 TEMP через существующий native LTT storage/undo/indexes, один
+PGWIRE_TEMP container, отдельный flag namespace activation в savepoint/transaction,
+public IDs из прежнего NAMESPACE_SEQ. Shared relation resolver использует native
+MET/SCL; узкий non-throwing schema-USAGE decision не перехватывает corrupt ACL.
+DDL exemption под user savepoint проверяет actual PG-owned target на Execute;
+CREATE проверяет PG TEMP intent. Native1/2/3 guard сохранён. Только SqlInfo command
+tag расширен в wire plugin; SQL, metadata и транзакции не дублируются в плагине.
+
+Живой источник — exact ENGINE SYSTEM selectable procedure с native scalar layout,
+копирующий строки при Open. SQL installer объединяет permanent + свои PG temp
+rows, сохраняет native BIGINT/VARCHAR/BOOLEAN и прежние grants/IDs. Native API,
+BLR opcodes, ODS и runtime dependencies не добавлены. Cache 2 MiB включён: temp
+DDL/undo вызывает existing attachment purge; PG statement key использует existing
+verify identity ролей + exact CURRENT_USER, поскольку USAGE меняет выбранное имя.
+
+### Воспроизведение и результаты
+
+Все базы/security/runtime частные, под `/tmp`; рабочая 1С не использовалась.
+Сборка GCC 13.4.0, Debug: `make -C /tmp/gen -j4 TARGET=Debug`
+(`/tmp/app15-build-13.log`, exit 0). Libpq 14.24 (140024).
+
+```sh
+python3 -B pg_wire_protocol/tools/pgwire_1c_smoke.py --temporary --firebird-dir /tmp/gen/Debug/firebird --previous-firebird-dir /tmp/app15-native-base-runtime --work-dir /tmp/app15-temporary-18 --timeout 300
+python3 -B pg_wire_protocol/tools/pgwire_1c_smoke.py --visibility --firebird-dir /tmp/gen/Debug/firebird --previous-firebird-dir /tmp/app15-native-base-runtime --work-dir /tmp/app15-visibility-02 --timeout 240
+python3 -B pg_wire_protocol/tools/pgwire_1c_smoke.py --pg-names --firebird-dir /tmp/gen/Debug/firebird --work-dir /tmp/app15-pg-names-01 --timeout 240
+python3 -B pg_wire_protocol/tools/pgwire_1c_smoke.py --strings --firebird-dir /tmp/gen/Debug/firebird --work-dir /tmp/app15-strings-02 --timeout 240
+python3 -B pg_wire_protocol/tools/pgwire_1c_smoke.py --begin --firebird-dir /tmp/gen/Debug/firebird --work-dir /tmp/app15-begin-01 --timeout 240
+```
+
+Для повторного запуска нужны новые `--work-dir`. Каждый каталог содержит
+`summary.json`, native/libpq/server логи, private runtime и SQL observations.
+
+| Проверка | Результат |
+|---|---|
+| APP-15 libpq | **PASS 268 results**, восемь групп: spelling/DDL/DML/indexes/undo, namespaces/IDs, две сессии, path/USAGE/role, cache/reprepare/RESET, live catalogs/MON/text/binary/NULL, Simple first error и recovery |
+| Raw Extended | **PASS** Parse→Describe→Close без namespace/catalog/allocator effects; paused provider portal читает скопированную строку после DROP |
+| Native OO | **PASS 8408 assertions**; NO AUTO UNDO/force/retaining, root release с 300000 rows, namespace undo, stale target и unmanaged relation, namespace/schema collision, old native handle vs fresh PG Prepare, native1/2/3 defaults/DDL guard/MAKE_DBKEY, uint32 exhaustion |
+| Native ID reuse | **PASS** 1030 уникальных public IDs при 1024 native IDs; свежий Prepare не видит старые данные |
+| Установка | **PASS** семь файлов через install_compat.py; APP-14 database, созданная старым принятым runtime, → новый runtime/APP-15 без изменения ODS14.0, данных/grants/старых IDs; rollback/repeat/foreign container/schema/projection/counter; низкий/высокий allocator; physical-container trigger; exact provider schema/name/layout negatives |
+| Visibility/P2 | **PASS 178 libpq / 82 OO**, аргумент меняет path до lookup, NULL-аргумент создаёт unmanaged LTT и не обходит guard; reserved real schema в пути проверяется и при NULL; native handle повторно выполняется |
+| Имена | **PASS 109 results**, stored-source/native reprepare сохранён; дополнительный `_` source/reprepare со strings=off входит в APP-15 |
+| Строки | **PASS 156 queries / 1209 OO assertions**, raw/native1/2/3, `_UTF8` quoted/q/hex introducers и source канонизация |
+| BEGIN | **PASS 88 queries / 43 native observations**, raw promotion/portal/savepoints/EOF и native controls |
+| Oracle | **REUSED PASS** Postgres Pro 18.6, libpq 14.24, `/tmp/app15-oracle/summary.json`, прежний shutdown exit 0; first CREATE rollback, CREATE+DROP empty namespace, savepoint release/rollback и PRESERVE/DELETE |
+| Дополнительный persistent VIEW без FROM | **FAIL, отдельный NAT-07** на baseline и modified; описание ниже, не объявлен PASS |
+| NAT-01…04 / исходный NAT-05 reproducer | **SKIP**: первые не требовалось повторять; NAT-05 сохранён без изменений и не объявлен исправленным. Новый поздний Extended catalog lookup после TEMP/role/RESET прошёл, это не заменяет его исходный reproducer |
+| selected04/12/13, реальная 1С/Гилёв | **SKIP/не приняты**: нужны regnamespace, bytea/mvarchar/serial/default lifecycle и прикладные операции |
+
+`--temporary` использует существующий pgwire_1c_smoke, Libpq, ExtendedClient и
+native helpers; нового harness/framework нет. Fresh GRANT/REVOKE visibility
+проверен на новых attachments (native ACL-cache boundary); SET ROLE — в одном
+attachment с повторением того же SQL/cache key. SELECT grant не подменяется
+USAGE. Native endpoint проверен до/после PG клиентов. Все пять PASS серверов
+завершились exit 0 без forced kill, EOF освобождает attachments; OO-базы удалены.
+Private fixture/upgrade databases оставлены в соответствующих runtime/data как
+артефакты, активных тестовых серверов нет. GDB-процессы завершены.
+
+GDB на `/tmp/app15-temporary-17/runtime`, binary `temporary_api` (тот же неизменённый
+Savepoint/tra код, до последних уточнений NULL/path/CURRENT_USER):
+`/tmp/app15-bootstrap/root-namespace.gdb`, лог `root-namespace-final.log`.
+Точка `Savepoint.cpp:675` достигнута после `this->isLarge()` (SIZE_THRESHOLD 32768),
+`m_next->m_pgTempNamespace=true`: root с namespace activation действительно
+освобождается до merge. После native ROLLBACK namespace/table/300000 persistent
+rows отсутствуют; итоговый OO probe PASS. Это новое PG evidence поверх NAT-06,
+его native journal и принятые fault probes повторно не реализованы.
+
+Parser: 158→164 shift/reduce, reduce/reduce неизменно 11. Сравнение verbose
+btyacc (`/tmp/app15-grammar/comparison.json`) показывает ровно четыре существующего
+вида IF NOT EXISTS конфликта для новых CREATE prefixes и два WITHOUT TIME ZONE /
+WITHOUT OIDS; GLR разрешает их по следующему токену. Непредусмотренных новых
+reduce/reduce нет. `git diff --check`, Python syntax и CLI help — PASS.
+
+### Найденные и устранённые дефекты текущей реализации
+
+Промежуточные логи сохранены, не переименованы в PASS. Исправлены null package
+pointer у standalone ENGINE SYSTEM procedure и точный UTF8 descriptor subtype;
+потеря выбора schema после SET ROLE в cache; `_UTF8 q'…'/X'…'` lookahead;
+IF NOT EXISTS перед unmanaged physical relation; коллизия нового pg_temp_N
+с реальной schema до activation; effective-path validation перед NULL и exact
+native CURRENT_USER при $user expansion. Остальные остановки ранних fixtures уточняли
+native SQLSTATE, reserved identifiers, CREATE VIEW grant и существующий RESET
+contract (named statement удаляется, 26000 до нового Parse). Итоговый прогон 18
+исполняет весь поддержанный профиль без перестановки cache-сценария или отключения
+cache. Существующие native SQLSTATE не заменены ради тестов.
+
+### NAT-07: отдельный прежний assertion persistent VIEW без FROM
+
+Дополнительная source-проверка в `/tmp/app15-temporary-15` завершила сервер
+SIGABRT (exit -6) при первом SELECT из `CREATE VIEW ... AS SELECT _UTF8 X'41' AS _utf8`.
+Ошибка до native ALTER/source reprepare. GDB: `DerivedExprNode::pass2`, обращение
+`streams[0]` к пустому массиву (`ExprNodes.cpp:5438`, array.h:181).
+Это отличается от NAT-05/DsqlStatementCache.
+
+Минимальный пример без underscore, TEMP, каталогов и APP-15 воспроизводится на
+принятом runtime `516f55bbb5` (тот же stack):
+
+```sql
+CREATE VIEW public.constant_view AS SELECT 1 AS v;
+-- native commit/retaining
+SELECT v FROM public.constant_view;
+```
+
+Артефакты: `/tmp/app15-view-repro.cpp`, `/tmp/app15-view-repro`,
+`/tmp/app15-bootstrap/view-repro.gdb`, `view-repro.log`, `view-baseline.log`.
+Baseline команда (private copy `baseline_view.fdb` создана из old.fdb):
+
+```sh
+FIREBIRD=/tmp/app15-native-base-runtime FIREBIRD_LOCK=/tmp/app15-bootstrap/debug-locks LD_LIBRARY_PATH=/tmp/app15-native-base-runtime/lib gdb -q -batch -x /tmp/app15-bootstrap/view-repro.gdb --args /tmp/app15-view-repro /tmp/app15-bootstrap/baseline_view.fdb "CREATE VIEW public.constant_view AS SELECT 1 AS v" "SELECT v FROM public.constant_view"
+```
+
+Это OO prepare/execute в dialect4 на существующей базе; native1/2/3 и upstream
+происхождение не доказаны. Не исправлялось самостоятельным изменением native
+ExprNodes: требуется отдельное архитектурное решение. В обязательной проверке
+SQL-09 канонизации используется view с реальным `FROM "SYSTEM"."RDB$DATABASE"`,
+тот же `_utf8` identifier/introducer, strings=off и native source reprepare.
+Падающий zero-stream VIEW сохраняет отдельный FAIL; поддержанный PG TEMP lifecycle
+и его views/provider не зависят от zero-stream persistent view.
+
+### Артефакты и границы
+
+Итоговый engine SHA256:
+`7ce4a4e3e11e112faef52ae88b39ad8805602e9f6d1b4e8b46d119c4b8a792b8`.
+PgWire module SHA256:
+`167f51a616cbfc41b0c2e75c85424cea39ba389596d8000a089847312779ba16`.
+Принятый baseline engine:
+`854574a95aa2ef9a0794cde204ef0fb1aefc4dee871e202bb180778b759a3cae`.
+Oracle summary:
+`c61e921f9c0fd7e02f34764aa784117bc094c92556ffdf4e40c831946125c1e4`.
+Visibility повторена на итоговом engine после уточнения NULL/path contract.
+GDB runtime engine: `158c5a82f6c7fe38c03af9dc838b0cd344d9e2f1460347b2ccf2bd9509803a5d`.
+Регрессии names/BEGIN выполнены после cache fix на engine
+`e23593d1fe0705af4635d2ab9c23584427bc367cf11606eb6b03630bb5f3e9c8`,
+strings — после lexer fix на
+`cfb7f0e867df91068149d8811e962415392a056055b1813c141fcd8df27b03f3`.
+Последующие изменения — TEMP-target/collision guards, PG cache identity и
+NULL/effective-path contract helper. Проверены полной итоговой APP-15 и повторной
+visibility матрицами; дополнительный $user case проверяет native CURRENT_USER
+внутри SQL SECURITY DEFINER (getUserName, не effective definer). Повтор остальных
+регрессий без новых оснований не выполнялся.
+
+Финальные source files/hashes, tracked diff и дополнительные новые файлы —
+`/tmp/app15-review/`; `implementation-files.json` (31 файл, включая untracked SQL
+и helpers) SHA256 `1a91908513290a6372ee7a99b1cca8ef62640d9fd73c0f5dab7005407cfb6ca2`.
+`artifacts.json` содержит hashes отчётов, логов, runtime binaries и GDB evidence;
+`working-tree.patch` и `new-files/` позволяют восстановить review diff. Встроенный
+`source_diff_sha256` harness учитывает только tracked diff на момент прогона,
+поэтому не заменяет manifest новых файлов. После итогового прогона изменена только документация. CLI validation/help для
+обязательного previous-runtime аргумента проверен и входит в итоговый source manifest.
+
+Не заявляется full PostgreSQL temporary/catalog/type compatibility: ограничения
+ON COMMIT DROP, обычного CREATE в pg_temp, native mixed lookup, read-only allocator,
+foreign temp catalog rows, native metadata types и session-lifetime search_path
+перечислены в COMPATIBILITY. Для DROP IF EXISTS без фактического PG-owned target
+под user savepoint остаётся согласованный общий native guard. Многотранзакционный
+native attachment не может создавать вторую PG LTT, пока другая транзакция впервые
+инициализирует namespace. Новый default/serial/type слой не добавлен.
+
+## 12 ноября 2026: архитектурный review NAT-06
+
+**Принято в `516f55bbb5`; замечаний, препятствующих продолжению APP-15, нет.**
+Проверен diff пяти production-файлов относительно `11dee63d2a`: порядок и владение
+LTT undo, сбор actions до уничтожения row-root, commit/retaining/force rollback,
+ошибки backout и внутренняя граница `CacheVector::rollback(..., keep)`.
+Публичный API, ODS, row GC и native запрет DDL под user savepoint не расширены.
+Рабочее дерево перед review было чистым; исходники при review не менялись.
+
+Независимые повторы на существующей сборке `/tmp/gen/Debug/firebird`, в отдельных
+копиях runtime со своими locks и новыми тестовыми базами:
+
+- `python3 -B pg_wire_protocol/tools/native_ltt_undo_checks.py --firebird-dir /tmp/gen/Debug/firebird --work-dir /tmp/nat06-review-516f55bbb5`
+  — **44/44 PASS**, exit 0; все тестовые базы удалены.
+  Результат `/tmp/nat06-review-516f55bbb5/summary.json`,
+  лог `/tmp/nat06-review-516f55bbb5.log`.
+- Существующий native API probe `/tmp/nat06-api-final` — **38/38 PASS**, exit 0,
+  stderr пуст, база удалена. Результат
+  `/tmp/nat06-api-review-516f55-m4e3afa_/summary.json`.
+
+Все 294 файла из `/tmp/nat06-artifacts.json` существуют и совпадают по SHA256.
+Текущий production diff совпадает с сохранённым `nat06-production.diff`:
+`b034a11d6cecf58ba54fd05310c5d4db001f66491a6102b08b4bfded9b1c97c3`.
+Engine проверенной сборки:
+`854574a95aa2ef9a0794cde204ef0fb1aefc4dee871e202bb180778b759a3cae`.
+Архивные baseline 23 FAIL / 21 PASS и modified 44 PASS соответствуют текущим
+сценариям. Fault probes 5/7 и wire-регрессии подтверждены сохранёнными артефактами;
+в этом review они повторно не запускались, сборка не выполнялась. Ограничения
+покрытия, перечисленные в отчёте реализации ниже, сохраняются.
+
+NAT-06 закрыт. Продолжить [APP-15](1c/TEMPORARY_RELATIONS_TASK.md) с этой ревизии:
+PG temporary lifecycle, SQL-09/10, namespace/resolver/live catalogs и единая
+приёмка ещё впереди. Успех native undo не означает готовности PG TEMP или 1С.
+
 ## 12 ноября 2026: NAT-06 native LTT metadata undo
 
-**Реализовано, проверки PASS, ожидает review.** Основа
+**Отчёт реализации; принят последующим review выше.** Основа
 `11dee63d2a51f9fbafcee3337f0aded03ae233e0`, ветка `pg_wire_protocol`.
 Начальные пользовательские правки архитектурных документов сохранены в
 `/tmp/nat06-initial.diff`; старые `/tmp/app15-*` артефакты не изменены.
-Исправление выполняет [NAT-06](1c/LTT_METADATA_UNDO_TASK.md). APP-15 не начат;
-возобновление PG temporary lifecycle — после review этого native diff.
+Исправление выполняет [NAT-06](1c/LTT_METADATA_UNDO_TASK.md). На момент этого отчёта
+APP-15 не начат; последующий review разрешает возобновление PG temporary lifecycle.
 Git add/commit/amend/reset/checkout не выполнялись.
 
 ### Изменения и границы владения

@@ -1,16 +1,18 @@
 # APP-15: полный рабочий цикл PG temporary tables
 
-Уточнение 12 ноября 2026: [отдельное исправление NAT-06](LTT_METADATA_UNDO_TASK.md)
-реализовано и ожидает review; 44 native SQL сценария, 38 OO assertions и релевантные
-регрессии PASS ([отчёт](../VALIDATION.md#12-ноября-2026-nat-06-native-ltt-metadata-undo)).
-Возобновить этот этап только после review fix. PG TEMP реализация ещё не начата.
+Возобновление 12 ноября 2026: [отдельное исправление NAT-06](LTT_METADATA_UNDO_TASK.md)
+принято в `516f55bbb5`: review без замечаний, независимый повтор 44 native SQL
+сценариев и 38 OO assertions PASS
+([review](../VALIDATION.md#12-ноября-2026-архитектурный-review-nat-06)).
+Реализация разделов 2–6 выполнена в рабочем diff 12 ноября и оставлена для review.
+[Проверки и границы](../VALIDATION.md#12-ноября-2026-app-15-полный-цикл-поддержанных-pg-temporary-tables).
 P2 APP-14 уже исправлен в `11dee63d2a`, повторная
 реализация не нужна. Ниже также уточнён необходимый guard для PG LTT DDL под
 user savepoint: нынешний native код такую DDL ещё не разрешает (SQL-10).
 
 Задание для отдельного диалога разработки, 11 ноября 2026 года.
 Рабочий каталог `/home/aleksey/dev/my_firebird/firebird`, master Firebird 6,
-ветка `pg_wire_protocol`; проверенная основа `8ffd22cb7669a430b9554a46e467264d0fe32ee5`.
+ветка `pg_wire_protocol`; проверенная основа `516f55bbb5`.
 Не переключать ветку ради этой ревизии. Сначала прочитать применимые инструкции,
 status/diff, [README](README.md), [PROGRESS](PROGRESS.md), [BACKLOG](../BACKLOG.md)
 и начало [VALIDATION](../VALIDATION.md).
@@ -22,7 +24,7 @@ status/diff, [README](README.md), [PROGRESS](PROGRESS.md), [BACKLOG](../BACKLOG.
 весь roadmap 1С. Пользователь проверяет diff и сам делает коммит: не выполнять
 git add, commit, amend, reset или checkout.
 
-Это следующий этап, ещё не реализован. Он затрагивает APP-14/15, часть APP-01/04,
+Это согласованная инструкция выполненного этапа; review рабочего diff ещё впереди. Он затрагивает APP-14/15, часть APP-01/04,
 SQL-09/10. APP-02/03/05/06, полный APP-01/04 и исходный selected04 не закрываются.
 
 ## Проверяемый результат
@@ -60,9 +62,10 @@ DROP TABLE pg_temp.work_items;
 SELECT * FROM work_items;          -- снова permanent
 ```
 
-Это обычный интеграционный fixture, не подмена исходных запросов 1С. До реализации
-зафиксировать ожидания спорных lifecycle случаев на отдельном PostgreSQL / Postgres
-Pro через настоящий libpq. Не использовать рабочий сервер или базу 1С.
+Это обычный интеграционный fixture, не подмена исходных запросов 1С. Уже выполненный
+oracle Postgres Pro 18.6 через libpq — `/tmp/app15-oracle/summary.json`, описание
+в VALIDATION. Использовать его результаты; дополнить проверку только для новых
+спорных lifecycle случаев. Не использовать рабочий сервер или базу 1С.
 
 ## 1. Сохранить исправление замечания APP-14
 
@@ -85,6 +88,9 @@ guards предшествовали `EVL_expr`. Выражение аргуме�
 Точки reuse: [описание LTT](../../doc/sql.extensions/README.created_local_temporary_tables.md),
 `LocalTemporaryTable.h`, Create/Alter/DropRelationNode в `DdlNodes.epp`,
 LTT undo в `Savepoint.cpp`, очистка в `Attachment.cpp`, существующие LTT indexes.
+Использовать принятый NAT-06: `LttUndo` в savepoint/транзакции, общий backout и
+сохранение metadata undo независимо от row-root. Повторно реализовывать этот fix
+или обобщать его в универсальный журнал ради PG namespace не требуется.
 Не создавать новый storage engine, shared GTT с фильтром по connection ID,
 служебные application attachments или отдельные транзакции для Parse/каталогов.
 На PgWire attachment остаётся не более одной активной native транзакции.
@@ -96,7 +102,7 @@ Native dialects 1/2/3 сохраняют свои значения по умол
 
 **Дополнение SQL-10:** нынешний `DsqlDdlRequest::execute` запрещает любую DDL
 под user savepoint до вызова node. `FLAG_ACTUAL_LTT_DDL` выставляется позже и
-пока только исключает replication. После native undo fix добавить узкую engine
+пока только исключает replication. Добавить узкую engine
 проверку до эффектов: под user savepoint разрешены только PG4 операции, чей
 фактический target — PG-owned LTT (для CREATE — PG TEMP intent). Для ALTER/DROP/
 index operations проверить текущий target и ownership, не только вид SQL или
@@ -196,8 +202,9 @@ Native LTT IDs повторяются между attachments и переиспо
 Namespace не исчезает просто из-за DROP последней таблицы. Проверить на PG oracle
 первое CREATE → rollback, CREATE+DROP в одной транзакции, savepoint rollback/release
 и последующее повторное CREATE. Хранить undo инициализации отдельно от конкретной
-LTT: namespace живёт и после CREATE+DROP, а оптимизации LTT undo могут сокращать
-такие пары. Не вести параллельный
+LTT: namespace живёт и после CREATE+DROP и имеет собственную границу rollback.
+Принятый NAT-06 хранит полный список LTT actions без coalescing; удаление одной
+таблицы не должно отменять namespace activation. Не вести параллельный
 исторический журнал временных объектов в PgWire.
 
 Namespace activation и выделение IDs происходят только при Execute создания,
@@ -205,7 +212,7 @@ Namespace activation и выделение IDs происходят только
 statement undo; ранее активное namespace сохраняется. Parse → Describe → Close
 без Execute не меняет pg_my_temp_schema, каталог или allocator.
 
-После приёмки NAT-06 повторить, что undo не теряется при освобождении большого root savepoint:
+В PG-профиле повторить, что undo не теряется при освобождении большого root savepoint:
 CREATE TEMP → достаточно DML для этого пути → ROLLBACK. Native `Savepoint::rollforward`
 и его SIZE_THRESHOLD нельзя оценивать только малыми fixtures. Native prerequisite
 закрывает root/NO AUTO UNDO/merge/retaining; APP-15 проверяет их вместе с новым
@@ -305,8 +312,8 @@ APP-14 → APP-15 переход; общий установщик пока не 
 
 ## 6. Реализация и приёмка одним этапом
 
-Порядок внутри работы: короткий native/PG oracle и проверка reuse → исправление
-APP-14 → LTT grammar/state/undo → resolver/IDs → live provider и SQL views → общий
+Порядок внутри работы: сверка сохранённого oracle и принятого native reuse →
+LTT grammar/state/undo → resolver/IDs → live provider и SQL views → общий
 libpq/native сценарий. Можно проверять части по мере реализации, но сдавать
 согласованный результат всего этапа. Не добавлять самостоятельный harness:
 расширить нынешний pgwire_1c_smoke и существующие libpq/raw/native helpers.

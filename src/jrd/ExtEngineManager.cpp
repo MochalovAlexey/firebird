@@ -21,6 +21,8 @@
  */
 
 #include "firebird.h"
+#include "firebird/Message.h"
+#include "../jrd/LocalTemporaryTable.h"
 #include "firebird/impl/consts_pub.h"
 #include "iberror.h"
 #include "firebird/impl/inf_pub.h"
@@ -1695,6 +1697,98 @@ unloaded only on program exit, causing at that moment AV if this code is active:
 
 namespace
 {
+	// Versioned, exact entrypoint for an installed procedure, not a SYSTEM package.
+	FB_MESSAGE(PgTempRow, ThrowStatusExceptionWrapper,
+		(FB_SMALLINT, rowKind)
+		(FB_BIGINT, publicId)
+		(FB_INTEGER, nativeId)
+		(FB_INTL_VARCHAR(63 * METADATA_BYTES_PER_CHAR, CS_METADATA), relationName)
+		(FB_BIGINT, namespaceId)
+		(FB_INTL_VARCHAR(63 * METADATA_BYTES_PER_CHAR, CS_METADATA), namespaceName)
+	);
+
+	class PgTempRows final : public DisposeIface<IExternalResultSetImpl<PgTempRows, ThrowStatusExceptionWrapper>>
+	{
+	public:
+		explicit PgTempRows(PgTempRow::Type* aOut)
+			: out(aOut), rows(*getDefaultMemoryPool())
+		{
+			const auto attachment = JRD_get_thread_data()->getAttachment();
+			if (!attachment->att_pg_temp_namespace)
+				return;
+			PgTempRow::Type row{};
+			row.rowKind = 0;
+			row.publicId = row.namespaceId = attachment->att_pg_temp_namespace;
+			row.namespaceName.set(attachment->pgTempSchemaName().c_str());
+			row.nativeIdNull = row.relationNameNull = FB_TRUE;
+			rows.add(row);
+			for (const auto& entry : attachment->att_local_temporary_tables)
+			{
+				const auto ltt = entry.second;
+				if (!ltt->pgTemporary)
+					continue;
+				row.rowKind = 1;
+				row.publicId = ltt->pgRelationId;
+				row.nativeId = ltt->relationId;
+				row.relationName.set(ltt->name.object.c_str());
+				row.nativeIdNull = row.relationNameNull = FB_FALSE;
+				rows.add(row);
+			}
+		}
+
+		void dispose() override { delete this; }
+		FB_BOOLEAN fetch(ThrowStatusExceptionWrapper*) override
+		{
+			if (position == rows.getCount())
+				return false;
+			*out = rows[position++];
+			return true;
+		}
+
+	private:
+		PgTempRow::Type* out;
+		Array<PgTempRow::Type> rows;
+		unsigned position = 0;
+	};
+
+	IExternalResultSet* openPgTempRows(ThrowStatusExceptionWrapper*, IExternalContext*,
+		const void*, PgTempRow::Type* out)
+	{
+		return FB_NEW PgTempRows(out);
+	}
+
+	void validatePgTempRows(ThrowStatusExceptionWrapper* status, IRoutineMetadata* metadata)
+	{
+		const auto mismatch = []()
+		{
+			(Arg::Gds(isc_random) << "Invalid PGWIRE_COMPAT.TEMP_ROWS_V1 message contract").raise();
+		};
+		const auto package = metadata->getPackage(status);
+		if (strcmp(metadata->getSchema(status), "PGWIRE_COMPAT") ||
+			strcmp(metadata->getName(status), "TEMP_ROWS_V1") || (package && package[0]))
+			mismatch();
+		RefPtr<IMessageMetadata> in(REF_NO_INCR, metadata->getInputMetadata(status));
+		RefPtr<IMessageMetadata> out(REF_NO_INCR, metadata->getOutputMetadata(status));
+		if (in->getCount(status) || out->getCount(status) != 6)
+			mismatch();
+		const unsigned types[] = {SQL_SHORT, SQL_INT64, SQL_LONG, SQL_VARYING, SQL_INT64, SQL_VARYING};
+		const unsigned lengths[] = {2, 8, 4, 63 * METADATA_BYTES_PER_CHAR, 8, 63 * METADATA_BYTES_PER_CHAR};
+		for (unsigned i = 0; i < 6; ++i)
+		{
+			if ((out->getType(status, i) & ~1u) != types[i] || out->getLength(status, i) != lengths[i] ||
+				out->getScale(status, i) != 0 ||
+				out->getSubType(status, i) != (types[i] == SQL_VARYING ? USHORT(CS_METADATA) : 0) ||
+				(types[i] == SQL_VARYING && out->getCharSet(status, i) != CS_METADATA))
+			{
+				string message;
+				message.printf("Invalid TEMP_ROWS_V1 field %u: type %u, length %u, scale %d, subtype %d, charset %u",
+					i, out->getType(status, i), out->getLength(status, i), out->getScale(status, i),
+					out->getSubType(status, i), out->getCharSet(status, i));
+				(Arg::Gds(isc_random) << message).raise();
+			}
+		}
+	}
+
 	class SystemEngine : public StdPlugin<IExternalEngineImpl<SystemEngine, ThrowStatusExceptionWrapper> >
 	{
 	public:
@@ -1755,8 +1849,17 @@ namespace
 		IExternalProcedure* makeProcedure(ThrowStatusExceptionWrapper* status, IExternalContext* context,
 			IRoutineMetadata* metadata, IMetadataBuilder* inBuilder, IMetadataBuilder* outBuilder) override
 		{
+			if (!strcmp(metadata->getEntryPoint(status), "PGWIRE_TEMP_ROWS_V1"))
+			{
+				validatePgTempRows(status, metadata);
+				return SystemProcedureFactory<VoidMessage, PgTempRow, openPgTempRows>()(
+					status, context, metadata, inBuilder, outBuilder);
+			}
+
 			const char* packageName = metadata->getPackage(status);
 			const char* routineName = metadata->getName(status);
+			if (!packageName)
+				(Arg::Gds(isc_random) << "Unknown ENGINE SYSTEM procedure entrypoint").raise();
 
 			for (auto& package : SystemPackage::get())
 			{

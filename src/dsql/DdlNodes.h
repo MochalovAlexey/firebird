@@ -1772,14 +1772,8 @@ public:
 	void checkPermission(thread_db* tdbb) override;
 	void execute(thread_db* tdbb, DsqlCompilerScratch* dsqlScratch, jrd_tra* transaction) override;
 
-	DdlNode* dsqlPass(DsqlCompilerScratch* dsqlScratch) override
-	{
-		dsqlScratch->qualifyNewName(name);
-		protectSystemSchema(name.schema, obj_relation);
-		dsqlScratch->ddlSchema = name.schema;
-
-		return RelationNode::dsqlPass(dsqlScratch);
-	}
+	DdlNode* dsqlPass(DsqlCompilerScratch* dsqlScratch) override;
+	bool isPgTemporaryDdl(thread_db*) const override { return pgTemporary; }
 
 	bool mustBeReplicated() const override
 	{
@@ -1806,6 +1800,7 @@ private:
 public:
 	const Firebird::string* externalFile;
 	bool createIfNotExistsOnly = false;
+	bool pgTemporary = false;
 	bool packagePrivate = false;
 	NestConst<ValueListNode> queryColumns;
 	NestConst<SelectExprNode> querySelectExpr;
@@ -1839,6 +1834,7 @@ public:
 public:
 	Firebird::string internalPrint(NodePrinter& printer) const override;
 	void checkPermission(thread_db* tdbb) override;
+	bool isPgTemporaryDdl(thread_db* tdbb) const override;
 	void execute(thread_db* tdbb, DsqlCompilerScratch* dsqlScratch, jrd_tra* transaction) override;
 
 protected:
@@ -1870,6 +1866,7 @@ public:
 public:
 	Firebird::string internalPrint(NodePrinter& printer) const override;
 	void checkPermission(thread_db* tdbb) override;
+	bool isPgTemporaryDdl(thread_db* tdbb) const override;
 	void execute(thread_db* tdbb, DsqlCompilerScratch* dsqlScratch, jrd_tra* transaction) override;
 
 	DdlNode* dsqlPass(DsqlCompilerScratch* dsqlScratch) override
@@ -1902,6 +1899,7 @@ public:
 	bool view;
 	bool silent;
 	bool recreate = false;
+	bool cascade = false;
 };
 
 
@@ -2063,6 +2061,7 @@ public:
 public:
 	Firebird::string internalPrint(NodePrinter& printer) const override;
 	void checkPermission(thread_db* tdbb) override;
+	bool isPgTemporaryDdl(thread_db* tdbb) const override;
 	void execute(thread_db* tdbb, DsqlCompilerScratch* dsqlScratch, jrd_tra* transaction) override;
 	DdlNode* dsqlPass(DsqlCompilerScratch* dsqlScratch) override;
 
@@ -2125,6 +2124,7 @@ public:
 public:
 	Firebird::string internalPrint(NodePrinter& printer) const override;
 	void checkPermission(thread_db* tdbb) override;
+	bool isPgTemporaryDdl(thread_db* tdbb) const override;
 	void execute(thread_db* tdbb, DsqlCompilerScratch* dsqlScratch, jrd_tra* transaction) override;
 	// First step of index alteration. Returns true if second step is needed
 	bool step1(thread_db* tdbb, DsqlCompilerScratch* dsqlScratch, jrd_tra* transaction);
@@ -2220,6 +2220,7 @@ public:
 public:
 	Firebird::string internalPrint(NodePrinter& printer) const override;
 	void checkPermission(thread_db* tdbb) override;
+	bool isPgTemporaryDdl(thread_db* tdbb) const override;
 	void execute(thread_db* tdbb, DsqlCompilerScratch* dsqlScratch, jrd_tra* transaction) override;
 	void drop(thread_db* tdbb, DsqlCompilerScratch* dsqlScratch, jrd_tra* transaction,
 	    ModifyIndexList& list, bool dropSegments = true);
