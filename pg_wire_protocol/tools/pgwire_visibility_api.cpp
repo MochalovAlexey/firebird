@@ -80,9 +80,9 @@ int main(int argc, char** argv)
 			}
 			catch (...) { statement->release(); throw; }
 		};
-		const auto reject = [&]()
+		const auto reject = [&](IStatement* statement = nullptr)
 		{
-			try { fetch(persistent); }
+			try { fetch(statement ? statement : persistent); }
 			catch (const FbException& error)
 			{
 				char state[6]; fb_sqlstate(state, error.getStatus()->getErrors());
@@ -95,6 +95,10 @@ int main(int argc, char** argv)
 		for (const char* sql : {"CREATE SCHEMA \"pg_catalog\"", "CREATE SCHEMA VA", "CREATE SCHEMA VB",
 			"CREATE TABLE VA.SAME(V INTEGER)", "CREATE TABLE VB.SAME(V INTEGER)",
 			"INSERT INTO VA.SAME VALUES(11)", "INSERT INTO VB.SAME VALUES(22)"}) exec(sql);
+		exec("CREATE FUNCTION PUBLIC.CHANGE_PATH RETURNS VARCHAR(4) AS BEGIN "
+			"EXECUTE STATEMENT 'SET SEARCH_PATH TO VB, SYSTEM'; RETURN 'SAME'; END");
+		exec("CREATE FUNCTION PUBLIC.NULL_PATH RETURNS VARCHAR(4) AS BEGIN "
+			"EXECUTE STATEMENT 'SET SEARCH_PATH TO VB, SYSTEM'; RETURN NULL; END");
 		transaction->commit(&status);
 		transaction = attachment->startTransaction(&status, 0, nullptr);
 		// Prepare without a supported path must succeed, Execute must fail.
@@ -128,6 +132,35 @@ int main(int argc, char** argv)
 		exec("SET SEARCH_PATH TO VB, VA, \"pg_catalog\", SYSTEM");
 		auto second = fetch(persistent);
 		require(second && second != first && query("SELECT V FROM SAME") == 22, "Prepared helper cached old path");
+		// The argument changes attachment state at Execute. Guards must inspect
+		// that new state, including on repeated execution of the same native handle.
+		auto changingArgument = attachment->prepare(&status, transaction, 0,
+			"SELECT RDB$PG_RELATION_ID(PUBLIC.CHANGE_PATH()) FROM SYSTEM.RDB$DATABASE", 3, 0);
+		try
+		{
+			for (unsigned i = 0; i < 2; ++i)
+			{
+				exec("SET SEARCH_PATH TO VA, \"pg_catalog\", SYSTEM");
+				reject(changingArgument);
+				require(query("SELECT V FROM SAME") == 22, "Argument did not change search path");
+				reject();
+			}
+			changingArgument->free(&status);
+		}
+		catch (...) { changingArgument->release(); throw; }
+		exec("SET SEARCH_PATH TO VA, \"pg_catalog\", SYSTEM");
+		require(!query("SELECT RDB$PG_RELATION_ID(CAST(NULL AS VARCHAR(4))) FROM SYSTEM.RDB$DATABASE"),
+			"NULL argument on a supported path is not NULL");
+		auto nullArgument = attachment->prepare(&status, transaction, 0,
+			"SELECT RDB$PG_RELATION_ID(PUBLIC.NULL_PATH()) FROM SYSTEM.RDB$DATABASE", 3, 0);
+		try
+		{
+			// A NULL result must not bypass guards, including a path changed by
+			// its expression. Preserve the original guard-before-NULL contract.
+			reject(nullArgument);
+			nullArgument->free(&status);
+		}
+		catch (...) { nullArgument->release(); throw; }
 		exec("SET SEARCH_PATH TO MISSING, \"pg_catalog\", SYSTEM");
 		require(!fetch(persistent), "Missing lookup is not NULL");
 		exec("SET SEARCH_PATH TO VA, \"$user\", \"pg_catalog\", SYSTEM"); reject();
@@ -152,6 +185,20 @@ int main(int argc, char** argv)
 		std::fprintf(stderr, "%s\n", buffer); result = 1;
 	}
 	catch (const std::exception& error) { std::fprintf(stderr, "%s\n", error.what()); result = 1; }
+	// A failed assertion still owns a live native transaction/attachment.
+	// Close them explicitly instead of leaving shutdown to clean up the test DB.
+	try
+	{
+		if (persistent) { persistent->free(&status); persistent = nullptr; }
+		if (transaction) { transaction->rollback(&status); transaction = nullptr; }
+		if (attachment) { attachment->dropDatabase(&status); attachment = nullptr; }
+	}
+	catch (const FbException& error)
+	{
+		char buffer[2048];
+		master->getUtilInterface()->formatStatus(buffer, sizeof(buffer), error.getStatus());
+		std::fprintf(stderr, "Cleanup: %s\n", buffer); result = 1;
+	}
 	if (persistent) persistent->release();
 	if (transaction) transaction->release();
 	if (attachment) attachment->release();

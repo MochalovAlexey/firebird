@@ -1,5 +1,14 @@
 # Матрица совместимости PostgreSQL wire plugin
 
+12 ноября: APP-15 (PG temporary lifecycle) остановлен на native blocker NAT-06:
+после освобождения большого root savepoint ROLLBACK теряет undo определения LTT.
+По решению пользователя native fix передаётся в архитектурный диалог; PG TEMP,
+virtual namespace, effective path и живые temp catalogs ещё не реализованы.
+P2 APP-14 исправлен отдельно в рабочем diff: EVL_expr выполняется до захвата path
+и guards; проверки сохраняются перед возвратом NULL. Регрессия использует PSQL
+аргумент, меняющий path, и повторный Execute одного native handle.
+[Доказательства и ограничения](VALIDATION.md); ниже — текущий профиль APP-14.
+
 ## APP-14: видимость постоянных отношений
 
 После отдельного [installer](1c/sql/install_relation_visibility.sql) поверх APP-10…13
@@ -39,9 +48,10 @@ Wire input codec отдельно отвергает NUL с 22021 до helper.
 Helper и wrapper не deterministic, собственного cache нет. Уже подготовленный
 native SELECT может хранить прежнюю привязку, поэтому SELECT oracle готовится
 заново. PgWire Bind/reprepare не изменён. Прямой RESET сохраняет прежнее удаление
-named statements (26000 до нового Parse). Известный baseline cache crash NAT-05
+named statements (26000 до нового Parse). Известный cache crash NAT-05
 после сочетания catalog/RESET/LTT и позднего Extended catalog lookup не исправлен;
-он воспроизведён также без нового builtin на APP-13, см. VALIDATION.
+он воспроизведён также без нового builtin на APP-13 нашего fork. Это не доказанный
+upstream/native-only дефект, см. VALIDATION.
 
 Wrapper — SQL SECURITY INVOKER, без dynamic SQL, autonomous transaction или записи
 при вызове. Engine не знает PG catalog/identity mapping. Installer plain CREATE

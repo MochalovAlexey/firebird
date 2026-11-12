@@ -67,15 +67,26 @@ PG4 folds unquoted ASCII names to lowercase; quoted names are exact. Native dial
 1/2/3 still use uppercase. Existing employee objects therefore require quoted native
 schema/table/column names. There is no uppercase fallback and no automatic migration.
 
-For unqualified CREATE on the default path or unquoted catalog queries, install the five SQL scripts
-in the [application bootstrap order](1c/README.md#app-13-имена-и-установка-lowercase-профиля)
-on a separate test database. An intact APP-10/11/12+compat.sql database only needs
-`1c/sql/install_pg_names.sql`. Use the owner/admin; credentials stay outside SQL.
-The installer refuses an existing lowercase pg_catalog and preserves an existing
-lowercase public and its data. Application CREATE/DML grants are separate.
+For unqualified CREATE on the default path or unquoted catalog queries, install
+all six compatibility scripts on a separate existing test database. Use native
+isql from an APP-14 build of this fork and the database owner/admin:
 
-For APP-14 relation visibility, run `1c/sql/install_relation_visibility.sql` once
-after that bootstrap, on a runtime with `RDB$PG_RELATION_ID`. It adds
+```sh
+python3 pg_wire_protocol/1c/install_compat.py \
+  --isql gen/Debug/firebird/bin/isql \
+  -d localhost/3050:pgwire_test -U sysdba -P masterkey
+```
+
+Replace the credentials. `-d` also accepts a native database alias or file path;
+use the native port, not PgWire. Python 3 is required. This is an initial install:
+rerunning the full set fails on the existing PGWIRE_COMPAT schema. Execution
+stops at the first failure; each SQL script retains its existing behavior.
+Each SQL file commits separately, so earlier successful steps remain installed.
+For a partially installed profile, use the individual scripts in the
+[documented bootstrap order](1c/README.md#общая-установка-sql-совместимости).
+Application CREATE/DML grants are separate.
+
+The last script installs APP-14 relation visibility using `RDB$PG_RELATION_ID`. It adds
 `pg_catalog.pg_table_is_visible(BIGINT)` with BOOLEAN results. The supported path
 must explicitly contain lowercase pg_catalog, grant USAGE on every existing
 schema, and contain no $user/pg_temp; this attachment must have no active native

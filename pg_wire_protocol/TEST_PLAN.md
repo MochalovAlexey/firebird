@@ -1,5 +1,23 @@
 # План приёмки wire plugins и PostgreSQL endpoint
 
+## APP-15: приёмка заблокирована NAT-06
+
+12 ноября большой native rollback воспроизведён как FAIL: LTT definition остаётся
+после удаления root savepoint; малый контроль PASS. По решению пользователя
+blocker передаётся в архитектурный диалог. Полная матрица ниже остаётся невыполненной.
+P2 APP-14 исправлен отдельно; существующий OO probe дополнен повторным Execute
+PSQL-аргумента, меняющего путь, NULL/error contract и cleanup ветки неуспеха.
+Oracle и точные результаты — в начале [VALIDATION](VALIDATION.md).
+
+[Инструкция и полная матрица](1c/TEMPORARY_RELATIONS_TASK.md): PG TEMP через native
+LTT, PRESERVE/DELETE и отказ ON COMMIT DROP, DML/индексы, undo/rollback/savepoints,
+две сессии, pg_temp и shadowing, живые каталоги после MON, pg_my_temp_schema и
+visibility, права, cache/RESET/cleanup, installer/upgrade без ODS change.
+Регрессия P2 APP-14 включена в существующий visibility OO probe.
+Проверить rollback также после большого DML, способного освободить root savepoint.
+APP-15 ещё не реализован. Исходные selected04/12/13 не объявлять PASS на изменённых
+fixtures: regnamespace и типы 1С остаются отдельным крупным этапом.
+
 ## APP-14: приёмка visibility
 
 `tools/pgwire_1c_smoke.py --visibility --firebird-dir NEW_RUNTIME --previous-firebird-dir APP13_RUNTIME --work-dir NEW_TMP --timeout 180`
@@ -12,8 +30,10 @@ LTT guard проверяется после создания LTT в той же 
 уже получен. Проверка старой базы под новым runtime исключает скрытую зависимость
 от новой system-package metadata. Исходный selected04 не объявлять PASS:
 regnamespace/temp namespace и полный PG search_path остаются отдельными задачами.
-Финальный APP-14: 174 libpq results и 46 OO assertions PASS; cache/NAT-05
-вынесен в отдельное baseline evidence, это не доказательство его исправления.
+Независимый review повторил 174 libpq results и 46 OO assertions PASS, но выявил
+отдельный P2 (порядок guards/EVL_expr), не покрытый прежней матрицей. После fix
+12.11 проходят 174 libpq / 60 OO assertions, с red/green контролем регрессии. Cache/NAT-05
+существует до APP-14 в нашем fork; это не доказательство upstream дефекта или его исправления.
 
 ## APP-13: PG names и native source
 

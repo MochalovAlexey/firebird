@@ -1,5 +1,283 @@
 # Проверки реализации
 
+## 12 ноября 2026: APP-15 остановлен на native LTT undo (NAT-06)
+
+Начальная ревизия `8ffd22cb7669a430b9554a46e467264d0fe32ee5`, ветка
+`pg_wire_protocol`; пользовательские изменения README/статусов/installer сохранены
+(снимок `/tmp/app15-initial.diff`). По ответу пользователя зависимая реализация
+APP-15 остановлена, blocker передаётся в архитектурный диалог. PG TEMP grammar,
+namespace state/IDs, resolver, provider и installer APP-15 не реализованы.
+Это не приёмка полного temporary lifecycle. Исправление P2 APP-14 независимо.
+
+### Native blocker и решение, которое требуется
+
+На отдельной UTF8/dialect3 базе, embedded isql, без PgWire, SQL compatibility
+installer и пользовательских таблиц воспроизведена потеря LTT metadata undo:
+
+```sql
+SET AUTODDL OFF;
+CREATE TABLE FILLER (V INTEGER);
+COMMIT;
+CREATE LOCAL TEMPORARY TABLE SMALL_LTT (V INTEGER) ON COMMIT PRESERVE ROWS;
+ROLLBACK;
+SELECT COUNT(*) AS SMALL_REMAINING FROM SYSTEM.MON$LOCAL_TEMPORARY_TABLES;
+COMMIT;
+CREATE LOCAL TEMPORARY TABLE LARGE_LTT (V INTEGER) ON COMMIT PRESERVE ROWS;
+SET TERM ^;
+EXECUTE BLOCK AS DECLARE I INTEGER = 0; BEGIN
+  WHILE (I < 300000) DO BEGIN INSERT INTO FILLER VALUES (:I); I = I+1; END
+END^
+SET TERM ;^
+SELECT COUNT(*) AS FILLER_BEFORE_ROLLBACK FROM FILLER;
+ROLLBACK;
+SELECT COUNT(*) AS LARGE_REMAINING FROM SYSTEM.MON$LOCAL_TEMPORARY_TABLES;
+SELECT COUNT(*) AS FILLER_AFTER_ROLLBACK FROM FILLER;
+ROLLBACK;
+DROP DATABASE;
+```
+
+Ожидается SMALL_REMAINING=0, FILLER_BEFORE_ROLLBACK=300000,
+LARGE_REMAINING=0, FILLER_AFTER_ROLLBACK=0. Фактически LARGE_REMAINING=1.
+MON читается в **новой** транзакции после ROLLBACK, старый snapshot не причина.
+Малый контроль PASS; общий rollback большого сценария **FAIL** при isql exit 0.
+
+Причина в существующем `Savepoint::rollforward`: большой statement savepoint
+вызывает `m_next->rollforward(tdbb)` для root (`Savepoint.cpp:584`);
+root без parent удаляет `m_lttActions` (`Savepoint.cpp:710–715`). Порог
+`Savepoint::SIZE_THRESHOLD` равен 32768 bytes, это оценка bitmap, не число строк.
+Аналогичный путь освобождения root после merge есть в строке 737.
+При окончательном `TRA_rollback` root уже отсутствует: записи откатываются через
+состояние транзакции, но attachment-local definitions этим путём не восстанавливаются.
+Это исходный native-only дефект нашего fork; upstream происхождение не исследовано.
+NAT-05 — отдельный cache crash; его исходный reproducer не менялся и здесь не запускался.
+
+Нужно согласовать отдельный native fix: сохранять LTT metadata undo до завершения
+транзакции независимо от освобождения большого row undo. Он должен работать для
+LTT DDL как до, так и после удаления root, для CREATE/ALTER/DROP и merge/release
+user savepoints; отдельно определить контракт TPB NO AUTO UNDO. Само увеличение
+SIZE_THRESHOLD или запрет очистки всего большого row undo не является подтверждённым
+решением. PG namespace activation потребует собственного undo, поскольку native
+CREATE+DROP merge может сократить обе LTT actions. Копировать этот журнал в PgWire
+или обещать только малые rollback нельзя. Native fix в этом diff **не внесён**.
+
+### Oracle PostgreSQL
+
+Отдельный Postgres Pro `/opt/pgpro/1c-18/bin`, `version()`:
+`PostgreSQL 18.6 on x86_64-pc-linux-gnu`, GCC 11.4.0. Настоящий libpq,
+существующий `pgwire_1c_smoke.Libpq`; новый initdb-кластер
+`/tmp/app15-oracle/data`, loopback port 42407. Рабочий сервер/база 1С не затрагивались.
+Команда `python3 -B /tmp/app15-oracle/run.py`; точные SQL/rows/metadata/tags в
+`/tmp/app15-oracle/summary.json`, команды initdb/start/stop и server log рядом.
+
+| Случай | Actual result |
+|---|---|
+| Первое CREATE → ROLLBACK | namespace 0 → 16385 → 0; повторный CREATE получает 16390 |
+| DROP последней таблицы после committed CREATE | namespace 16390 сохраняется, tables=0 |
+| Первое CREATE+DROP → COMMIT | namespace 16395 сохраняется пустым |
+| Первое CREATE+DROP → ROLLBACK | namespace 16400 → 0 |
+| SAVEPOINT, CREATE, RELEASE, ROLLBACK | namespace 16405 → 0 |
+| SAVEPOINT, CREATE, ROLLBACK TO | namespace 16410 → 0; повторный CREATE=16415, commit сохраняет его |
+| Default PRESERVE / explicit DELETE | после commit rows=[1] / []; rollback INSERT сохраняет [1] |
+| DROP → ROLLBACK TO | определение и строка [1] восстановлены |
+
+Oracle завершён, server stop exit 0. Эти наблюдения фиксируют целевую семантику,
+не являются PASS Firebird APP-15. Документация: [CREATE TABLE](https://www.postgresql.org/docs/18/sql-createtable.html),
+[search_path](https://www.postgresql.org/docs/18/runtime-config-client.html#GUC-SEARCH-PATH),
+[visibility/temp functions](https://www.postgresql.org/docs/18/functions-info.html),
+[OID types](https://www.postgresql.org/docs/18/datatype-oid.html).
+
+### Сборка, воспроизведение и независимое исправление P2
+
+Свежая developer build GCC 13.4.0, Linux/Super; baseline production sources
+не изменялись до копирования runtime для native probe. Исходные source revision
+и production diff выше/в таблице ниже. Configure и полный make exit 0:
+
+```sh
+# Build cwd=/tmp; source/build/runtime не рабочая установка пользователя.
+/home/aleksey/dev/my_firebird/firebird/configure --enable-binreloc --enable-developer
+make -j2
+python3 -B /tmp/app15-native-probe.py /tmp/gen/Debug/firebird /tmp/app15-native-baseline
+# После минимального P2 fix:
+make -C /tmp/gen -j4 TARGET=Debug
+```
+
+Логи `/tmp/configure.log`, `/tmp/build.log`, `/tmp/app15-p2-rebuild.log`.
+Первый повтор top-level `make -j4` ничего не собирал; проверяемый incremental
+build выполнен через `make -C /tmp/gen`, engine hash действительно изменился.
+`/tmp/app15-native-baseline/runtime` — сохранённые неизменённые native binaries;
+`/tmp/gen/Debug/firebird` — новая сборка с P2 fix. Исходный native reproducer
+есть в `probe.sql`, stdout/stderr/summary рядом: SMALL_REMAINING=0,
+FILLER_BEFORE_ROLLBACK=300000, LARGE_REMAINING=1, FILLER_AFTER_ROLLBACK=0,
+isql exit 0, probe.fdb удалена штатным DROP DATABASE.
+
+Точное подтверждение GDB на свежем baseline, `trace.gdb`/`trace.log` рядом:
+
+```sh
+FIREBIRD=/tmp/app15-native-baseline/runtime \
+LD_LIBRARY_PATH=/tmp/app15-native-baseline/runtime/lib ISC_USER=SYSDBA \
+gdb -batch -x /tmp/app15-native-baseline/trace.gdb \
+  /tmp/app15-native-baseline/runtime/bin/isql
+```
+
+Breakpoints **внутри** выбранных веток: Savepoint.cpp:584 (root flags=1,
+LTT_UNDO_CREATE) и :715 (тот же root, удаление item без parent). Stack :715 →
+:584 → jrd_tra::releaseSavepoint → forgetSavepoint → execute_looper. Inferior exit 0,
+база после повторного probe также удалена. Предварительный старый runtime дал
+тот же результат (`/tmp/app15-native-preliminary`), но доказательство baseline
+основано на свежей сборке `8ffd22cb76`, а не на предположении о старых binaries.
+
+P2 production diff — только `SysFunction.cpp`: EVL_expr перенесён перед чтением
+attachment/path и guards. Проверки состояния остаются перед NULL result check;
+обычный NULL на допустимом пути возвращает NULL, NULL из функции, сменившей путь
+на неподдержанный, получает 0A000. SQL wrapper, native resolver/SCL, Savepoint,
+PgWire, grammar, cache, installer/API/ODS не менялись.
+
+Существующий `pgwire_visibility_api.cpp` дополнен PSQL CHANGE_PATH/NULL_PATH,
+повтором одного native prepared handle и cleanup ошибки. Контроль одной и той
+же регрессией: baseline `p2-red.log` → `Guard did not reject Execute`, exit 1;
+P2 `/tmp/app15-p2-green.log` → PASS, 60 assertions, native dialects 1/2/3. Сборка OO probe
+с `-Wall -Wextra -Werror` прошла. В обоих итоговых случаях private DB удалена.
+Первый диагностический red run до исправления cleanup выдал ту же ошибку, затем
+abort (exit 134) при shutdown с одним открытым attachment (`p2-before.log`,
+`runtime/firebird.log`). Это не скрытый PASS: test cleanup теперь явно free/
+rollback/dropDatabase; повтор red exit 1 без abort. Оставшаяся от первого запуска
+база `p2-before.fdb` удалена native DROP DATABASE. Production shutdown fix не вносился.
+
+Полная существующая visibility матрица, без изменения порядка её запросов:
+
+```sh
+python3 -B pg_wire_protocol/tools/pgwire_1c_smoke.py --visibility \
+  --firebird-dir /tmp/gen/Debug/firebird \
+  --previous-firebird-dir /tmp/app15-native-baseline/runtime \
+  --work-dir /tmp/app15-p2-visibility --timeout 180
+```
+
+`summary.json`: completed=true, visibility_passed=true, **174 libpq results /
+60 OO assertions PASS**. Семь installer checks (fresh, rollback, repeat,
+foreign collision, прежние IDs/catalogs, INVOKER, PUBLIC EXECUTE); native/wire
+rights/path/LTT, binary/text/NULL, I/T/E/recovery и native 1/2/3 сохранены.
+Native metadata input BIGINT/wire20, output BOOLEAN/wire16. libpq 14.24 (140024).
+Upgrade fixture создаёт **SQL layout APP-13 на baseline runtime APP-14**, затем
+устанавливает visibility новым runtime: данные 53 сохранены, visibility TRUE,
+ODS 14.0 до/после, оба isql exit 0. Это не проверка installer APP-15 и не повтор
+старого runtime APP-13: тот бинарный artifact отсутствовал и здесь не пересобирался.
+Сервер exit 0, forced_kill=false; штатный shutdown 0.114 s, native порт 53031,
+PgWire 52627. Oracle и эти порты проверены после остановки (cleanup report ниже).
+
+### Покрытие и оставшаяся работа
+
+- PASS: PostgreSQL oracle, P2 red/green, свежая baseline и P2 build, текущая
+  APP-14 visibility матрица/installer/native API; git diff --check.
+- FAIL: native большой rollback LTT definition на исходной `8ffd22cb76` (NAT-06).
+- BLOCKED: полный рабочий цикл APP-15; по решению пользователя передан в
+  архитектурный диалог до отдельного native fix. Allocator/provider/новые права,
+  PG temp grammar/IDs/path/installer отсутствуют; их matrix не запускалась.
+- SKIP: исходные selected04/12/13, полные APP-01/04, APP-02/03/05/06, SQL-09;
+  NAT-01…05 repro, полные strings/names/transaction suites повторно не запускались
+  для этого минимального P2 fix. Исторические PASS не выдаются за новую приёмку.
+- NAT-05 исходная падающая комбинация остаётся исключённой существующим APP-14
+  harness; в этом этапе запросы не переставлялись, cache не отключался/не увеличивался.
+
+Изменения оставлены для review: git add/commit/amend/reset/checkout не выполнялись.
+Отчёт hash manifest — `/tmp/app15-artifacts.json`; итоговый diff сохраняется в
+`/tmp/app15-final.diff`, контроль освобождения портов/DB — `/tmp/app15-cleanup.json`.
+Реальные серверы/базы 1С и private capture не использовались.
+
+| Artifact | SHA256 |
+|---|---|
+| baseline engine | `316960f1d942cb943a4494b7310316d8d08bdbc7082c563df9c5a7187f142beb` |
+| P2 engine | `2b1afd94ba412700f8faa6b00674e82da654c86791e67eecfd343776a87d6da5` |
+| PgWire | `b833667daf113804b766bad47540e5507d993c5fce2221632b4f031ba4868806` |
+| firebird | `b0cf96b1fbf8128fede08dd89b5b6a90f2ed86003de906225d83aab39f9aed4d` |
+| OO probe source | `8ba43d605ca865376f5b8ff63025eda0b7e6c3a9cd5f54968bf741fa46c4a4ce` |
+| native reproducer | `d9a5cd5d7d69326dadbdefac6b51f4f6bed9d4ce1ced1ee62a7c0d2603a4dc7a` |
+| native trace | `f2922acb66be628c47a4848559f7e7469d657b54ee2fce590be326ebf0005c8c` |
+| PG oracle | `7bc764c9a85807ca681931639c58bf2f5a45ba3de6613421dc7828e79ce4306e` |
+| initial user diff | `2e75997cd00ad56becbbcc1989d78302ef9e4d0ac4b5703b597016a2ee3017ba` |
+| production diff | `c391c20f7b04fec739ae5c9817016e22abc1b10363da93c181b0f3ab6cc61c34` |
+
+## 11 ноября 2026: общий установщик SQL совместимости
+
+Добавлен `1c/install_compat.py`: Python stdlib, шесть существующих SQL в явном
+порядке зависимостей, native isql с BAIL/NOAUTOCOMMIT/UTF8/dialect3. При ошибке
+оставляет диагностику и останавливается; completed scripts уже committed.
+SQL-файлы, движок, API и production dependencies не менялись. CLI/порядок/флаги
+прошли отдельный read-only review без функциональных замечаний.
+
+Независимая копия APP-14 runtime, embedded native isql, отдельные UTF8/dialect3
+базы; рабочий сервер и реальные базы не использовались. Команда проверки:
+
+```sh
+python3 -B /tmp/pgwire_install_compat_probe.py
+```
+
+Отчёт и пооперационные логи: `/tmp/pgwire compat installer 5qawpsnv/summary.json`.
+PASS: установка всех шести файлов из другого cwd с пробелами в runtime/DB paths;
+реальные catalog/identity/visibility queries и данные; повтор через database alias
+останавливается на шаге 1 без смены IDs; чужой lowercase pg_catalog останавливает
+шаг 5, сохраняет чужие данные и committed шаги 1–4, шаг 6 не запускается.
+Отсутствующая база не создаётся; отсутствие SQL-файла обнаруживается до attach.
+Проверены `-P` и наследование ISC_PASSWORD; пароль не попадает в вывод установщика.
+
+`passed=true`, обе тестовые базы удалены штатным DROP DATABASE; server process
+не запускался. Native TCP повторно не проверялся: wrapper передаёт native connection
+string непосредственно isql, transport не реализует. Python syntax, `--help`,
+локальные ссылки и `git diff --check` проверены. Коммит не создавался.
+Installer SHA256 `e3e2f4f44f0a8724ce3f6e873606a928b1dada77a952fd793bfcaef1f128d2a8`;
+engine SHA256 `509f3bec1b1b29599a60d2070b3613cc4f169587117889db00bc1783c4d9eef8`.
+
+## 11 ноября 2026: архитектурный review APP-14
+
+Проверена ревизия `8ffd22cb7669a430b9554a46e467264d0fe32ee5` относительно APP-13
+`4520f371e9375ecdc26f5eb3685f2efe53a99145`. В начале review рабочее дерево чистое.
+**Целевая приёмка PASS; найден один P2, поэтому APP-14 ещё не закрыт без замечаний.**
+Helper сохраняется по решению пользователя. Исправление включено в начало
+[следующего цельного этапа APP-15](1c/TEMPORARY_RELATIONS_TASK.md).
+
+**P2: состояние проверяется до вычисления аргумента.** В `evlPgRelationId`
+(`src/jrd/SysFunction.cpp:5477`) guards path/LTT/USAGE предшествуют `EVL_expr`.
+PSQL-функция в аргументе может изменить состояние attachment. Из начального пути
+VA,pg_catalog,SYSTEM функция `PUBLIC.CHANGE_PATH()` устанавливает VB,SYSTEM и
+возвращает SAME: `RDB$PG_RELATION_ID(PUBLIC.CHANGE_PATH())` успешно возвращает 129
+(VB.SAME), хотя следующий прямой `RDB$PG_RELATION_ID('SAME')` получает 0A000.
+VA.SAME имеет ID128. Следовательно guard применяется не к тому состоянию,
+на котором выполняется lookup. Установленная обёртка с локальной переменной
+такого аргумента не передаёт; дефект относится к доступному SQL builtin.
+
+Минимальное исправление: вычислить аргумент до захвата/проверки зависимого
+attachment state, сохранить согласованный NULL/error contract. Подтверждение:
+`/tmp/pgwire-visibility-argument-order-20261111-86w51dow/summary.json`,
+`probe.sql`, `stdout.log`, `stderr.log`. SHA256 script:
+`c8a2734c5b928b84a65b6dbd3ddfce64523bd7805599c37b43bef9eb316327a1`.
+Embedded native isql exit 1 ожидается из-за контрольного 0A000; DROP DATABASE
+выполнен, файла базы нет, отдельный сервер не запускался.
+
+Независимо повторена целевая матрица, без перестройки исходников в этом review:
+
+```sh
+python3 -B pg_wire_protocol/tools/pgwire_1c_smoke.py --visibility \
+  --firebird-dir /tmp/firebird-pgwire-visibility-build-20261111/gen/Debug/firebird \
+  --previous-firebird-dir /tmp/firebird-pgwire-app13-source-20261111/gen/Debug/firebird \
+  --work-dir /tmp/firebird-pgwire-visibility-review-20261111 --timeout 180
+```
+
+`summary.json`: completed=true, visibility_passed=true, **174 libpq results**,
+**46 native OO assertions** на одном prepared handle, native dialects 1/2/3.
+Installer fresh/rollback/repeat/collision и переход старой базы APP-13 на новый
+runtime PASS: прежние данные 53, visibility TRUE, ODS до/после 14.0, оба isql exit 0.
+Metadata input20/output16; права, live LTT guard и recovery проверены.
+Сервер exit 0, forced_kill=false; рабочие базы пользователя не использовались.
+Engine SHA256 `509f3bec1b1b29599a60d2070b3613cc4f169587117889db00bc1783c4d9eef8`,
+PgWire `92cf2e11774f3607c58ab3efc0e8e30012cf0f4b8d8d1e56709c703767cb3509`:
+это артефакты реализации, перечисленные ниже. Исторические регрессии реализации
+в этом review повторно не запускались; PASS целевого suite не покрывает найденный P2.
+
+NAT-05 остаётся открытым. Backtraces и диагностический replay подтверждают падение
+на APP-13 нашего fork **до APP-14**, но не доказывают upstream/native-only дефект.
+Перестановка fixture lookup в финальном suite исключает исходную падающую комбинацию;
+её исправление не заявляется. NAT-01…04 и исходный selected04 не запускались.
+Review изменяет только документацию, production/test sources не исправлялись.
+
 ## 11 ноября 2026: APP-14 — видимость постоянных отношений
 
 Реализовано поверх `4520f371e9375ecdc26f5eb3685f2efe53a99145`, без staging/commit.
@@ -105,7 +383,7 @@ pg_my_temp_schema. Synthetic predicate с известным OID провере�
 выдаётся за original PASS. Полный PG path/temp/transactional SET, APP-01/02/03/04/06,
 SQL-09 и реальная 1С/Гилёв остаются открыты. NAT-01…04 не запускались.
 
-### Обнаруженный baseline cache defect (NAT-05)
+### Обнаруженный cache defect до APP-14 (NAT-05)
 
 Промежуточный `visibility-06` завершился **FAIL, server -11** в позднем Extended
 catalog lookup после длинной names/catalog/RESET/LTT последовательности и SET ROLE.

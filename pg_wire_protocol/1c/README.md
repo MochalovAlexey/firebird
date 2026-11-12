@@ -1,5 +1,46 @@
 # Записанный профиль 1С: этапы совместимости
 
+12 ноября: [APP-15: рабочий цикл PG temporary tables](TEMPORARY_RELATIONS_TASK.md)
+остановлен на native blocker NAT-06. Большой root savepoint удаляет LTT undo,
+после ROLLBACK определение остаётся. По решению пользователя blocker передаётся
+в архитектурный диалог; зависимые части APP-15 ещё не реализованы.
+P2 APP-14 исправлен отдельно: вычисление аргумента предшествует чтению attachment
+state и guards. Oracle, reproducer и регрессия — в начале [VALIDATION](../VALIDATION.md).
+
+## Общая установка SQL совместимости
+
+[install_compat.py](install_compat.py) устанавливает все шесть текущих SQL-скриптов
+в порядке зависимостей на указанную существующую базу. Нужны Python 3 и native
+`isql` из этого fork с поддержкой APP-14; запускать владельцем/администратором
+без конкурентного DDL. Например, через родной сетевой порт Firebird:
+
+```sh
+python3 pg_wire_protocol/1c/install_compat.py \
+  --isql gen/Debug/firebird/bin/isql \
+  -d localhost/3050:pgwire_test -U sysdba -P masterkey
+```
+
+Заменить credentials своими. `-d` принимает native connection string, alias или
+путь к `.fdb`; это не PostgreSQL URI и не порт PgWire 15432. При локальном пути
+способ attach выбирают штатные providers Firebird. Без `-P` используется
+`ISC_PASSWORD`, без `-U` — `ISC_USER` либо SYSDBA. SQL-файлы находятся относительно
+самого установщика, поэтому запуск не зависит от текущего каталога.
+
+Порядок: namespace registry → compat.sql → namespace catalog → class catalog →
+lowercase PG names → relation visibility. Каждый файл выполняется native isql
+с BAIL ON, отключённым AUTODDL, UTF8 и client dialect 3. При первой ошибке следующие
+файлы не запускаются; сообщение содержит имя неуспешного шага и ненулевой exit code.
+**Это первоначальная установка, не повторяемая миграция:** повтор полного набора
+получит отказ на существующем PGWIRE_COMPAT. Семантика отдельных SQL сохранена,
+включая IF NOT EXISTS и CREATE OR ALTER в compat.sql. Каждый SQL-файл содержит
+свой COMMIT, поэтому при поздней ошибке ранее выполненные шаги остаются установленными.
+Автоматического пропуска завершённых этапов,
+отката всего пакета или исправления частичной установки нет.
+
+При добавлении нового SQL installer включать его в список SCRIPTS общего
+установщика и проверять порядок зависимостей. Отдельные скрипты ниже остаются
+доступны для явно выбранного этапа установки.
+
 ## APP-13: имена и установка lowercase профиля
 
 Реализовано и принято в `4520f371e9`: PG4 unquoted ASCII lowercase, точные quoted
@@ -90,6 +131,9 @@ Native подготовленный SELECT может сохранять пре�
 
 Полный [контракт](../COMPATIBILITY.md#app-14-видимость-постоянных-отношений),
 [задание](RELATION_VISIBILITY_TASK.md), результаты — [VALIDATION](../VALIDATION.md).
+Review `8ffd22cb76`: 174 libpq results / 46 OO checks PASS; найденный P2 при
+аргументе, меняющем состояние attachment, исправлен 12 ноября в рабочем diff.
+Текущий guard проверяет состояние после EVL_expr, в том числе при NULL результате.
 Исходный selected04 всё ещё требует regnamespace и pg_my_temp_schema; синтетическая
 замена namespace predicate не считается его PASS. APP-01/02/03/04/06 и SQL-09 открыты.
 
@@ -359,6 +403,9 @@ Bind. APP-07 прошёл review и закрыт; APP-02/SQL-06 и открыт�
 
 ## Следующие небольшие этапы
 
+История прежних небольших срезов. Начиная с APP-15 связанные изменения объединяются
+в цельный прикладной этап; текущая инструкция указана в начале файла.
+
 [Синтаксический приём трёх startup SET](IGNORED_STARTUP_SETTINGS_TASK.md)
 без эффекта реализован по явному решению пользователя; контракт описан ниже.
 [PG BEGIN](BEGIN_TASK.md) реализован отдельным этапом через существующий
@@ -442,8 +489,9 @@ bootstrap/catalog labels, initial path/RESET и savepoint journal. Native1/2/3
 не меняются; старые uppercase объекты в PG4 требуют точных quoted имён.
 Ревизия `4520f371e9` прошла review и независимые names/strings проверки;
 установка и новый контракт описаны выше. APP-14 с ограниченной visibility
-реализован и оставлен для review; полный path/regnamespace/temp остаётся открытым.
-Полные search_path/USAGE/regnamespace/visibility/temp остаются открытыми.
+проверен: целевая матрица PASS, P2 исправлен отдельно 12.11. Инструкция APP-15 выше
+нацелена на общий TEMP lifecycle, но остановлена на NAT-06; regnamespace/типы 1С,
+transactional search_path и полные каталоги остаются открытыми.
 
 ## Постоянные таблицы и представления в PG_CLASS: APP-12
 

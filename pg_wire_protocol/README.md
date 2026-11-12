@@ -11,8 +11,17 @@ APP-14 добавляет [устанавливаемую pg_table_is_visible](1
 resolver/SCL, с проверкой явного пути и отсутствия LTT на Execute. Типы wire20→16;
 regnamespace/temp и исходный selected04 этим этапом не закрываются.
 
+12 ноября: P2 APP-14 исправлен в рабочем diff — аргумент helper вычисляется до
+чтения и проверки состояния attachment. [APP-15](1c/TEMPORARY_RELATIONS_TASK.md)
+остановлен по решению пользователя: native LTT undo теряется при освобождении
+большого root savepoint (NAT-06). Blocker передаётся в архитектурный диалог;
+PG temporary lifecycle ещё не реализован. Oracle, reproducer, проверки P2 и
+границы результата — в начале [VALIDATION](VALIDATION.md).
+
 Что ещё нужно доделать и проверить: [единый BACKLOG](BACKLOG.md).
 Порядок этапов — [PLAN](PLAN.md), фактические проверки — [VALIDATION](VALIDATION.md).
+Все текущие SQL-объекты совместимости устанавливает [install_compat.py](1c/install_compat.py)
+на указанную существующую базу через native isql; [аргументы и порядок](1c/README.md#общая-установка-sql-совместимости).
 
 Цель — подключать PostgreSQL-драйверы, включая libpq, по TCP непосредственно к процессу `firebird`. Запросы выполняет локальный движок Firebird. Родной сетевой протокол сохраняет существующую реализацию и работает независимо от дополнительных протоколов.
 

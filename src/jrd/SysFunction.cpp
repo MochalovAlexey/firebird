@@ -5478,6 +5478,10 @@ void makePgRelationId(DataTypeUtilBase*, const SysFunction*, dsc* result, int, c
 dsc* evlPgRelationId(thread_db* tdbb, const SysFunction*, const NestValueArray& args,
 	impure_value* impure)
 {
+	// The argument may execute PSQL that changes attachment state. Validate the
+	// state used by the lookup, and keep guards ahead of the NULL result check.
+	const auto value = EVL_expr(tdbb, tdbb->getRequest(), args[0]);
+
 	const auto attachment = tdbb->getAttachment();
 	const auto& path = *attachment->att_schema_search_path;
 	bool catalogPresent = false;
@@ -5507,7 +5511,6 @@ dsc* evlPgRelationId(thread_db* tdbb, const SysFunction*, const NestValueArray& 
 		SCL_check_schema(tdbb, schema, SCL_usage);
 	}
 
-	const auto value = EVL_expr(tdbb, tdbb->getRequest(), args[0]);
 	if (!value)
 		return nullptr;
 
