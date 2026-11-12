@@ -1,5 +1,229 @@
 # Проверки реализации
 
+## 12 ноября 2026: NAT-06 native LTT metadata undo
+
+**Реализовано, проверки PASS, ожидает review.** Основа
+`11dee63d2a51f9fbafcee3337f0aded03ae233e0`, ветка `pg_wire_protocol`.
+Начальные пользовательские правки архитектурных документов сохранены в
+`/tmp/nat06-initial.diff`; старые `/tmp/app15-*` артефакты не изменены.
+Исправление выполняет [NAT-06](1c/LTT_METADATA_UNDO_TASK.md). APP-15 не начат;
+возобновление PG temporary lifecycle — после review этого native diff.
+Git add/commit/amend/reset/checkout не выполнялись.
+
+### Изменения и границы владения
+
+В `jrd_tra` добавлен владеющий список `LttUndo`, такой же список хранит каждый
+savepoint. Rollforward соединяет списки без разворота: newest → oldest; без parent
+передаёт actions транзакции. Старый coalescing, терявший первоначальный ALTER,
+удалён. Перед full rollback actions всех активных savepoints собираются перед
+прежним transaction journal, до веток force/invalidated и удаления row undo.
+Общий backout исполняется вне catch, который допускает восстановление строк через
+TIP/GC. SIZE_THRESHOLD, выбор row backout/GC и состояние TIP не переопределены.
+
+Для восстановления промежуточного, ещё не committed relation snapshot добавлена
+узкая внутренняя граница `keep` в существующий `CacheVector::rollback`: остановка
+перед исходной версией ALTER. Без этой границы полный журнал удалял бы предыдущие
+uncommitted versions вместе с текущей, оставляя snapshot с недействительным
+указателем. Остальные вызовы используют прежнее поведение с `keep=nullptr`.
+API/ABI/ODS, PgWire, parser, installer, namespaces и catalogs не менялись.
+
+Item остаётся во владеющем списке до успешного backout. METD invalidation выполняется
+до смены map ownership; DROP передаёт `original` только после успешного `put`.
+Безопасный отказ до destructive cache backout инвалидирует транзакцию и сохраняет
+pending snapshot для повторного rollback. Если cache backout мог уже удалить
+versions, текущий map relation обнуляется, item помечается `backoutFailed`,
+attachment получает native shutdown. Повторный backout этого item запрещён;
+освобождение оставшегося журнала допускается только при final detach.
+Ошибку нельзя скрыть успешным rollback или продолжением SQL на повреждённом cache.
+
+COMMIT освобождает snapshots после успешной фиксации состояния транзакции;
+retaining завершает старый metadata interval, включая быстрый no-op COMMIT RETAIN.
+Последний также больше не обходит проверку TRA_invalidated. Native данные DELETE
+ROWS при retaining сохраняют прежнюю семантику. Память журнала пропорциональна
+числу LTT DDL за интервал, а не числу DML rows; лимита/обрезания журнала нет.
+Native README исправлен: DSQL по-прежнему возвращает 0A000 для CREATE/DROP LTT
+под user SAVEPOINT. Положительная PG-owned поддержка остаётся SQL-10 в APP-15.
+
+### Baseline и modified
+
+Новый `tools/native_ltt_undo_checks.py` запускает native isql без server/bootstrap,
+создаёт отдельную UTF8/dialect3 базу на сценарий, проверяет точные строки,
+SQLSTATE, exit и удаление базы. Suite выполнен в двух частях: первые 39 сценариев
+и добавленные 5 (большой COMMIT до/после DDL с/без NO AUTO UNDO, DROP guard).
+Итого **baseline 23 FAIL / 21 PASS → modified 44 PASS**. Baseline FAIL — ожидаемое
+воспроизведение дефектов, не пропущенные проверки. Per-case expected/actual:
+`/tmp/nat06-baseline-final/summary.json`, `/tmp/nat06-baseline-commit/summary.json`,
+`/tmp/nat06-modified-02/summary.json`, `/tmp/nat06-modified-commit/summary.json`.
+Там же SQL и полные stdout/stderr. Итоговое сравнение: `/tmp/nat06-results.json`.
+
+| Проверка | Expected и modified actual | Baseline actual |
+|---|---|---|
+| CREATE + 300000 INSERT + rollback, оба row modes | Новый MON N=0, persistent P=1, SELECT 42S02, recreate C=0 | N=1, SELECT HY000 Relation unavailable, recreate 42S01 |
+| Малый CREATE/rollback | N=0, P=1, SELECT 42S02, recreate C=0 | PASS |
+| DDL до/после большого DML, NO AUTO UNDO | N=0, P=1, SELECT 42S02 | Stale metadata, FAIL |
+| Committed ALTER→DROP→rollback | PRESERVE C=1 / DELETE C=0; Q отсутствует 42S22, unique violation 23000 | Q остаётся; вставки старой формы дают 21S01 |
+| DROP→CREATE, repeated ALTER, index create/alter/drop, internal levels, statement failure | Форма/данные/unique восстановлены; ошибка ALTER duplicate column 42000 откатывает только текущий statement | Часть контролей PASS, nested chronology FAIL |
+| Большой COMMIT, следующий ALTER→DROP→rollback | V=7, persistent P=300001, Q отсутствует 42S22 | Обычный режим оставляет Q; NO AUTO UNDO теряет T |
+| Retaining DDL-only / DDL+DML, новый rollback interval | Committed definition остаётся; отменённые колонки отсутствуют; DELETE ROWS при retaining сохраняет native данные | NO AUTO UNDO и отдельные цепочки FAIL |
+| DFW ошибка COMMIT (unique на дубликатах) → rollback | 23000, Q отсутствует 42S22, прежние 2 строки сохранены, duplicate INSERT разрешён: C=3 | PASS |
+| Permanent/GTT, большой DML без LTT, user-savepoint DML, CREATE/DROP LTT guard | Точные counts, DDL 0A000 | PASS |
+
+`tools/native_ltt_undo_api.cpp`: native TPB с/без NO AUTO UNDO, release/force rollback
+при живом attachment, повторный CREATE, восстановление committed формы/строки/unique,
+два transaction handles с независимыми LTT, прежний same-LTT conflict 42000,
+ошибка ON TRANSACTION COMMIT trigger и последующий rollback. Отдельный observer
+с новой транзакцией видит только committed persistent data. Baseline exit 1:
+`Force rollback left stale LTT metadata`; modified **38 assertions, exit 0**.
+Логи `/tmp/nat06-api-baseline.log`, `/tmp/nat06-api-final.log` (также успешный
+предыдущий `/tmp/nat06-api-modified-03.log`). Базы удалены, attachment пригоден
+после штатного force rollback; оба independent handles завершаются корректно.
+
+### GDB, отказ и освобождение
+
+GDB на Debug engine, без production tracing, подтвердил **оба** существующих
+root-release paths: один statement с 300000 INSERT → before-merge=1/after=0;
+шесть statements по 50000 → before=0/after=1. Metadata undo переживает удаление
+row-root; rollback даёт N=0/P=1/42S02. GDB считает push и delete LttUndoItem:
+в обоих случаях final live=0, maxlive=1. В 30 повторных CREATE/ALTER/rollback и
+CREATE/commit/ALTER/DROP/rollback/DROP/commit интервалах final live=0, maxlive=2.
+Артефакты `/tmp/nat06-gdb/{create_preserve_300000,accumulated_root,repeated_intervals}.{gdb,sql,log}`.
+GDB exit 0, inferior exit 1 ожидаем из-за контрольных SQL errors; базы удалены.
+Это проверка lifetime items, не общая гарантия отсутствия утечек во всём engine.
+
+Отдельный `/tmp/nat06-fault/runtime` собран из того же engine заменой только
+Savepoint.o; test-only throws находятся в `/tmp/nat06-fault/Savepoint.cpp`,
+production hooks отсутствуют. Команды compile/link — `commands.txt`, генератор —
+`/tmp/nat06-build-fault.py`. Синтетический `isc_virmemexh` перед DROP map.put:
+первый rollback возвращает HY001, retry восстанавливает V=7 (**5 assertions**, exit 0).
+Отказ сразу после destructive cache rollback CREATE: HY001 доходит до caller,
+следующий SQL получает 08003; release/detach/observer/drop завершаются
+(**7 assertions**, exit 0). Логи `map.log`, `cache-final.log`, базы удалены.
+Это проверяет обе политики ownership; исключение в каждой внутренней точке cache
+не инжектировалось. Не выполнены arbitrary storage flush failure, OOM campaign,
+sanitizer campaign, restore и read-only database LTT; они не объявляются PASS.
+
+### Команды, регрессии и артефакты
+
+Существующая Debug сборка `/tmp`, configure `--enable-binreloc --enable-developer`,
+GCC 13.4.0; `make -C /tmp/gen -j4 TARGET=Debug` завершён exit 0, логи
+`/tmp/nat06-build.log`, `/tmp/nat06-build-final.log`. Финальная production сборка
+после всех пяти native files; после неё production исходники не менялись.
+
+```sh
+# Сначала сохранённый baseline, затем modified; каталоги запусков новые.
+python3 -B pg_wire_protocol/tools/native_ltt_undo_checks.py --firebird-dir /tmp/nat06-baseline-runtime --work-dir /tmp/nat06-baseline-final
+python3 -B pg_wire_protocol/tools/native_ltt_undo_checks.py --firebird-dir /tmp/gen/Debug/firebird --work-dir /tmp/nat06-modified-02
+# Эти два запуска содержали первые 39 сценариев; ещё 5 добавлены отдельно:
+python3 -B pg_wire_protocol/tools/native_ltt_undo_checks.py --firebird-dir /tmp/nat06-baseline-runtime --work-dir /tmp/nat06-baseline-commit --case large_commit_False_before --case large_commit_False_after --case large_commit_True_before --case large_commit_True_after --case user_savepoint_drop
+python3 -B pg_wire_protocol/tools/native_ltt_undo_checks.py --firebird-dir /tmp/gen/Debug/firebird --work-dir /tmp/nat06-modified-commit --case large_commit_False_before --case large_commit_False_after --case large_commit_True_before --case large_commit_True_after --case user_savepoint_drop
+
+g++ -std=c++17 -Wall -Wextra -Werror -I/tmp/gen/Debug/firebird/include pg_wire_protocol/tools/native_ltt_undo_api.cpp -L/tmp/gen/Debug/firebird/lib -lfbclient -Wl,-rpath,/tmp/gen/Debug/firebird/lib -o /tmp/nat06-api-final
+mkdir /tmp/nat06-api-locks-final
+FIREBIRD=/tmp/gen/Debug/firebird FIREBIRD_LOCK=/tmp/nat06-api-locks-final LD_LIBRARY_PATH=/tmp/gen/Debug/firebird/lib timeout 180 /tmp/nat06-api-final /tmp/nat06-api-final.fdb
+
+# Пример GDB запуска; остальные используют собственные SQL/script/locks.
+FIREBIRD=/tmp/gen/Debug/firebird FIREBIRD_LOCK=/tmp/nat06-gdb/locks-big LD_LIBRARY_PATH=/tmp/gen/Debug/firebird/lib ISC_USER=SYSDBA gdb -q -batch -x /tmp/nat06-gdb/create_preserve_300000.gdb /tmp/gen/Debug/firebird/bin/isql
+# Только с отдельно собранным fault runtime:
+NAT06_FAULT=map FIREBIRD=/tmp/nat06-fault/runtime FIREBIRD_LOCK=/tmp/nat06-fault/locks-map LD_LIBRARY_PATH=/tmp/nat06-fault/runtime/lib /tmp/nat06-api /tmp/nat06-fault/map.fdb map
+NAT06_FAULT=cache FIREBIRD=/tmp/nat06-fault/runtime FIREBIRD_LOCK=/tmp/nat06-fault/locks-cache-final LD_LIBRARY_PATH=/tmp/nat06-fault/runtime/lib /tmp/nat06-api /tmp/nat06-fault/cache-final.fdb cache
+
+python3 -B pg_wire_protocol/tools/pgwire_1c_smoke.py --visibility --firebird-dir /tmp/gen/Debug/firebird --previous-firebird-dir /tmp/nat06-baseline-runtime --work-dir /tmp/nat06-visibility --timeout 180
+python3 -B pg_wire_protocol/tools/pgwire_transaction_smoke.py --firebird-dir /tmp/gen/Debug/firebird --work-dir /tmp/nat06-transactions --libpq-include-dir /tmp/nat06-deps/libpq-dev/usr/include/postgresql --libpq-library /lib/x86_64-linux-gnu/libpq.so.5 --timeout 180
+```
+
+Visibility: **174 libpq / 60 OO PASS**, upgrade/install/rollback/P2 regression PASS,
+server exit 0 за 0.114 s без forced kill. Upgrade fixture использует SQL layout
+APP-13 на baseline runtime APP-14/P2, не старый engine APP-13. Transaction suite
+**PASS**, direct C libpq и syscall trace PASS, backend connects=0. Два запуска
+сервера exit 0 за 0.164 s, без forced kill. Полные summaries в одноимённых каталогах.
+Libpq headers 14.24 распакованы из deb только в `/tmp/nat06-deps`, system install
+и новых runtime dependencies нет. NAT-01…05 не перезапускались: transaction suite
+сохраняет существующий SNAPSHOT AUTO COMMIT fixture и прежнее ограничение READ
+CONSISTENCY AUTO COMMIT. Исходные selected04/12/13, PG temp lifecycle и реальная
+1С/Гилёв **SKIP**, за этот prerequisite не принимаются.
+
+Ранние неуспешные диагностические запуски сохранены: неверные test expectations
+HY000 вместо native conflict 42000 и 42S21 вместо duplicate-column 42000 исправлены
+по фактическим native errors. Первая параллельная SQL/API проверка с общим default
+FIREBIRD_LOCK зависла в MappingIpc между sandbox PID namespaces: SQL watchdog 180 s,
+API напечатал 38 PASS, но завис при shutdown и завершён SIGKILL (exit 137).
+Этот запуск **не засчитан**; GDB stack `/tmp/nat06-api-hang2.log` сохранён.
+После изоляции runtime/locks modified SQL и API завершились штатно. В initial fault
+build исправлен только test-source `std::strcmp` → `strcmp`, повторная сборка exit 0.
+Все отдельные базы новых native SQL/OO/GDB/fault probes удалены, включая
+неуспешные запуски. Существующие wire suites оставили свои fixture databases
+в isolated runtime/data для review; серверы остановлены. Копии штатных
+security6.fdb/employee.fdb, runtime и logs также сохранены.
+
+SHA256 ключевых артефактов:
+
+| Артефакт | SHA256 |
+|---|---|
+| `/tmp/nat06-production.diff` (только пять native files) | `b034a11d6cecf58ba54fd05310c5d4db001f66491a6102b08b4bfded9b1c97c3` |
+| Baseline Engine14 | `2b1afd94ba412700f8faa6b00674e82da654c86791e67eecfd343776a87d6da5` |
+| Modified Engine14 | `854574a95aa2ef9a0794cde204ef0fb1aefc4dee871e202bb180778b759a3cae` |
+| PgWire module | `b833667daf113804b766bad47540e5507d993c5fce2221632b4f031ba4868806` |
+| Test-only fault Engine14 | `06324b407e434bdc148a0660aa0770e8797b660049d9a76a145bbe37d6aff11a` |
+
+`/tmp/nat06-artifacts.json` содержит revision, SHA256 production diff, начального
+user diff, исходников probes, executable, build/fault/GDB logs/scripts и всех
+summaries. Итоговые tracked и untracked изменения также сохранены отдельными
+review patches в `/tmp`; manifest фиксирует их hashes. `git diff --check` PASS.
+
+## 12 ноября 2026: архитектурное решение по NAT-06 и review P2
+
+Проверен текущий `11dee63d2a` относительно `8ffd22cb76`; рабочее дерево в начале
+review чистое. P2 APP-14 исправлен корректно: единственное production изменение —
+EVL_expr до чтения attachment/path/guards; guard-before-NULL contract сохранён.
+Code review без замечаний. Проверенные hashes `/tmp/app15-artifacts.json` совпали
+с файлами baseline/P2 runtime, native probe/trace, oracle и OO source.
+Отчёт `/tmp/app15-p2-visibility/summary.json` подтверждает 174 libpq / 60 OO PASS
+и server exit 0. Этот suite в архитектурном review повторно не запускался.
+Upgrade был на baseline runtime APP-14 с SQL layout APP-13, как указано в отчёте;
+не считать его новым доказательством старого runtime APP-13.
+
+**NAT-06 независимо воспроизведён:** отдельная копия baseline engine
+`316960f1d942cb943a4494b7310316d8d08bdbc7082c563df9c5a7187f142beb`, embedded native
+isql, новая UTF8/dialect3 база, без PgWire/bootstrap. SMALL_REMAINING=0,
+FILLER_BEFORE_ROLLBACK=300000, LARGE_REMAINING=1, FILLER_AFTER_ROLLBACK=0.
+Дополнительный SELECT после rollback даёт HY000 `Relation ... unavailable`:
+в attachment map остаётся определение, но relation уже недоступно. Это уточняет
+формулировку исходного отчёта: воспроизведена несогласованность metadata, а не
+нормально работающая таблица, пережившая rollback.
+
+Артефакты `/tmp/app15-native-independent-s1f768o5/probe/`: `probe.sql`,
+`stdout.log`, `stderr.log`, `review-summary.json`, `cleanup.log`.
+SQL SHA256 `fd5aa477a3b8a975195582708555dec09a892adbda864950d30ff04c303f762f`.
+Diagnostic SELECT дал exit 1 и прервал исходный DROP при BAIL ON; отдельный
+native DROP DATABASE завершился exit 0, база удалена. Сервер не запускался.
+Исходный GDB trace действительно проходит :584 → :715 с LTT_UNDO_CREATE;
+MON прочитан в новой транзакции, monitoring snapshot не причина.
+
+**Дополнительный native undo дефект:** committed T(V), ALTER ADD Q, DROP,
+ROLLBACK восстанавливает T(V,Q) со старой строкой V=11. Нынешний merge удаляет
+первоначальный ALTER snapshot в пользу более позднего DROP snapshot. Проверено
+на том же baseline engine без большого DML. Логи и SQL:
+`/tmp/ltt-undo-merge-architecture-1eeeiqyv/`. Это входит в NAT-06: при исправлении
+владения нельзя переносить ошибочный coalescing без изменения.
+
+Тот же отдельный probe подтвердил 0A000 для CREATE/DROP LTT под user SAVEPOINT.
+`DsqlRequests.cpp:980–988` запрещает DDL до node execution; FLAG_ACTUAL_LTT_DDL
+выставляется позже и используется для replication suppression. Положительная
+предпосылка прежнего плана о готовом native user-savepoint LTT DDL была ошибочной,
+хотя native README это поведение описывает. Для APP-15 добавлен SQL-10: узкое
+разрешение только actual PG-owned LTT DDL до эффектов; native guard в prerequisite
+не меняется. Probe exit 1 — ожидаемые контрольные отказы; DROP DATABASE выполнен,
+базы нет, отдельный сервер не запускался.
+
+Архитектурное решение: [отдельный native prerequisite](1c/LTT_METADATA_UNDO_TASK.md).
+Transaction-owned LTT undo переживает row-root, перенос списков сохраняет обратную
+хронологию; full rollback извлекает pending LTT actions до уничтожения savepoints.
+Построчный rollback/GC и SIZE_THRESHOLD прежние. Учтены NO AUTO UNDO, retaining,
+force rollback и explicit failure policy metadata backout. После review fix
+возобновить APP-15 и его полную PG temp/savepoint матрицу.
+Upstream происхождение не исследовалось; NAT-01…05 не запускались. Production
+исходники этим архитектурным review не изменены, создана инструкция и обновлены статусы.
+
 ## 12 ноября 2026: APP-15 остановлен на native LTT undo (NAT-06)
 
 Начальная ревизия `8ffd22cb7669a430b9554a46e467264d0fe32ee5`, ветка

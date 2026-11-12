@@ -123,6 +123,28 @@ namespace Jrd
 		QualifiedName name;
 		Firebird::AutoPtr<LocalTemporaryTable> original;	// Original LTT state (for ALTER/DROP), nullptr for CREATE
 		LttUndoItem* next;
+		bool backoutFailed = false;	// A partial cache backout requires attachment shutdown.
+	};
+
+	// Owns metadata snapshots only, independently of the row undo lifetime.
+	// Lists are always ordered newest first.
+	class LttUndo
+	{
+	public:
+		LttUndo() = default;
+		LttUndo(const LttUndo&) = delete;
+		LttUndo& operator=(const LttUndo&) = delete;
+		~LttUndo();
+
+		void push(LttUndoItem* item);
+		void append(LttUndo& older);
+		void prepend(LttUndo& newer);
+		void clear();
+		void rollback(thread_db* tdbb, jrd_tra* transaction);
+
+	private:
+		LttUndoItem* m_head = nullptr;
+		LttUndoItem* m_tail = nullptr;
 	};
 
 	// Savepoint class
@@ -160,12 +182,6 @@ namespace Jrd
 				m_freeActions = next;
 			}
 
-			while (m_lttActions)
-			{
-				LttUndoItem* next = m_lttActions->next;
-				delete m_lttActions;
-				m_lttActions = next;
-			}
 		}
 
 		void init(SavNumber number, bool root, Savepoint* next)
@@ -259,6 +275,8 @@ namespace Jrd
 		VerbAction* createAction(thread_db* tdbb, jrd_rel* relation, FB_UINT64 tempInstanceId = 0);
 		void createLttAction(LttUndoItem::UndoType type, const QualifiedName& name,
 			LocalTemporaryTable* original = nullptr);
+		void collectLttUndo(LttUndo& target) { target.append(m_lttActions); }
+		void discardLttUndo() { m_lttActions.clear(); }
 
 		void cleanupTempData();
 		void discardTempFrameActions(const jrd_rel* relation, FB_UINT64 tempInstanceId);
@@ -360,7 +378,7 @@ namespace Jrd
 		Savepoint* m_next = nullptr;			// next savepoint in the list
 		VerbAction* m_actions = nullptr;		// verb action list
 		VerbAction* m_freeActions = nullptr;	// free verb actions
-		LttUndoItem* m_lttActions = nullptr;	// LTT undo action list
+		LttUndo m_lttActions;			// LTT undo action list
 	};
 
 	// Start a savepoint and rollback it in destructor,

@@ -1,13 +1,16 @@
 # Матрица совместимости PostgreSQL wire plugin
 
-12 ноября: APP-15 (PG temporary lifecycle) остановлен на native blocker NAT-06:
-после освобождения большого root savepoint ROLLBACK теряет undo определения LTT.
-По решению пользователя native fix передаётся в архитектурный диалог; PG TEMP,
+12 ноября: [native fix NAT-06](1c/LTT_METADATA_UNDO_TASK.md) реализован и проверен:
+LTT metadata undo сохраняется независимо от row-root и NO AUTO UNDO, с правильным
+порядком ALTER/DROP и границами retaining/force. APP-15 ожидает review fix; PG TEMP,
 virtual namespace, effective path и живые temp catalogs ещё не реализованы.
-P2 APP-14 исправлен отдельно в рабочем diff: EVL_expr выполняется до захвата path
+P2 APP-14 исправлен в `11dee63d2a` и прошёл review: EVL_expr выполняется до захвата path
 и guards; проверки сохраняются перед возвратом NULL. Регрессия использует PSQL
 аргумент, меняющий path, и повторный Execute одного native handle.
 [Доказательства и ограничения](VALIDATION.md); ниже — текущий профиль APP-14.
+Native LTT DDL под user SAVEPOINT сейчас получает 0A000: общий DSQL guard срабатывает
+до execution. APP-15 ещё должен добавить узкое разрешение для actual PG-owned LTT
+(SQL-10); прежнее предположение о готовой native поддержке не подтверждается.
 
 ## APP-14: видимость постоянных отношений
 

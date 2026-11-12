@@ -11,11 +11,11 @@ APP-14 добавляет [устанавливаемую pg_table_is_visible](1
 resolver/SCL, с проверкой явного пути и отсутствия LTT на Execute. Типы wire20→16;
 regnamespace/temp и исходный selected04 этим этапом не закрываются.
 
-12 ноября: P2 APP-14 исправлен в рабочем diff — аргумент helper вычисляется до
+12 ноября: P2 APP-14 исправлен в `11dee63d2a` и прошёл review — аргумент вычисляется до
 чтения и проверки состояния attachment. [APP-15](1c/TEMPORARY_RELATIONS_TASK.md)
-остановлен по решению пользователя: native LTT undo теряется при освобождении
-большого root savepoint (NAT-06). Blocker передаётся в архитектурный диалог;
-PG temporary lifecycle ещё не реализован. Oracle, reproducer, проверки P2 и
+ожидает review [native fix NAT-06](1c/LTT_METADATA_UNDO_TASK.md): исправление undo
+реализовано, 44 SQL сценария, OO/fault probes и transaction/visibility регрессии PASS.
+После review продолжить APP-15. PG temporary lifecycle ещё не реализован. Oracle, reproducer, проверки P2 и
 границы результата — в начале [VALIDATION](VALIDATION.md).
 
 Что ещё нужно доделать и проверить: [единый BACKLOG](BACKLOG.md).

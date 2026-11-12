@@ -1,12 +1,15 @@
 # План реализации wire-плагинов и PgWire
 
-## APP-15: native blocker и передача в архитектурный диалог, 12.11.2026
+## APP-15: native prerequisite NAT-06, 12.11.2026
 
-По решению пользователя реализация PG temporary lifecycle остановлена на NAT-06:
-освобождение большого root savepoint теряет LTT undo. Сначала нужно отдельное
-архитектурное решение и native fix, затем возобновление полной матрицы APP-15.
-P2 APP-14 исправлен независимо в рабочем diff, ждёт review.
-[Reproducer, причина, oracle и проверки](VALIDATION.md).
+[Отдельный native fix NAT-06](1c/LTT_METADATA_UNDO_TASK.md) реализован и ожидает review:
+transaction-owned metadata undo, корректный порядок backout, NO AUTO UNDO/retaining/force,
+без изменения row GC и публичного API. 44 SQL сценария, 38 OO assertions, fault probes,
+transaction/visibility регрессии PASS. После review исправления возобновить APP-15;
+зависимая PG TEMP реализация в этот diff не входит.
+P2 APP-14 в `11dee63d2a` прошёл code review без замечаний; evidence 174/60 PASS проверено.
+Уточнение плана: native user-savepoint LTT DDL сейчас запрещён; узкое PG-owned
+разрешение добавляется в APP-15 как SQL-10. [Проверки и решение](VALIDATION.md).
 
 ## Review APP-14 и план цельного этапа APP-15, 11.11.2026
 

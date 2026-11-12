@@ -454,7 +454,8 @@ void TRA_commit(thread_db* tdbb, jrd_tra* transaction, const bool retaining_flag
 	// and no events have been posted (via stored procedures etc)
 	// no-op the operation.
 
-	if (retaining_flag && !((transaction->tra_flags & TRA_write) || transaction->tra_deferred_job))
+	if (retaining_flag && !(transaction->tra_flags & TRA_invalidated) &&
+		!((transaction->tra_flags & TRA_write) || transaction->tra_deferred_job))
 	{
 		if (sysTran->tra_flags & TRA_write)
 			transaction_flush(tdbb, FLUSH_SYSTEM, 0);
@@ -464,6 +465,11 @@ void TRA_commit(thread_db* tdbb, jrd_tra* transaction, const bool retaining_flag
 		// Get rid of all user savepoints
 		while (transaction->tra_save_point && !transaction->tra_save_point->isRoot())
 			transaction->releaseSavepoint(tdbb);
+
+		// Even a no-op retain ends the metadata undo interval. Keep the row-root.
+		if (transaction->tra_save_point)
+			transaction->tra_save_point->discardLttUndo();
+		transaction->tra_ltt_undo.clear();
 
 		trace.finish(ITracePlugin::RESULT_SUCCESS);
 		return;
@@ -545,6 +551,7 @@ void TRA_commit(thread_db* tdbb, jrd_tra* transaction, const bool retaining_flag
 
 	REPL_trans_commit(tdbb, transaction);
 	TRA_set_state(tdbb, transaction, transaction->tra_number, tra_committed);
+	transaction->tra_ltt_undo.clear();
 
 	// Perform any post commit work
 
@@ -1353,6 +1360,14 @@ void TRA_rollback(thread_db* tdbb, jrd_tra* transaction, const bool retaining_fl
 
 	transaction->finiBulkInsert(tdbb, false);
 
+	// Row undo may be discarded below, even on force/invalidated rollback.
+	// Gather metadata first: newest savepoint, older levels, previous root history.
+	LttUndo pendingLttUndo;
+	for (Savepoint::Iterator iter(transaction->tra_save_point); *iter; ++iter)
+		(*iter)->collectLttUndo(pendingLttUndo);
+	pendingLttUndo.append(transaction->tra_ltt_undo);
+	transaction->tra_ltt_undo.append(pendingLttUndo);
+
 	// If force flag is true, get rid of all savepoints to mark the transaction as dead
 	if (force_flag || (transaction->tra_flags & TRA_invalidated))
 	{
@@ -1437,6 +1452,10 @@ void TRA_rollback(thread_db* tdbb, jrd_tra* transaction, const bool retaining_fl
 		if (sysTran->tra_flags & TRA_write)
 			transaction_flush(tdbb, FLUSH_SYSTEM, 0);
 	}
+
+	// TIP/GC cannot repair attachment metadata. Do not hide a backout error in
+	// the row-undo catch above, or release temporary pages before restoring LTTs.
+	transaction->tra_ltt_undo.rollback(tdbb, transaction);
 
 	// If this is a rollback retain abort this transaction and start a new one.
 
@@ -2639,6 +2658,9 @@ static void retain_context(thread_db* tdbb, jrd_tra* transaction, bool commit, i
 		// Set the state on the inventory page
 		TRA_set_state(tdbb, transaction, old_number, state);
 	}
+
+	if (commit)
+		transaction->tra_ltt_undo.clear();
 
 	MetadataCache::retain_temp_tables(tdbb, transaction, new_number);
 

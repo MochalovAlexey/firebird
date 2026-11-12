@@ -390,11 +390,16 @@ public:
 	}
 
 	// created earlier object is bad and should be destroyed
-	static void rollback(thread_db* tdbb, std::atomic<ListEntry*>& list, const TraNumber currentTran)
+	static void rollback(thread_db* tdbb, std::atomic<ListEntry*>& list, const TraNumber currentTran,
+		const Versioned* keep = nullptr)
 	{
 		HazardPtr<ListEntry> entry(list);
 		while (entry)
 		{
+			// LTT statement undo may restore an earlier uncommitted version.
+			if (keep && entry->object == keep)
+				break;
+
 			if (entry->getFlags() & CacheFlag::COMMITTED)
 				break;
 
@@ -885,9 +890,9 @@ public:
 		}
 	}
 
-	void rollback(thread_db* tdbb)
+	void rollback(thread_db* tdbb, const Versioned* keep = nullptr)
 	{
-		ListEntry<Versioned>::rollback(tdbb, list, TransactionNumber::current(tdbb));
+		ListEntry<Versioned>::rollback(tdbb, list, TransactionNumber::current(tdbb), keep);
 		if (!list)
 		{
 			// No versions left after rollback- that means permanent part can never be accessed

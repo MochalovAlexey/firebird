@@ -1,11 +1,16 @@
 # Путь до запуска 1С и теста Гилёва
 
-Срез на 12 ноября 2026 года: P2 APP-14 исправлен в рабочем diff и ждёт review.
-[APP-15](TEMPORARY_RELATIONS_TASK.md) остановлен по решению пользователя:
-подтверждён native blocker NAT-06 — потеря LTT undo при освобождении большого
-root savepoint. Reproducer и причина передаются в архитектурный диалог.
+Срез на 12 ноября 2026 года: P2 APP-14 в `11dee63d2a` прошёл code review без замечаний;
+артефакты и evidence 174 libpq / 60 OO PASS проверены.
+[NAT-06](LTT_METADATA_UNDO_TASK.md) реализован и ожидает review: native LTT metadata
+undo переживает освобождение row-root, сохраняет порядок ALTER/DROP и границы
+NO AUTO UNDO/retaining/force. 44 SQL сценария, 38 OO assertions, fault probes,
+transaction и visibility регрессии PASS; [отчёт](../VALIDATION.md#12-ноября-2026-nat-06-native-ltt-metadata-undo).
+[APP-15](TEMPORARY_RELATIONS_TASK.md) возобновляется только после review fix.
+SQL-10 добавляет отсутствующее разрешение PG-owned LTT DDL
+под user savepoint; native DSQL сейчас отклоняет такую DDL.
 Oracle PostgreSQL выполнен; PG temporary lifecycle на Firebird не принят.
-APP-10…13 приняты; PG TEMP/pg_temp, живые temp catalogs и остальные зависимые
+APP-10…14 приняты; PG TEMP/pg_temp, живые temp catalogs и остальные зависимые
 части APP-15 ещё не реализованы.
 Cache crash NAT-05 предшествует APP-14 в нашем fork, происхождение и исправление
 не установлены; называть его доказанным upstream дефектом нельзя.
@@ -31,7 +36,7 @@ Cache crash NAT-05 предшествует APP-14 в нашем fork, прои�
 | Публичные namespace IDs | APP-11 принят: PG_CATALOG.PG_NAMESPACE над APP-10, atomic installer, точные имена/IDs, read-only, text/binary/native/libpq и transaction visibility PASS | BIGINT/VARCHAR, wire20/1043, uppercase labels; нет PG oid/name/regnamespace, nspowner/nspacl и temp namespace; visibility — отдельный APP-14 |
 | Постоянные relations | APP-12 принят: PG_CLASS из RDB$RELATIONS + PG_NAMESPACE, native ID+1, атомарная установка, 228 libpq results и native oracle/права/lifecycle PASS | Только schema-level persistent tables/views, native wire20/1043/20/1043. Reuse ID допустим, restore не проверен; полный catalog/visibility/temp и selected04/10/11 открыты |
 | Имена PG4 / APP-13 | Принят: ASCII lowercase unquoted, точные quoted names, native-safe source, lowercase bootstrap и public-first path; независимые names/strings PASS | Native1/2/3 прежние; ведущий `_` ещё introducer (SQL-09); полный PG path/USAGE/regnamespace/visibility/temp ещё не реализован |
-| Видимость / APP-14 | pg_table_is_visible через native resolver/SCL; 174 libpq / 60 OO PASS после P2 fix, ждёт review | Явный путь с pg_catalog, USAGE всех существующих schemas, без $user/pg_temp/LTT; wire20→16; guards после вычисления аргумента |
+| Видимость / APP-14 | pg_table_is_visible через native resolver/SCL; P2 в 11dee63d2a прошёл review, evidence 174 libpq / 60 OO PASS проверено | Явный путь с pg_catalog, USAGE всех существующих schemas, без $user/pg_temp/LTT; wire20→16; guards после вычисления аргумента |
 | Прикладные формы | Чтение конфигурации selected06 и запись selected23 неизменённым SQL; форма 92 parameters, включая 68 BLOB | Синтетические таблицы/данные; реальная схема, конфигурация и исходный Bind 1С не приняты |
 
 ## Где находимся относительно конечной цели
@@ -77,7 +82,9 @@ Cache crash NAT-05 предшествует APP-14 в нашем fork, прои�
 открытия подготовленной информационной базы реальным клиентом 1С и повторяемого
 теста Гилёва на Firebird. Это не обещание ровно семи инструкций/коммитов: новые
 отказы реального клиента и блокирующие дефекты могут потребовать дополнительных
-итераций. Процент готовности из этой нумерации не вычислять.
+итераций. NAT-06 уже потребовал отдельной технической инструкции перед завершением
+первого этапа; семь прикладных результатов остаются теми же. Процент готовности
+из этой нумерации не вычислять.
 
 | № | Этап | Проверяемый результат / основные backlog ID |
 |---|---|---|
@@ -99,7 +106,7 @@ Cache crash NAT-05 предшествует APP-14 в нашем fork, прои�
 явным ограничением; он отсутствует в выбранных temporary CREATE. Исходные
 selected04/12/13 после одного APP-15 ещё не считаются пройденными: нужны результаты
 типового и служебного этапов. Регnamespace не заменяется специальным AST для одного
-predicate. Принятые APP-10…13 повторно не реализуются; P2 APP-14 исправлен отдельно и ждёт review.
+predicate. Принятые APP-10…14 повторно не реализуются; P2 APP-14 прошёл review.
 
 Отложенные пользователем реальные эффекты трёх SET не возвращаются в обязательный
 объём автоматически. По каждому открытому пункту BACKLOG к финалу нужно либо

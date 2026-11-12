@@ -38,6 +38,147 @@ using namespace Firebird;
 using namespace Jrd;
 
 
+// LttUndo implementation
+
+LttUndo::~LttUndo()
+{
+	clear();
+}
+
+void LttUndo::push(LttUndoItem* item)
+{
+	item->next = m_head;
+	m_head = item;
+	if (!m_tail)
+		m_tail = item;
+}
+
+void LttUndo::append(LttUndo& older)
+{
+	fb_assert(this != &older);
+	if (!older.m_head)
+		return;
+	if (m_tail)
+		m_tail->next = older.m_head;
+	else
+		m_head = older.m_head;
+	m_tail = older.m_tail;
+	older.m_head = older.m_tail = nullptr;
+}
+
+void LttUndo::prepend(LttUndo& newer)
+{
+	newer.append(*this);
+	append(newer);
+}
+
+void LttUndo::clear()
+{
+	while (m_head)
+	{
+		const auto item = m_head;
+		m_head = item->next;
+		delete item;
+	}
+	m_tail = nullptr;
+}
+
+void LttUndo::rollback(thread_db* tdbb, jrd_tra* transaction)
+{
+	const auto oldTransaction = tdbb->getTransaction();
+	tdbb->setTransaction(transaction);
+	auto& lttMap = transaction->tra_attachment->att_local_temporary_tables;
+	try
+	{
+		while (m_head)
+		{
+			const auto item = m_head;
+			if (item->backoutFailed)
+			{
+				// Never replay an operation that may already have destroyed versions.
+				// Only final attachment teardown can discard the remaining snapshots.
+				if (tdbb->tdbb_flags & TDBB_detaching)
+				{
+					clear();
+					break;
+				}
+				(Arg::Gds(isc_trans_invalid)).raise();
+			}
+
+			// Do potentially throwing cache work before transferring map ownership.
+			METD_drop_relation(transaction, item->name);
+			const auto rollbackRelation = [&](LocalTemporaryTable* ltt, const jrd_rel* keep = nullptr)
+			{
+				const auto permanent = ltt->relation->getPermanent();
+				// A failure may leave the version destroyed. Do not retain a dangling
+				// pointer in the attachment map, including during detach cleanup.
+				ltt->relation = nullptr;
+				try
+				{
+					permanent->rollback(tdbb, keep);
+				}
+				catch (...)
+				{
+					item->backoutFailed = true;
+					transaction->tra_attachment->signalShutdown(isc_att_shut_killed);
+					throw;
+				}
+			};
+
+			switch (item->type)
+			{
+				case LttUndoItem::LTT_UNDO_CREATE:
+					// LTT was created in this savepoint - remove it
+					if (const auto lttPtr = lttMap.get(item->name))
+					{
+						if ((*lttPtr)->relation)
+							rollbackRelation(*lttPtr);
+
+						delete *lttPtr;
+						lttMap.remove(item->name);
+					}
+
+					break;
+
+				case LttUndoItem::LTT_UNDO_ALTER:
+					// LTT was altered - restore original state
+					if (const auto lttPtr = lttMap.get(item->name))
+					{
+						if ((*lttPtr)->relation && (*lttPtr)->relation != item->original->relation)
+							rollbackRelation(*lttPtr, item->original->relation);
+
+						delete *lttPtr;
+						*lttPtr = item->original.release();
+					}
+
+					break;
+
+				case LttUndoItem::LTT_UNDO_DROP:
+					// LTT was dropped - restore it
+					if (!lttMap.exist(item->name))
+					{
+						lttMap.put(item->name, item->original.get());
+						item->original.release();
+					}
+
+					break;
+			}
+
+			m_head = item->next;
+			delete item;
+		}
+		m_tail = nullptr;
+		tdbb->setTransaction(oldTransaction);
+	}
+	catch (...)
+	{
+		tdbb->setTransaction(oldTransaction);
+		transaction->tra_flags |= TRA_invalidated;
+		throw;
+	}
+}
+
+
 // UndoItem implementation
 
 UndoItem::UndoItem(jrd_tra* transaction, RecordNumber recordNumber, const Record* record)
@@ -424,8 +565,7 @@ void Savepoint::createLttAction(LttUndoItem::UndoType type, const QualifiedName&
 {
 	// Create LTT undo action. For ALTER, make a copy of the original LTT state.
 	const auto item = FB_NEW_POOL(*m_transaction->tra_pool) LttUndoItem(type, name, original);
-	item->next = m_lttActions;
-	m_lttActions = item;
+	m_lttActions.push(item);
 }
 
 
@@ -492,61 +632,7 @@ Savepoint* Savepoint::rollback(thread_db* tdbb, Savepoint* prior, bool preserveL
 			m_freeActions = action;
 		}
 
-		// Undo LTT changes
-		const auto attachment = m_transaction->tra_attachment;
-		auto& lttMap = attachment->att_local_temporary_tables;
-
-		while (m_lttActions)
-		{
-			const auto item = m_lttActions;
-			m_lttActions = item->next;
-
-			switch (item->type)
-			{
-				case LttUndoItem::LTT_UNDO_CREATE:
-					// LTT was created in this savepoint - remove it
-					if (const auto lttPtr = lttMap.get(item->name))
-					{
-						if ((*lttPtr)->relation)
-						{
-							auto relation = (*lttPtr)->relation;
-							auto permanent = relation->getPermanent();
-
-							permanent->rollback(tdbb);
-						}
-
-						delete *lttPtr;
-						lttMap.remove(item->name);
-					}
-
-					METD_drop_relation(m_transaction, item->name);
-					break;
-
-				case LttUndoItem::LTT_UNDO_ALTER:
-					// LTT was altered - restore original state
-					if (const auto lttPtr = lttMap.get(item->name))
-					{
-						if ((*lttPtr)->relation && (*lttPtr)->relation != item->original->relation)
-							(*lttPtr)->relation->getPermanent()->rollback(tdbb);
-
-						delete *lttPtr;
-						*lttPtr = item->original.release();
-					}
-
-					METD_drop_relation(m_transaction, item->name);
-					break;
-
-				case LttUndoItem::LTT_UNDO_DROP:
-					// LTT was dropped - restore it
-					if (!lttMap.exist(item->name))
-						lttMap.put(item->name, item->original.release());
-
-					METD_drop_relation(m_transaction, item->name);
-					break;
-			}
-
-			delete item;
-		}
+		m_lttActions.rollback(tdbb, m_transaction);
 
 		tdbb->setTransaction(old_tran);
 	}
@@ -627,94 +713,11 @@ Savepoint* Savepoint::rollforward(thread_db* tdbb, Savepoint* prior)
 			m_freeActions = action;
 		}
 
-		// Merge LTT undo data to parent savepoint
-		// When releasing a savepoint, we need to keep the undo data so that
-		// rolling back a parent savepoint will also undo the LTT changes
+		// Keep the complete reverse chronology, including across row-root release.
 		if (m_next)
-		{
-			while (m_lttActions)
-			{
-				const auto item = m_lttActions;
-				m_lttActions = item->next;
-
-				// Check if parent savepoint already has an undo item for the same LTT
-				LttUndoItem* parentItem = nullptr;
-				LttUndoItem** parentItemPtr = nullptr;
-
-				for (auto lookupItemPtr = &m_next->m_lttActions;
-					 *lookupItemPtr;
-					 lookupItemPtr = &(*lookupItemPtr)->next)
-				{
-					if ((*lookupItemPtr)->name == item->name)
-					{
-						parentItem = *lookupItemPtr;
-						parentItemPtr = lookupItemPtr;
-						break;
-					}
-				}
-
-				if (parentItem)
-				{
-					// Parent already has an undo item for this LTT.
-					// Determine what to do based on the combination of types.
-					bool keepParent = true;
-
-					if (item->type == LttUndoItem::LTT_UNDO_DROP)
-					{
-						if (parentItem->type == LttUndoItem::LTT_UNDO_CREATE)
-						{
-							// CREATE followed by DROP: they cancel out - remove both
-							*parentItemPtr = parentItem->next;
-							delete parentItem;
-							delete item;
-							continue;
-						}
-						else if (parentItem->type == LttUndoItem::LTT_UNDO_ALTER)
-						{
-							// ALTER followed by DROP: replace parent's ALTER with DROP
-							// (DROP undo contains the original full LTT state)
-							*parentItemPtr = parentItem->next;
-							delete parentItem;
-							keepParent = false;
-						}
-						// DROP followed by DROP: keep parent's (shouldn't normally happen)
-					}
-					// Other cases (ALTER after CREATE, ALTER after ALTER, etc.):
-					// keep parent's undo (oldest state)
-
-					if (keepParent)
-					{
-						// In case of DROP (parent) -> CREATE (current), we must keep both
-						// to ensure that on rollback we first drop the new table and then
-						// restore the original one.
-						if (item->type == LttUndoItem::LTT_UNDO_CREATE &&
-							parentItem->type == LttUndoItem::LTT_UNDO_DROP)
-						{
-							// do nothing, fall through to add item
-						}
-						else
-						{
-							delete item;
-							continue;
-						}
-					}
-				}
-
-				// Move item to parent savepoint
-				item->next = m_next->m_lttActions;
-				m_next->m_lttActions = item;
-			}
-		}
+			m_next->m_lttActions.prepend(m_lttActions);
 		else
-		{
-			// No parent savepoint - just discard undo data
-			while (m_lttActions)
-			{
-				const auto item = m_lttActions;
-				m_lttActions = item->next;
-				delete item;
-			}
-		}
+			m_transaction->tra_ltt_undo.prepend(m_lttActions);
 
 		tdbb->setTransaction(old_tran);
 		tdbb->tdbb_flags &= ~TDBB_verb_cleanup;

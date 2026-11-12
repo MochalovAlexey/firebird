@@ -291,6 +291,7 @@ public:
 	vec<Lock*>*			tra_relation_locks;	// locks for relations
 	TransactionBitmap*	tra_commit_sub_trans;	// committed sub-transactions
 	Savepoint*	tra_save_point;			// list of savepoints
+	LttUndo		tra_ltt_undo;			// metadata undo from levels without a parent
 	Savepoint*	tra_save_free;			// free savepoints
 	SavNumber tra_save_point_number;	// next save point number to use
 	ULONG tra_flags;

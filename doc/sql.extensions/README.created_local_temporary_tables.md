@@ -246,23 +246,14 @@ DDL operations on Local Temporary Tables behave the same as DDL on persistent ta
 Changes to the table structure (CREATE, ALTER, DROP) are only made permanent when the transaction commits. If the
 transaction is rolled back, any LTT structural changes made within that transaction are undone.
 
-Savepoints are also supported. If a savepoint is rolled back, any LTT changes made after that savepoint are undone.
+LTT metadata undo is independent of the transaction-level row undo log. It is retained even when
+`NO AUTO UNDO` is used or the engine releases a large transaction-level savepoint. Internal statement
+savepoints restore LTT metadata on statement failure. The metadata snapshots use memory proportional
+to the number of LTT DDL operations in the transaction, not the number of changed data rows.
 
-```sql
-set autoddl off;  -- ISQL feature
-
-create local temporary table t1 (id integer);
-
-savepoint sp1;
-
-alter table t1 add name varchar(50);
-
-rollback to savepoint sp1;
-
--- The ALTER TABLE is undone; column 'name' does not exist
-```
-
-This applies to all DDL operations on LTTs.
+Currently, DSQL rejects DDL (including LTT DDL) while a user `SAVEPOINT` is active. The error is
+`isc_user_savepoint` (SQLSTATE `0A000`). User savepoints can still be used for DML; this metadata undo
+fix does not change the SQL restriction on DDL.
 
 ## Schema Integration
 

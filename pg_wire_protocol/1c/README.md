@@ -1,11 +1,12 @@
 # Записанный профиль 1С: этапы совместимости
 
 12 ноября: [APP-15: рабочий цикл PG temporary tables](TEMPORARY_RELATIONS_TASK.md)
-остановлен на native blocker NAT-06. Большой root savepoint удаляет LTT undo,
-после ROLLBACK определение остаётся. По решению пользователя blocker передаётся
-в архитектурный диалог; зависимые части APP-15 ещё не реализованы.
-P2 APP-14 исправлен отдельно: вычисление аргумента предшествует чтению attachment
-state и guards. Oracle, reproducer и регрессия — в начале [VALIDATION](../VALIDATION.md).
+ожидает review [native undo fix NAT-06](LTT_METADATA_UNDO_TASK.md). Исправлены потеря
+metadata undo после освобождения row-root и порядок ALTER→DROP; 44 SQL сценария,
+OO/fault probes и transaction/visibility регрессии PASS. После review продолжить APP-15; необходимые PG-owned
+user-savepoint DDL guards теперь описаны явно (SQL-10).
+P2 APP-14 в `11dee63d2a` прошёл review: аргумент вычисляется до чтения attachment
+state и guards. Oracle, reproducer и проверки — в начале [VALIDATION](../VALIDATION.md).
 
 ## Общая установка SQL совместимости
 
@@ -490,7 +491,7 @@ bootstrap/catalog labels, initial path/RESET и savepoint journal. Native1/2/3
 Ревизия `4520f371e9` прошла review и независимые names/strings проверки;
 установка и новый контракт описаны выше. APP-14 с ограниченной visibility
 проверен: целевая матрица PASS, P2 исправлен отдельно 12.11. Инструкция APP-15 выше
-нацелена на общий TEMP lifecycle, но остановлена на NAT-06; regnamespace/типы 1С,
+нацелена на общий TEMP lifecycle, но ожидает review NAT-06; regnamespace/типы 1С,
 transactional search_path и полные каталоги остаются открытыми.
 
 ## Постоянные таблицы и представления в PG_CLASS: APP-12

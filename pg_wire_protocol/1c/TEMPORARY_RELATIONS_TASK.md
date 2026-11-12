@@ -1,5 +1,13 @@
 # APP-15: полный рабочий цикл PG temporary tables
 
+Уточнение 12 ноября 2026: [отдельное исправление NAT-06](LTT_METADATA_UNDO_TASK.md)
+реализовано и ожидает review; 44 native SQL сценария, 38 OO assertions и релевантные
+регрессии PASS ([отчёт](../VALIDATION.md#12-ноября-2026-nat-06-native-ltt-metadata-undo)).
+Возобновить этот этап только после review fix. PG TEMP реализация ещё не начата.
+P2 APP-14 уже исправлен в `11dee63d2a`, повторная
+реализация не нужна. Ниже также уточнён необходимый guard для PG LTT DDL под
+user savepoint: нынешний native код такую DDL ещё не разрешает (SQL-10).
+
 Задание для отдельного диалога разработки, 11 ноября 2026 года.
 Рабочий каталог `/home/aleksey/dev/my_firebird/firebird`, master Firebird 6,
 ветка `pg_wire_protocol`; проверенная основа `8ffd22cb7669a430b9554a46e467264d0fe32ee5`.
@@ -15,7 +23,7 @@ status/diff, [README](README.md), [PROGRESS](PROGRESS.md), [BACKLOG](../BACKLOG.
 git add, commit, amend, reset или checkout.
 
 Это следующий этап, ещё не реализован. Он затрагивает APP-14/15, часть APP-01/04,
-SQL-09. APP-02/03/05/06, полный APP-01/04 и исходный selected04 не закрываются.
+SQL-09/10. APP-02/03/05/06, полный APP-01/04 и исходный selected04 не закрываются.
 
 ## Проверяемый результат
 
@@ -56,17 +64,19 @@ SELECT * FROM work_items;          -- снова permanent
 зафиксировать ожидания спорных lifecycle случаев на отдельном PostgreSQL / Postgres
 Pro через настоящий libpq. Не использовать рабочий сервер или базу 1С.
 
-## 1. Исправить замечание APP-14 в составе этого этапа
+## 1. Сохранить исправление замечания APP-14
 
-В `evlPgRelationId` guards сейчас предшествуют `EVL_expr`. Выражение аргумента
+P2 исправлен в `11dee63d2a` и прошёл review 12 ноября. В исходном `evlPgRelationId`
+guards предшествовали `EVL_expr`. Выражение аргумента
 может поменять search_path или создать LTT, после чего lookup работает с уже
 непроверенным состоянием. Подтверждённый пример и логи — в начале VALIDATION.
 
-Вычислять аргумент до захвата и проверки зависимого состояния attachment;
+Сохранить вычисление аргумента до захвата и проверки зависимого состояния attachment;
 не держать ссылку на прежний path через вызов пользовательской функции. Сохранить
 согласованный порядок NULL/ошибок, а после расширения профиля проверить права
-и состояние, действующие после вычисления аргумента. Добавить regression с PSQL
-аргументом, меняющим путь, и native prepared handle. Не лечить это SQL-обёрткой:
+и состояние, действующие после вычисления аргумента. Регрессия с PSQL-аргументом,
+меняющим путь, и native prepared handle уже добавлена; использовать её.
+Не лечить это SQL-обёрткой:
 публично доступен и сам builtin. Остальные результаты APP-14 сохраняются, кроме
 явно снятых ниже отказов на PG-owned temps / effective relation path.
 
@@ -83,6 +93,19 @@ PG4 grammar должна создавать существующие DDL nodes �
 признаками PG temporary table. Признак должен переживать Prepare → Execute,
 клонирование LTT metadata и undo; определять его по порту/логину/имени нельзя.
 Native dialects 1/2/3 сохраняют свои значения по умолчанию и правила.
+
+**Дополнение SQL-10:** нынешний `DsqlDdlRequest::execute` запрещает любую DDL
+под user savepoint до вызова node. `FLAG_ACTUAL_LTT_DDL` выставляется позже и
+пока только исключает replication. После native undo fix добавить узкую engine
+проверку до эффектов: под user savepoint разрешены только PG4 операции, чей
+фактический target — PG-owned LTT (для CREATE — PG TEMP intent). Для ALTER/DROP/
+index operations проверить текущий target и ownership, не только вид SQL или
+состояние на прежнем Prepare. Переиспользовать AST/native metadata lookup;
+публичный metadata API и wire lexer для этого не расширять. Persistent/GTT и
+native dialects 1/2/3 сохраняют текущий запрет. Не удалять общий guard и не
+переносить отказ на момент после выполнения DDL. Проверить отказ без эффектов
+и stale prepared target после DROP/recreate. Полная positive SAVEPOINT/RELEASE/
+ROLLBACK TO матрица PG TEMP входит в этот этап, а не считается готовым native reuse.
 
 В PgWire потребуется только расширить существующий `SqlInfo::ddlObject` для
 новых TEMP/TEMPORARY prefixes и правильного CREATE TABLE tag. Сейчас он знает
@@ -173,7 +196,8 @@ Native LTT IDs повторяются между attachments и переиспо
 Namespace не исчезает просто из-за DROP последней таблицы. Проверить на PG oracle
 первое CREATE → rollback, CREATE+DROP в одной транзакции, savepoint rollback/release
 и последующее повторное CREATE. Хранить undo инициализации отдельно от конкретной
-LTT: native merge undo может сократить пару CREATE+DROP. Не вести параллельный
+LTT: namespace живёт и после CREATE+DROP, а оптимизации LTT undo могут сокращать
+такие пары. Не вести параллельный
 исторический журнал временных объектов в PgWire.
 
 Namespace activation и выделение IDs происходят только при Execute создания,
@@ -181,11 +205,11 @@ Namespace activation и выделение IDs происходят только
 statement undo; ранее активное namespace сохраняется. Parse → Describe → Close
 без Execute не меняет pg_my_temp_schema, каталог или allocator.
 
-Проверить, что undo не теряется при штатном освобождении большого root savepoint:
+После приёмки NAT-06 повторить, что undo не теряется при освобождении большого root savepoint:
 CREATE TEMP → достаточно DML для этого пути → ROLLBACK. Native `Savepoint::rollforward`
-и его SIZE_THRESHOLD нельзя оценивать только малыми fixtures. Если обнаружится
-предшествующий native LTT defect, локализовать и вынести решение об отдельном fix,
-не выдавать ограниченный успешный прогон за подтверждение общего rollback.
+и его SIZE_THRESHOLD нельзя оценивать только малыми fixtures. Native prerequisite
+закрывает root/NO AUTO UNDO/merge/retaining; APP-15 проверяет их вместе с новым
+namespace activation и PG-owned DDL под пользовательскими savepoints.
 
 Существующий `ALTER SESSION RESET` — native extension: сохранить его нынешнюю
 семантику очистки LTT data с сохранением definitions, проверить согласованность

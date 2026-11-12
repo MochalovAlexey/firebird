@@ -1,10 +1,15 @@
 # План приёмки wire plugins и PostgreSQL endpoint
 
-## APP-15: приёмка заблокирована NAT-06
+## APP-15: ожидает review native prerequisite NAT-06
 
-12 ноября большой native rollback воспроизведён как FAIL: LTT definition остаётся
-после удаления root savepoint; малый контроль PASS. По решению пользователя
-blocker передаётся в архитектурный диалог. Полная матрица ниже остаётся невыполненной.
+12 ноября [native undo fix](1c/LTT_METADATA_UNDO_TASK.md) прошёл 44 SQL сценария,
+38 OO assertions, fault probes и существующие transaction/visibility регрессии.
+Baseline теми же проверками: 23 FAIL / 21 PASS. Покрыты threshold (оба пути в GDB),
+DDL до/после root release, ALTER/DROP ordering, NO AUTO UNDO, retaining и force rollback.
+Новые native probes: `tools/native_ltt_undo_checks.py` и `tools/native_ltt_undo_api.cpp`;
+точные команды, expected/actual и ограничения — в VALIDATION. Полная матрица APP-15
+ниже остаётся невыполненной. Native user-savepoint LTT DDL сейчас отвергается;
+positive PG-owned проверки добавляются в APP-15 вместе с SQL-10.
 P2 APP-14 исправлен отдельно; существующий OO probe дополнен повторным Execute
 PSQL-аргумента, меняющего путь, NULL/error contract и cleanup ветки неуспеха.
 Oracle и точные результаты — в начале [VALIDATION](VALIDATION.md).
