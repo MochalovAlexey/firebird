@@ -1,5 +1,22 @@
 # Проверки реализации
 
+## 13 ноября 2026: TcpNoNagle на подключаемых wire listeners
+
+Перенос настоящей базы выявил около 42 мс на каждый последовательный запрос:
+новый host оставлял Nagle включённым, хотя штатная настройка TcpNoNagle по
+умолчанию включена. Accepted TCP sockets теперь получают TCP_NODELAY при
+включённом TcpNoNagle из firebird.conf. Дополнительных параметров и таймаутов нет.
+Настройка применяется до Startup, поэтому берётся серверное значение, без
+переопределений отдельных баз. Родной listener не изменён.
+
+На том же отдельном Debug-сервере с audit trace медиана 30 запросов SELECT 1
+уменьшилась с 42.01 до 1.48 мс. Это проверка причины задержки, не результат
+нагрузочного теста Гилёва. Артефакты:
+`/tmp/pgwire-1c-launch/tcp-nagle-before.json`,
+`/tmp/pgwire-1c-launch/tcp-nagle-after.json`.
+Существующий wire_host_smoke PASS: native coexistence, endpoint lifecycle,
+ошибочные конфигурации и остановка; `/tmp/pgwire-nodelay-host-check/summary.json`.
+
 ## 13 ноября 2026: пустые binary mchar/mvarchar при переносе настоящей базы
 
 Первый перенос `gilev_demo_ru` обнаружил assertion в UnicodeUtil::utf16ToUtf8:

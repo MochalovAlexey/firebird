@@ -32,6 +32,7 @@
 
 #include <arpa/inet.h>
 #include <fcntl.h>
+#include <netinet/tcp.h>
 #include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -506,6 +507,12 @@ private:
 				socketFailure("Wire accept failed");
 			}
 			char address[INET_ADDRSTRLEN];
+			if (Config::getDefaultConfig()->getTcpNoNagle())
+			{
+				const int enabled = 1;
+				if (::setsockopt(socket.get(), IPPROTO_TCP, TCP_NODELAY, &enabled, sizeof(enabled)) < 0)
+					socketFailure("Cannot configure wire TCP_NODELAY");
+			}
 			if (!::inet_ntop(AF_INET, &peer.sin_addr, address, sizeof(address)))
 				socketFailure("Cannot format wire peer address");
 			RefPtr<IWireConnection> connection(REF_NO_INCR, createSocketConnection(socket.release(),
