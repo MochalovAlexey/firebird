@@ -1,5 +1,31 @@
 # Проверки реализации
 
+## 13 ноября 2026: обычный GUI Гилёва и постоянный стенд
+
+Подготовленная база скопирована offline после штатной остановки частного ibsrv
+и Firebird в `/home/aleksey/dev/1c/firebird-gilev`; SHA256 исходной и целевой
+`.fdb` совпали (`evidence/offline-copy.json` внутри стенда). Исходная PostgreSQL
+база и пользовательские службы не изменялись. Зарегистрирована существующая
+база в отдельном ragent-кластере без `--create-database`: cluster 12541,
+agent 12540, RAS 12545, PgWire 25432 и native 23050.
+
+Настоящий `1cv8 8.5.4.1306 /RunModeOrdinaryApplication` отрисовал полноценную
+форму Гилёва с кнопкой запуска. Снимок:
+`/home/aleksey/dev/1c/firebird-gilev/client-ui-20261113T122731/0x1600147.png`.
+Первый запуск остановился после очистки объектов на неподдержанном
+`DELETE FROM _SeqB196 T1 USING pg_temp.tt7 T2 WHERE T1._Fld195RRef=T2._Fld195RRef`.
+Получены 42601 и штатный ROLLBACK; успешный benchmark этим не заявляется.
+
+Новый `1c/run_gilev.py` управляет только уже подготовленным Linux стендом,
+используя stdlib Python и существующую приватную конфигурацию. Read-only status
+подтвердил четыре настоящих PID. Изолированные lifecycle-проверки PASS:
+`/tmp/pgwire-gilev-launcher-checks-02/summary.json` — start/reuse/status,
+PID/starttime/executable guards, legacy adoption, occupied ports, reverse
+SIGTERM, отдельный SIGTERM детям ragent и отказ при ранее осиротевшей сессии
+без остановки Firebird. SIGKILL не используется. Первый настоящий stop выявил,
+что ragent сам не завершает дочерние процессы; именно это покрывает исправление
+и дополнительная проверка. Бенчмарк утилита не запускает, результаты не публикует.
+
 ## 13 ноября 2026: APP-17 — настоящее открытие информационной базы 1С
 
 **Этап 4 принят:** 1cv8c 8.5.4.1306 отрисовал начальную страницу конфигурации
