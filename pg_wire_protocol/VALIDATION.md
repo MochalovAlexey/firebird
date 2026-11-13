@@ -1,5 +1,54 @@
 # Проверки реализации
 
+## 13 ноября 2026: подготовка настоящей базы Гилёва через libpq
+
+`1c/prepare_infobase.py` перенёс `gilev_demo_ru` из Postgres Pro 18.6 в отдельную
+Firebird ODS 14.1 базу с PAGE_SIZE 32768 и установленным профилем совместимости.
+Источник читался в REPEATABLE READ READ ONLY; DML/DDL в исходной базе не выполнялись.
+Данные, пароли и исходный dump не добавлены в репозиторий.
+
+- Все **194 таблицы / 135146 строк** скопированы одной native-транзакцией и
+  проверены до COMMIT: количество строк, сумма SHA256 бинарных строк и сумма
+  квадратов этих хешей, с длинами полей, NULL и сохранением повторов.
+- Проверены **564155 bytea-ячеек / 26573030 байт**, максимум одного значения
+  **347472 байта**. Проверялись настоящие строки, включая конфигурацию 1С,
+  а не только synthetic fixtures. Все 86 timestamp-колонок источника укладываются
+  в native точность 100 мкс.
+- DDL preflight с полным ROLLBACK проверил 194 таблицы и **337 поддержанных
+  исходных индексов**, включая **46 primary keys**. PAGE_SIZE 16384 оказался
+  недостаточен для `_commonsettings_1`; штатные 32768 решили ограничение без
+  изменений формата ключей и без пропуска этого индекса.
+- Для **14 nullable unique indexes** выполнено атомарное соответствие PG
+  NULLS DISTINCT: native partial UNIQUE для полностью non-NULL ключей и
+  дополнительный обычный индекс всех строк. Получено **337 + 14 = 351**
+  физических индексов. Native metadata всех 28 созданных/изменённых индексов
+  проверены; бинарные отпечатки 14 затронутых таблиц до/после совпали с исходным
+  committed copy report, который помечен `nullable_indexes_reconciled=true`.
+- Дифференциальная проверка через native isql и настоящий libpq на отдельном
+  PostgreSQL: повторы полностью/частично NULL ключей разрешены, повтор полностью
+  non-NULL ключа отклонён, по 7 строк в обоих движках. Scratch DDL откатился,
+  приватный PostgreSQL остановлен штатно. Проверены конфликт имён helper indexes,
+  предел имени 63 байта, отказ NULLS NOT DISTINCT и нестандартным unique
+  opclass/collation, отказ изменённой source schema до первого обращения к target.
+
+Артефакты находятся в `/tmp/pgwire-1c-launch/migration/`:
+`32k-preflight.json`, `32k-copy.json`, `32k-index-reconciliation.json`,
+`null-checks-02/summary.json`, `timestamp-precision.json`, `schema-binding-audit.json`.
+Последний audit подтвердил неизменный исходный schema hash
+`5c532f3319e61c6749688718e6f0e7a08677086caee8c5b4e3fce2c6a586bd98`;
+все 353 исходных индекса используют default opclasses/колоночные collations,
+нестандартных column collations нет. Новые отчёты имеют `schema_format=2`;
+reconciliation связывает source database/schema/hash с committed report до DDL.
+Legacy hash проверяется в прежней форме без новых audit-полей.
+
+Прерывание предыдущей попытки подтвердило полный rollback: в target не осталось
+ни одной application-таблицы. Без `--allow-incomplete-schema` планировщик
+останавливается до target DDL. В отчётах явно остаются **19 объектов**:
+16 nonunique composite expression indexes и 3 циклических sequence defaults.
+Они не эмулируются неэквивалентными triggers. Helper indexes требуют согласованного
+обслуживания при будущих runtime ALTER/DROP INDEX. Подготовка базы подтверждена;
+эта проверка сама по себе не утверждает открытие клиентом 1С или проход Гилёва.
+
 ## 13 ноября 2026: native LTT сохраняет field IDs после DROP столбца
 
 Проверка serial4 обнаружила независимый native дефект makeLttVersion:

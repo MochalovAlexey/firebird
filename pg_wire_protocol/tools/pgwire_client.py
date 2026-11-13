@@ -35,7 +35,7 @@ def visible(value):
 
 
 class Connection:
-    def __init__(self, args, password):
+    def __init__(self, args, password, *, conninfo=None):
         self.connection = None
         self.password = password
         name = args.libpq or ctypes.util.find_library("pq") or ("libpq.dll" if os.name == "nt" else "libpq.so.5")
@@ -76,17 +76,21 @@ class Connection:
                    "user": args.user, "password": password, "connect_timeout": str(args.connect_timeout),
                    "sslmode": "disable", "gssencmode": "disable", "client_encoding": "UTF8",
                    "application_name": "pgwire_client", "target_session_attrs": "any"}
+        if conninfo is not None:
+            options = {"dbname": conninfo, "client_encoding": "UTF8",
+                       "application_name": "pgwire_prepare_infobase"}
         for key, value in options.items():
             if "\0" in value:
                 raise ClientError(f"NUL is not allowed in connection parameter {key}")
         keys = (ctypes.c_char_p * (len(options) + 1))(*(key.encode() for key in options), None)
         values = (ctypes.c_char_p * (len(options) + 1))(*(value.encode("utf-8") for value in options.values()), None)
-        # expand_dbname=0 keeps the database name/path literal, never a conninfo/URI.
+        # CLI database names stay literal. Only an explicit programmatic conninfo
+        # opts into libpq's complete connection-string/URI expansion.
         # Keep explicit endpoint/password arguments ahead of ambient libpq defaults.
         # This CLI is single-threaded; restore the environment after connecting.
         defaults = {key: os.environ.pop(key) for key in ("PGHOSTADDR", "PGSERVICE", "PGPASSWORD") if key in os.environ}
         try:
-            self.connection = self.pq.PQconnectdbParams(keys, values, 0)
+            self.connection = self.pq.PQconnectdbParams(keys, values, int(conninfo is not None))
         finally:
             os.environ.update(defaults)
         if not self.connection:

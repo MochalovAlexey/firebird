@@ -1,5 +1,33 @@
 # Незавершённые задачи PgWire и профиля 1С
 
+13 ноября 2026: работа продолжается до реального открытия отдельной базы 1С;
+локальные промежуточные коммиты разрешены пользователем, push запрещён.
+APP-16 принят независимым повтором. Исправлены binary Bind пустых mchar/mvarchar
+(`dab0178aa5`) и неприменение штатного TcpNoNagle (`6d33f6daf4`).
+Ниже сохраняется перечень ограничений; окончательные статусы текущего цикла
+обновляются по результатам переноса и запуска, а не по одному успешному SQL.
+
+Обнаруженные при настоящем переносе ограничения, которые нельзя забыть:
+
+- 16 составных неуникальных expression indexes с COALESCE пока не перенесены.
+  Это ограничение схемы/производительности, не разрешение пропускать уникальность.
+- Три неиспользованные в источнике int32 CYCLE последовательности и их nextval
+  defaults пока не воспроизводятся. В инструменте переноса это явные pending
+  объекты; триггер, подменяющий explicit NULL, вместо default не используется.
+- Объявленная ширина строкового составного индекса может превышать native
+  key budget. Проверяется вся схема до копирования данных, сначала на штатной
+  странице 32 КБ. Нельзя обрезать значения или молча убирать UNIQUE/PRIMARY KEY.
+  Для текущего источника проверка 194 таблиц и 337 поддержанных индексов на
+  32 КБ прошла полностью: дополнительных пропущенных индексов не требуется.
+- Native ICU ru_RU и PostgreSQL libc ru_RU.UTF-8 имеют различия сортировки;
+  настройка локали не является обещанием полной эквивалентности collations.
+  Точный поддержанный профиль описан в [DATABASE_CATALOG](1c/DATABASE_CATALOG.md).
+- Extended Bind создаёт отдельный native prepared statement для портала.
+  На широких запросах реального переноса повторный prepare занимает заметную
+  часть времени. Перед измерениями Гилёва рассмотреть переиспользование штатного
+  DSQL cache/statement с сохранением независимости порталов, курсоров и транзакций;
+  простое хранение одного общего активного statement этим требованиям не отвечает.
+
 Актуализировано 12 ноября 2026 года: P2 APP-14 в `11dee63d2a` прошёл review.
 NAT-06 принят в `516f55bbb5`: review без замечаний, независимый повтор 44 native SQL
 сценариев и 38 OO assertions PASS. APP-15, включая SQL-09/10, принят в `7799cd3a54`:
@@ -27,7 +55,8 @@ NAT-06 принят в `516f55bbb5`: review без замечаний, неза�
   реализовать всю совместимость PostgreSQL. Отменённые решения перечислены отдельно.
 - Перед объявлением завершения профиля пройти все строки: обязательные должны
   быть закрыты, остальные — явно оставлены ограничениями согласованного результата.
-  Пользователь проверяет изменения и создаёт коммиты сам.
+  С 13 ноября 2026 агент делает промежуточные локальные коммиты по прямому
+  указанию пользователя; push запрещён.
 
 ## SQL: оставшиеся части небольших этапов
 
@@ -61,11 +90,11 @@ NAT-06 принят в `516f55bbb5`: review без замечаний, неза�
 
 | ID | Статус | Что осталось / условие закрытия | Основание |
 |---|---|---|---|
-| APP-01 | Открыто | Оставшиеся pg_database/pg_tables/current_database/collation и queries открытия. pg_class/namespaces/visibility/temp и selected04 проверены APP-10…16; полный каталог и открытие базы не приняты. | [Профиль](1c/README.md) |
+| APP-01 | Проверенный профиль расширен, остальное открыто | `92b47bef36`: pg_database/current_database, pg_tablespace, pg_type/visibility, pg_proc и уровни mchar/fasttrun; реальная locale и обычные права проверены. Полные PG catalogs, extension loader и ещё обнаруживаемые запросы 1С не заявлены. | [Каталоги](1c/DATABASE_CATALOG.md), [проверки](VALIDATION.md) |
 | APP-02 | Реализован профиль APP-16; ожидает review | bytea/BLOB, mchar/mvarchar, regnamespace, BINROWVER/BOOL_OR, metadata/formats/comparisons/sort/indexes и обязательные операции families PASS. Полная PostgreSQL type/coercion система и реальная схема 1С не заявлены. | [Приёмка APP-16](VALIDATION.md#12-ноября-2026-app-16-типы-и-выражения) |
-| APP-03 | Открыто | Shared/exclusive advisory locks и их transaction/session lifetime; реальные конфликты между соединениями. Таймаут настройки отдельно в SES-03. | [Профиль 1С](1c/README.md) |
-| APP-04 | Открыто | TEMP/pg_temp + PRESERVE/DELETE и WITHOUT OIDS приняты в APP-15. ON COMMIT DROP, serial/defaults, ANALYZE и fasttrun_ext остаются отдельными реальными эффектами; no-op не согласован. Обычный CREATE TABLE с pg_temp target, read-only DB temp allocator, чужие temp catalog rows, native GTT/unmanaged LTT и полные constraints/CTAS не покрываются APP-15. | [APP-15](1c/TEMPORARY_RELATIONS_TASK.md), [Профиль 1С](1c/README.md) |
-| APP-05 | Открыто | Чтение настоящих служебных таблиц/конфигурации и DML на исходной схеме/типах 1С. Синтетический поиск и 92 параметра этого не подтверждают. | [NUMBERED_PARAMETERS_TASK](1c/NUMBERED_PARAMETERS_TASK.md), [VALIDATION](VALIDATION.md) |
+| APP-03 | Transaction bigint профиль закрыт, 13.11.2026 | `92b47bef36`: native shared/exclusive advisory locks, savepoint undo и immediate E abort, retaining/EOF/cancellation и несколько native transactions проверены. Session/try-locks и two-int overloads не реализованы. | [Контракт](1c/ADVISORY_LOCKS.md), [проверки](VALIDATION.md) |
+| APP-04 | Требуемые службы реализованы; расширения открыты | `92b47bef36`: serial/serial4 через native identity, LTT counters, реальные ANALYZE/fasttrun. APP-15 TEMP/pg_temp + PRESERVE/DELETE и WITHOUT OIDS сохраняются. ON COMMIT DROP, полноценные sequence APIs/ALTER identity, CTAS/full constraints, native GTT/unmanaged LTT в PG services не реализованы. Fasttrun INTEGER return и active-use guard явно ограничены. | [serial](1c/SERIAL_IDENTITY.md), [службы](1c/TEMP_SERVICES.md) |
+| APP-05 | Реальные данные подготовлены; прикладной DML ещё не принят | 194 таблицы/135146 строк перенесены с binary fingerprints; 337 исходных поддержанных индексов + 14 helpers сохраняют NULL uniqueness, все 46 PK. Открыты 16 expression indexes и три циклических defaults; полный DML исходной нагрузки не подтверждается одним переносом. | [Подготовка](1c/PREPARE_INFOBASE.md), [проверки](VALIDATION.md) |
 | APP-06 | Открыто | Сквозной сценарий 1С/Гилёва с зафиксированными версиями, настройками и фактической библиотекой клиента. Открытие базы и нагрузка ещё не приняты. | [Профиль 1С](1c/README.md), P11/P12 в [PLAN](PLAN.md) |
 | APP-07 | Закрыто, 11.11.2026 | `5478a589d8`: subtype 0 → bytea OID 17 через IBlob, text/binary, общий DataRow budget, lifetime/cleanup. Review без замечаний; независимые libpq/raw/native/unit и scalar codecs PASS. InputCodec/engine/API/dependencies прежние; APP-02/SQL-06 остаются открыты. | [BINARY_BLOB_OUTPUT_TASK](1c/BINARY_BLOB_OUTPUT_TASK.md), [review](VALIDATION.md#11-ноября-2026-архитектурный-review-binary-blob-output) |
 | APP-08 | Закрыто, 11.11.2026 | `c27a3a4c5a`: bytea input → native BLOB через VARCHAR OCTETS/MOVE, ≤65533 bytes, layout конкретного Bind. Review без замечаний; свежая сборка, 9 unit executables, input 125/output 92 libpq checks и raw/native PASS. Production только InputCodec.cpp/h; engine/API прежние. | [BINARY_BLOB_INPUT_TASK](1c/BINARY_BLOB_INPUT_TASK.md), [review](VALIDATION.md#11-ноября-2026-архитектурный-review-bytea-input) |
@@ -76,7 +105,7 @@ NAT-06 принят в `516f55bbb5`: review без замечаний, неза�
 | APP-13 | Закрыто, 11.11.2026 | `4520f371e9`: PG4 lowercase/exact quoted, native-safe source, lowercase bootstrap, initial path/RESET/savepoints. Review без подтверждённых дефектов; независимые 109 results/6 installer groups и strings 156 queries/API1209 PASS, shutdown штатный. Native1/2/3 прежние, нового API/ODS/codecs/dependencies нет. Native lexical границы сохраняются; SQL-09 открыт. | [PG_IDENTIFIER_NAMES_TASK](1c/PG_IDENTIFIER_NAMES_TASK.md), [review](VALIDATION.md#11-ноября-2026-архитектурный-review-правил-имён-pg4) |
 | APP-14 | Закрыто, 12.11.2026 | P2 исправлен в `11dee63d2a`: EVL_expr до чтения attachment state и guards, NULL check после guards. Code review без замечаний; артефакты и evidence 174 libpq/60 OO PASS проверены. Полные path/types/temp и selected04 не закрыты. | [RELATION_VISIBILITY_TASK](1c/RELATION_VISIBILITY_TASK.md), [review P2](VALIDATION.md#12-ноября-2026-архитектурное-решение-по-nat-06-и-review-p2) |
 | APP-15 | Закрыто, 12.11.2026 | `7799cd3a54`: review без блокирующих замечаний, независимые 268 libpq / 8408 OO, raw и installer/upgrade PASS. Согласованный PG TEMP цикл, namespace/IDs, path/USAGE, live catalogs, DML/indexes/PRESERVE/DELETE/undo/savepoints/cache. selected04/12/13, regnamespace, типы 1С и ON COMMIT DROP не закрыты. | [TASK](1c/TEMPORARY_RELATIONS_TASK.md), [review](VALIDATION.md#12-ноября-2026-архитектурный-review-app-15) |
-| APP-16 | Реализовано, локальная приёмка PASS; review | Рабочие типы и выражения, исходные selected04/07/08/12/17/18/24, operations inventory, installer/restart/native/regressions. Production diff оставлен без коммита. ODS 14.1, прежние NAT-01…05/07 не закрыты. | [TASK](1c/TYPES_AND_EXPRESSIONS_TASK.md), [результаты](VALIDATION.md#12-ноября-2026-app-16-типы-и-выражения) |
+| APP-16 | Принято, 13.11.2026 | `78e193be68`: независимая APP-16 приёмка 571/10054; после `92b47bef36` повтор 583/10054 (12 дополнительных empty-string cases), 214 oracle expressions, installer/restart/native регрессии PASS. ODS 14.1, прежние NAT-01…05/07 этим не закрыты. | [TASK](1c/TYPES_AND_EXPRESSIONS_TASK.md), [результаты](VALIDATION.md) |
 
 Для APP-01 исследование выявило отдельные архитектурные вопросы: RDB$SCHEMAS
 не содержит числового schema ID; простое LOWER(native name) неоднозначно при
