@@ -1,5 +1,25 @@
 # Проверки реализации
 
+## 13 ноября 2026: пустые binary mchar/mvarchar при переносе настоящей базы
+
+Первый перенос `gilev_demo_ru` обнаружил assertion в UnicodeUtil::utf16ToUtf8:
+пустой вектор UTF16 имел nullptr, а пустой std::string — ненулевой data().
+Backtrace подтвердил вызов из PgWire::stringFromBinary при binary Bind с 92
+параметрами. Незавершённая транзакция переноса не фиксировалась.
+
+Исправление ограничено StringCodec.h: пустой ввод возвращает пустую строку до
+вызова UnicodeUtil. Сохранены NULL и правило mchar об игнорировании последнего
+непарного байта. Общий Unicode-конвертер и движок не изменены этим исправлением.
+
+Debug build и девять PgWire unit executables PASS; InputCodec — 645 проверок.
+Через настоящий libpq на отдельном сервере прошли 24 комбинации: mchar/mvarchar,
+bare/bounded, пустой binary/один непарный байт/NULL, text/binary output. Проверки
+добавлены в InputCodecTest и постоянный APP-16 wire suite.
+Артефакты: `/tmp/pgwire-1c-launch/unit-results.json`,
+`/tmp/pgwire-1c-launch/empty-strings-wire.json`,
+`/tmp/pgwire-1c-launch/migration-crash-backtrace.txt`.
+
+
 ## 12 ноября 2026: APP-16 типы и выражения
 
 **PASS локальной приёмки; implementation diff ожидает review, без git add/commit.**

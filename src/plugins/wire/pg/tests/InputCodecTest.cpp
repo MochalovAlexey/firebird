@@ -220,6 +220,22 @@ void text()
 	require(codec.metadata() == originalMetadata, "Scalar Bind unnecessarily rebuilt metadata");
 }
 
+void emptyProfileStrings()
+{
+	auto metadata = describe({{SQL_TEXT, 16, 0, 0, 70}, {SQL_VARYING, 16, 0, 0, 71}});
+	InputCodec codec(metadata);
+	for (const auto& bytes : {std::string(), std::string(1, '\xff')})
+	{
+		const auto buffer = codec.encode({bytes, bytes}, {1});
+		for (unsigned i = 0; i < 2; ++i)
+			require(textValue(codec, buffer, i).empty() && value<ISC_SHORT>(codec, buffer, i, true) == 0,
+				"Empty UTF16 profile input must remain a non-NULL empty string");
+	}
+	const auto buffer = codec.encode({std::nullopt, std::nullopt}, {1});
+	for (unsigned i = 0; i < 2; ++i)
+		require(value<ISC_SHORT>(codec, buffer, i, true) == -1, "NULL profile input became empty");
+}
+
 // ABI probes exercise deferred creation, consuming close and partial-write cancellation.
 struct WriteBlob : IBlob
 {
@@ -452,6 +468,7 @@ int main()
 		decimals();
 		booleans();
 		text();
+		emptyProfileStrings();
 		blobs();
 		metadataValidation();
 		std::printf("PgWire input codec tests passed (%u checks)\n", checks);

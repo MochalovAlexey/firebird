@@ -30,6 +30,8 @@ inline std::string stringFromBinary(std::string_view bytes)
 {
 	// mchar 2.3 receives complete UTF16 code units and ignores a final odd byte.
 	bytes = bytes.substr(0, bytes.size() & ~std::size_t(1));
+	if (bytes.empty())
+		return {};
 	std::vector<USHORT> units(bytes.size() / 2);
 	for (std::size_t i = 0; i < units.size(); ++i)
 		units[i] = static_cast<unsigned char>(bytes[2*i]) |
@@ -46,6 +48,8 @@ inline std::string stringFromBinary(std::string_view bytes)
 }
 inline std::string stringToBinary(std::string_view text)
 {
+	if (text.empty())
+		return {};
 	std::vector<USHORT> units(text.size());
 	USHORT error = 0;
 	ULONG position = 0;

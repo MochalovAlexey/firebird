@@ -187,6 +187,13 @@ def types_client(config, client):
         require(result['rows'] == [['Ё😀'.encode('utf-16le').hex()]], str(result))
         result = client.params(f'SELECT $1::{name}', ['Ё😀'.encode('utf-16le')], [oid], [1])
         require(result['rows'] == [['Ё😀']], str(result))
+        for value in (b'', b'\xff', None):
+            for output_format in (0, 1):
+                result = client.params(f'SELECT $1::{name}', [value], [oid], [1],
+                                       result_format=output_format)
+                require(not result['sqlstate'] and result['rows'] == [[None if value is None else '']],
+                        'Empty binary profile string differs: ' + str(result))
+                results.append({'label': name+'_empty_binary_'+str(output_format), 'result': result})
     for value in (0,1,255,256,65535,65536,16777215,16777216,2147483647,-1,-256,-2147483648):
         check('binrowver_'+str(value), f'SELECT binrowver({value})',
               [[r'\x00000000'+(value & 0xffffffff).to_bytes(4,'big').hex()]])
