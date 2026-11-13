@@ -2,13 +2,15 @@
 
 13 ноября: APP-16 (`78e193be68`) прошёл независимую приёмку. Добавлены проверенные
 каталоги открытия базы, transaction advisory locks, serial/native LTT identity,
-ANALYZE и fasttruncate для PG LTT. Реальная база переносится на отдельный стенд;
+ANALYZE и fasttruncate для PG LTT. Реальная база перенесена на отдельный стенд;
 успешное открытие клиентом 1С и тест Гилёва пока не заявлены.
 
 - [Каталоги и locale](DATABASE_CATALOG.md).
 - [Блокировки и statement_timeout](ADVISORY_LOCKS.md).
 - [serial и LTT identity](SERIAL_IDENTITY.md).
 - [ANALYZE/fasttrun](TEMP_SERVICES.md).
+- [NULL-aware equality / fulleq](FULLEQ.md).
+- [Прикладные функции datediff2/vassn](APPLICATION_FUNCTIONS.md).
 - [Подготовка информационной базы](PREPARE_INFOBASE.md).
 
 APP-15 принят в `7799cd3a54`, NAT-06 — в `516f55bbb5`. APP-16 добавляет bytea,
@@ -18,7 +20,7 @@ mchar/mvarchar, BINROWVER/BOOL_OR и regnamespace; требуется ODS 14.1.
 
 ## Общая установка SQL совместимости
 
-[install_compat.py](install_compat.py) устанавливает все двенадцать текущих SQL-скриптов
+[install_compat.py](install_compat.py) устанавливает все четырнадцать текущих SQL-скриптов
 в порядке зависимостей на указанную существующую базу. Нужны Python 3 и native
 `isql` из этого fork с поддержкой APP-16 / ODS 14.1; запускать владельцем/администратором
 без конкурентного DDL. Например, через родной сетевой порт Firebird:
@@ -37,7 +39,7 @@ python3 pg_wire_protocol/1c/install_compat.py \
 
 Порядок: namespace registry → compat.sql → namespace catalog → class catalog →
 lowercase PG names → relation visibility → temporary relations → types/expressions → database catalog → advisory locks →
-type catalog → temporary-table services. Каждый файл выполняется native isql
+type catalog → temporary-table services → fulleq → application functions. Каждый файл выполняется native isql
 с BAIL ON, отключённым AUTODDL, UTF8 и client dialect 3. При первой ошибке следующие
 файлы не запускаются; сообщение содержит имя неуспешного шага и ненулевой exit code.
 **Это первоначальная установка, не повторяемая миграция:** повтор полного набора
@@ -59,7 +61,7 @@ python3 pg_wire_protocol/1c/install_compat.py --isql PATH_TO_NEW_ISQL \
 Credentials передаются через ISC_USER/ISC_PASSWORD. Штатный gfix обновляет ODS
 14.0 → 14.1 и intl metadata; это отдельная завершённая native операция. Последующий
 восьмой SQL-скрипт атомарно добавляет функции APP-16 и grants, затем установщик
-выполняет четыре новых шага. Каждый шаг фиксируется отдельно; при ошибке ранее
+выполняет последующие шаги. Каждый шаг фиксируется отдельно; при ошибке ранее
 завершённые шаги и данные сохраняются, ODS обратно не понижается. Повтор/коллизии дают
 отказ; старый runtime отвергает ODS 14.1. Новые базы получают новую ODS при CREATE.
 [Типы, форматы и ограничения](../COMPATIBILITY.md#app-16-типы-и-выражения-1с).

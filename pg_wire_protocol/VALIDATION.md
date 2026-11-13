@@ -1,5 +1,35 @@
 # Проверки реализации
 
+## 13 ноября 2026: native функции 1С datediff2 и vassn
+
+`1c/sql/install_1c_functions.sql` устанавливает реальные PSQL-функции без
+изменений ядра, перехвата SQL или фиктивных строк каталога. Проверка
+`tools/pgwire_1c_functions_checks.py` выполнена через native isql и настоящий
+libpq в отдельной Firebird БД; oracle — отдельный временный Postgres Pro 18.6
+с исходными телами функций. Рабочие базы не затрагивались.
+
+- **274 datediff2-проверки**, включая 257 успешных/NULL результатов, сравнили
+  восемь режимов, отрицательные интервалы, високосный день, смену месяца,
+  квартала и года, дробные секунды, границу 2038 и год 9999.
+- Проверены SECOND ±0.5/1.5/2.5 с округлением к чётному, сохранение исходного
+  float8 epoch subtraction, truncation MINUTE/HOUR и границы int4:
+  переполнение возвращает `22003`.
+- TRUE/FALSE/NULL для `vassn` дают `0`/`2000000000`/`2000000000`, OID 23.
+- Extended Query использовал настоящие PQexecParams с OID 1043/1114/1114;
+  результат int4 проверен в text и binary форматах. Native исполнение тех же
+  успешных случаев доказало отсутствие wire-подмены. `pg_proc` видит реальную
+  функцию; обычный пользователь вызывает её и обрабатывает ошибку режима.
+- Ошибка перед COMMIT не оставляет функций; повторная установка отвергается.
+  Оба временных сервера завершены штатно.
+
+Явное различие: неверный/NULL/нижнерегистровый/дополненный пробелом режим
+отклоняется native исключением `HY000`, PgWire `XX000`, вместо PostgreSQL
+`2F005`. Native диапазон/точность timestamp и предел аргумента VARCHAR описаны
+в `1c/APPLICATION_FUNCTIONS.md`; точный error mapping отложен.
+
+Артефакт PASS: `/tmp/app17-datediff2-05/summary.json`, oracle/results и native
+логи в той же директории. `git diff --check` — PASS.
+
 ## 13 ноября 2026: подготовка настоящей базы Гилёва через libpq
 
 `1c/prepare_infobase.py` перенёс `gilev_demo_ru` из Postgres Pro 18.6 в отдельную
@@ -4865,3 +4895,59 @@ profile, не полный PostgreSQL extension API и не hash implementation.
 APP-16 subtype11 PSQL validation gap зарегистрирован как SQL-11; общий native
 validator не менялся. Реальное открытие клиентом 1С подтверждается отдельно,
 этот PASS относится только к завершённой совместимости fulleq profile.
+
+
+## 13 ноября 2026: независимый review fulleq и полная APP-16 регрессия
+
+Review итогового `3f3474936ab0d01a56f96ebc07624e4dbb23fde2` — без оставшихся
+замечаний в заявленном частичном профиле. Проверены PG4-only token, приоритет и
+ассоциативность, проверка типов после native parameter inference, NULL descriptor,
+скобки и порядок zero-length marks в native stored source, SQL wrappers и
+standalone-function inventory. Найденные при review расхождения float NaN и
+TIME WITH TIME ZONE закрыты явным отказом этих типов; обычные native сравнения
+не менялись. Пробел валидации subtype-11 PSQL параметров остаётся SQL-11;
+проверенный TEXT PG_MCHAR wrapper не объявляется общим исправлением этого пробела.
+
+Независимо прочитаны исходники и артефакты `/tmp/app17-fulleq-03/summary.json`:
+78 oracle expressions, 108 записанных запросов, explicit native ALTER VIEW из
+RDB$VIEW_SOURCE и restart — PASS. Native dialects 1/2/3 и temporary services —
+PASS в `/tmp/app17-temp-services-fulleq/summary.json`.
+
+Полный APP-16 повтор на build10: **PASS, 583 записи матрицы и 10054 OO API
+assertions**, включая 214 дополнительных выражений с сопоставлением rows и
+OID/mod/size, исходные selected queries, native dialects 1/2/3, типы/индексы и
+value typmod после restart. Fresh install, injected rollback, collision/repeat
+refusal, сохранность IDs и APP-15 ODS upgrade — PASS. Оба сервера завершились
+exit 0 без forced kill. Итог:
+`/tmp/app17-fulleq-app16-regression-02/summary.json`, `types_api.log`.
+
+Первый запуск `/tmp/app17-fulleq-app16-regression-final` остановился из-за
+отсутствующих прежних oracle JSON в /tmp; это не ошибка сервера. Oracle заново
+получены штатным `pgwire_types_oracle.py` на двух отдельных Postgres Pro 18.6
+синтетических базах (UTF8/C.UTF-8, mchar 2.3). Рабочий PostgreSQL источник 1С
+не использовался; оба временных oracle servers завершились exit 0.
+
+- `/tmp/app17-fulleq-types-oracle/summary.json`: 224 записи,
+  SHA256 `2df1ea541fe5c2992a477c9b540ba760643e9af187b8959ededb3c37372e1721`.
+- `/tmp/app17-fulleq-expressions-oracle/summary.json`: 233 записи, из них
+  214 дополнительных SELECT expressions,
+  SHA256 `db8698bc7f33028f98a49a61a86d7bc818ecaf1cef9b781112957ee238f8e5de`.
+
+Команда успешного повтора:
+
+```sh
+python3 -B pg_wire_protocol/tools/pgwire_1c_smoke.py \
+  --firebird-dir /tmp/gen/Debug/firebird \
+  --work-dir /tmp/app17-fulleq-app16-regression-02 --types \
+  --previous-firebird-dir /tmp/app16-review-78e193be68/previous-runtime \
+  --types-oracle /tmp/app17-fulleq-types-oracle/summary.json \
+  --types-oracle-details /tmp/app17-fulleq-expressions-oracle/summary.json \
+  --capture-dir /home/aleksey/dev/1c/captures/20261109T105635Z --timeout 240
+```
+
+Source revision — `3f3474936ab0d01a56f96ebc07624e4dbb23fde2`, tracked source diff
+при запуске пуст. Engine14 SHA256
+`178f3aead73459ecb4cd097815ea03982e1cc3b4bb7f82976d21fcffc25312ef`;
+PgWire `1b4c78d6197fae266a6561fb57babcd4ea9ec1e1bc5dd90235859261cbfeb9b5`.
+Проверка использовала отдельный runtime; основной runtime 1С и shared build
+не изменялись. Реальное открытие базы 1С этим повтором не заявляется.

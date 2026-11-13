@@ -24,6 +24,7 @@ SCRIPTS = (
     "sql/install_type_catalog.sql",
     "sql/install_temp_services.sql",
     "sql/install_fulleq.sql",
+    "sql/install_1c_functions.sql",
 )
 
 
@@ -33,7 +34,7 @@ def main():
         epilog="By default, install a fresh profile: each SQL file commits separately. "
                "--upgrade-from-app15 starts with the APP-16 migration; "
                "--upgrade-from-app16 installs catalogs, advisory locks and temporary-table services. "
-               "--upgrade-from-app17 adds the fulleq equality profile. "
+               "--upgrade-from-app17 adds the fulleq profile and native 1C functions. "
                "Installation stops on the first error; existing objects are not repaired.")
     parser.add_argument("-d", "--database", required=True,
                         help="Native Firebird connection string, alias or database file path")
@@ -49,7 +50,7 @@ def main():
     upgrade.add_argument("--upgrade-from-app16", action="store_true",
                          help="Install catalogs, advisory locks and temporary-table services on APP-16")
     upgrade.add_argument("--upgrade-from-app17", action="store_true",
-                         help="Add the fulleq equality profile to the initial APP-17 installation")
+                         help="Add the fulleq profile and native 1C functions to an initial APP-17 installation")
     parser.add_argument("--locale", choices=("ru_RU.UTF-8",),
                         help="Configure native ICU ru_RU as the default UTF8 collation before "
                              "importing application tables (existing columns keep their collation)")
