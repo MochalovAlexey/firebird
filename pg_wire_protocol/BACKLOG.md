@@ -1,10 +1,12 @@
 # Незавершённые задачи PgWire и профиля 1С
 
-Продолжение 13 ноября: подготовленная база перенесена в постоянный каталог,
-отдельный кластер 1С зарегистрировал её без создания физической базы.
-Толстый клиент в ordinary режиме показал полноценную форму Гилёва; первый
-прогон запущен, завершение пока не принято. Текущий запуск — Debug с trace,
-не измерение сопоставимой производительности. [Запуск GUI](1c/GILEV_GUI.md).
+13 ноября 2026 года, 14:15:28: **принят один полный функциональный Release-прогон
+Гилёва на подготовленной базе Firebird**. Настоящий ordinary-клиент 1С в
+изолированном кластере показал 100%, «TPC: Тест завершен!» и 2.14.
+[Отчёт и доказательства](1c/GILEV_RUN.md), [запуск GUI](1c/GILEV_GUI.md).
+Trace был включён; сравнительная оценка скорости не принята. Повторяемость,
+многопользовательское редактирование, создание новой базы через GUI 1С и загрузка
+.dt остаются открытыми сценариями.
 
 Отдельно остаётся проверка реального UPDATE объектов 1С с изменением `_version`
 и конфликтом двух редакторов. Источник использует обычный INTEGER DEFAULT 0,
@@ -21,20 +23,19 @@ BINROWVER лишь кодирует значение; перенос всех 29
 и `client-ui-confirmed-open/0x160015a.png`; условия воспроизведения —
 [OPEN_INFOBASE](1c/OPEN_INFOBASE.md).
 
-**Полный тест Гилёва не запускался и не принят.** Поддержанный профиль открытия
-не закрывает оставшиеся ограничения схемы, SQL, эксплуатации и производительности.
+Открытие и один завершённый прогон не закрывают оставшиеся ограничения схемы,
+SQL, эксплуатации и производительности.
 APP-16 принят независимым повтором; исправления empty strings, TcpNoNagle и
 compact timestamp прошли проверки и вошли в используемую сборку.
 Локальные промежуточные коммиты разрешены пользователем, push запрещён.
 
 Обнаруженные при настоящем переносе ограничения, которые нельзя забыть:
 
-- Для нагрузочного прогона Гилёв требует толстый клиент в режиме обычного
-  приложения (это прямо показано в открывшейся начальной странице).
-  Текущий standalone `ibsrv` поддерживает только управляемое приложение;
-  следующий нагрузочный стенд требует отдельного изолированного кластера 1С.
-  Не подключать cluster и `ibsrv` одновременно к одной базе: это запрещено
-  условиями standalone и может повредить её. Основание:
+- Нагрузочный стенд уже использует отдельный кластер 1С и толстый ordinary
+  клиент. Ранее проверенный standalone `ibsrv` обслуживал управляемое приложение
+  и перед переходом был остановлен. Не подключать cluster и `ibsrv`
+  одновременно к одной базе: это запрещено условиями standalone и может
+  повредить её. Основание:
   [официальное руководство 1С, §7.2](https://1c-dn.com/library/tutorials/1c_enterprise_administrator_guide_file_mode_8_3_27/).
 - 16 составных неуникальных expression indexes с COALESCE пока не перенесены.
   Это ограничение схемы/производительности, не разрешение пропускать уникальность.
@@ -54,6 +55,18 @@ compact timestamp прошли проверки и вошли в использ�
   часть времени. Перед измерениями Гилёва рассмотреть переиспользование штатного
   DSQL cache/statement с сохранением независимости порталов, курсоров и транзакций;
   простое хранение одного общего активного statement этим требованиям не отвечает.
+  На фактической нагрузке 13 ноября Debug использовал около одного CPU-ядра:
+  за 18,12 с trace записал 9426 native prepare, включая 5620 внутренних
+  `pg_namespace` lookup. Это не число клиентских SQL. Вклад Debug, trace,
+  повторного prepare и исполнения пока не разделён; не добавлять metadata cache
+  без сохранения DDL/search_path/прав и срока жизни temporary namespace.
+  Read-only наблюдения: `/tmp/gilev-runtime-readonly-trace-sample.json`,
+  `/tmp/gilev-runtime-readonly-thread-sample.json`.
+- В Release-срезе 13 ноября, 13:40:02–13:40:35, все 98 записанных исполнений
+  дольше 100 мс были COMMIT: медиана 126 мс и 57 записей страниц, физических
+  чтений нет. Это наблюдение стоимости фиксации, а не установленная причина
+  задержки; исполнение короче 100 мс текущий trace не показывает. Артефакт:
+  `/home/aleksey/dev/1c/firebird-gilev/evidence/gilev-release-readonly-slow-statements.json`.
 
 Исторический срез на 12 ноября 2026 года (числа и статусы этого абзаца
 относятся к той дате): P2 APP-14 в `11dee63d2a` прошёл review.
@@ -129,8 +142,8 @@ sources, PSQL и остальные RETURNING формы остаются огр
 | APP-02 | Профиль APP-16 принят 13.11.2026; расширения открыты | Независимая APP-16 приёмка и повтор 583/10054 PASS; bytea/BLOB, mchar/mvarchar, regnamespace, BINROWVER/BOOL_OR и требуемые операции проверены также на 194 реальных таблицах и открытии 1С. Полная PG type/coercion система не заявлена; bare mchar PSQL-параметры остаются SQL-11. | [APP-16](1c/TYPES_AND_EXPRESSIONS_TASK.md), [открытие](1c/OPEN_INFOBASE.md), [проверки](VALIDATION.md) |
 | APP-03 | Transaction bigint профиль закрыт, 13.11.2026 | `92b47bef36`: native shared/exclusive advisory locks, savepoint undo и immediate E abort, retaining/EOF/cancellation и несколько native transactions проверены. Session/try-locks и two-int overloads не реализованы. | [Контракт](1c/ADVISORY_LOCKS.md), [проверки](VALIDATION.md) |
 | APP-04 | Требуемые службы реализованы; расширения открыты | `92b47bef36`: serial/serial4 через native identity, LTT counters, реальные ANALYZE/fasttrun. APP-15 TEMP/pg_temp + PRESERVE/DELETE и WITHOUT OIDS сохраняются. ON COMMIT DROP, полноценные sequence APIs/ALTER identity, CTAS/full constraints, native GTT/unmanaged LTT в PG services не реализованы. Fasttrun INTEGER return и active-use guard явно ограничены. | [serial](1c/SERIAL_IDENTITY.md), [службы](1c/TEMP_SERVICES.md) |
-| APP-05 | Перенос и стартовый DML приняты 13.11.2026; нагрузка открыта | 194 таблицы/135146 строк перенесены с binary fingerprints; 337 исходных поддержанных индексов + 14 helpers сохраняют NULL uniqueness, все 46 PK. Реальный startup прочитал конфигурацию и выполнил UPDATE params, включая binarydata и compact timestamp. Открыты 16 expression indexes и три циклических defaults; DML полного Гилёва не проверен. | [Подготовка](1c/PREPARE_INFOBASE.md), [открытие](1c/OPEN_INFOBASE.md), [проверки](VALIDATION.md) |
-| APP-06 | Открытие принято 13.11.2026; полный прогон не выполнен | На `db0ffc4dd3` настоящий `1cv8c` 8.5.4.1306 открыл Гилёв 2.1.1.48 через `ibsrv`/libpq/TCP PgWire; UI, версии, библиотека и native coexistence зафиксированы в opening-summary.json. Нагрузка не запускалась: требуется толстый ordinary client и изолированный кластер вместо текущего managed-only standalone, без одновременной работы cluster/ibsrv с одной БД. | [Открытие и evidence](1c/OPEN_INFOBASE.md), [PROGRESS](1c/PROGRESS.md), P11/P12 в [PLAN](PLAN.md) |
+| APP-05 | Перенос и один прогон приняты 13.11.2026; расширенная DML-приёмка открыта | 194 таблицы/135146 строк перенесены с binary fingerprints; 337 исходных поддержанных индексов + 14 helpers сохраняют NULL uniqueness, все 46 PK. Реальный startup прочитал конфигурацию и выполнил UPDATE params, включая binarydata и compact timestamp. Открыты 16 expression indexes и три циклических defaults; один функциональный прогон Гилёва завершён, произвольное обновление объектов и многопользовательская DML-совместимость не приняты. | [Подготовка](1c/PREPARE_INFOBASE.md), [прогон](1c/GILEV_RUN.md), [проверки](VALIDATION.md) |
+| APP-06 | Один полный функциональный прогон принят 13.11.2026; расширенная приёмка открыта | Настоящий ordinary-клиент на подготовленной базе завершил Release-прогон: GUI 100%, «TPC: Тест завершен!», 2.14; [отчёт](1c/GILEV_RUN.md). Повторяемость, многопользовательское редактирование/`_version`, новая база через GUI и сопоставимая производительность не приняты. Это не закрывает всю VAL-05/roadmap. Cluster/ibsrv одновременно с одной БД не запускаются. | [Открытие и evidence](1c/OPEN_INFOBASE.md), [PROGRESS](1c/PROGRESS.md), P11/P12 в [PLAN](PLAN.md) |
 | APP-07 | Закрыто, 11.11.2026 | `5478a589d8`: subtype 0 → bytea OID 17 через IBlob, text/binary, общий DataRow budget, lifetime/cleanup. Review без замечаний; независимые libpq/raw/native/unit и scalar codecs PASS. InputCodec/engine/API/dependencies прежние; APP-02/SQL-06 остаются открыты. | [BINARY_BLOB_OUTPUT_TASK](1c/BINARY_BLOB_OUTPUT_TASK.md), [review](VALIDATION.md#11-ноября-2026-архитектурный-review-binary-blob-output) |
 | APP-08 | Закрыто, 11.11.2026 | `c27a3a4c5a`: bytea input → native BLOB через VARCHAR OCTETS/MOVE, ≤65533 bytes, layout конкретного Bind. Review без замечаний; свежая сборка, 9 unit executables, input 125/output 92 libpq checks и raw/native PASS. Production только InputCodec.cpp/h; engine/API прежние. | [BINARY_BLOB_INPUT_TASK](1c/BINARY_BLOB_INPUT_TASK.md), [review](VALIDATION.md#11-ноября-2026-архитектурный-review-bytea-input) |
 | APP-09 | Поддержанный профиль принят 13.11.2026 | Native IBlob при Execute в application transaction: >65533 bytes, text/binary, mixed/repeated portals, partial failure/cleanup и прежние budgets PASS. При настоящем переносе проверены 564155 bytea-ячеек, 26573030 байт, максимум 347472; чтение конфигурации и запись binarydata реальным 1С startup завершились открытием UI. | [APP-16](1c/TYPES_AND_EXPRESSIONS_TASK.md), [подготовка](1c/PREPARE_INFOBASE.md), [открытие](1c/OPEN_INFOBASE.md) |

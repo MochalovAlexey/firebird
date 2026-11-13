@@ -39,6 +39,8 @@ The GUI connects to `127.0.0.1:12541/GilevFirebird`. Start the benchmark yoursel
 using its normal GUI controls. Opening the client does not click the test button
 or submit results publicly. Successful opening is separate from completion of
 the benchmark; current results and limitations belong in the stage report.
+See [GILEV_RUN.md](GILEV_RUN.md) for the tested build, recorded attempts and
+acceptance evidence.
 
 To add this existing base manually in the normal 1C launcher, choose **Add →
 Add an existing infobase → On a 1C:Enterprise server**. Set the server to

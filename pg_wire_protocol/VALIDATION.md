@@ -5253,3 +5253,42 @@ PgWire `1b4c78d6197fae266a6561fb57babcd4ea9ec1e1bc5dd90235859261cbfeb9b5`.
 No registry/ODS/public API/dependency additions. Общий installer включает18 SQL
 файлов. Ограничения persistent-only/BIGINT/native ID reuse/security lifetime и
 дальнейшая изоляция EXT-25: [INDEX_CATALOG](1c/INDEX_CATALOG.md).
+
+## APP-18: Release перед полным прогоном Гилёва — 13 ноября 2026
+
+`make -C /tmp/gen -j2 Release` завершился exit 0. Production-код соответствует
+`329c6d184b`; последующие правки только документальные. Focused suite
+`/tmp/app18-delete-using-release-01/summary.json`: **38 reference cases PASS**,
+exact 1C bytea, binary/prepared/transaction checks, native dialects 1/2/3 и
+native EXISTS controls; private server exit 0.
+
+Engine14 SHA256 `637dfca9c6a4f99e5dda57be838631a9fc23fb6271b42462169c90ceb15e419b`,
+PgWire SHA256 `06027ee2331bd3272b14452359e4a37a5ffc3540e8eeee9b4540b6c29a9fef20`.
+Эти же библиотеки загружены реальным стендом; TCP и file-descriptor evidence:
+`/home/aleksey/dev/1c/firebird-gilev/evidence/release-live-process-chain-20261113.json`.
+Незавершённый Debug-прогон остановлен штатно после native-наблюдения 1631
+документа и не объявляется успешным полным тестом. Release-прогон и последующая
+native-проверка описываются отдельно в [GILEV_RUN](1c/GILEV_RUN.md).
+
+## APP-18: полный Гилёв в GUI и native-наблюдение — 13 ноября 2026
+
+**PASS одного функционального прогона**: обычный толстый клиент 1С 8.5.4.1306
+показал 100%, «TPC: Тест завершен!» и **2,14**. Кнопка запуска нажата в
+13:35:09 MSK, экран результата сохранён в 14:15:28. Firebird и клиент продолжают
+работать на отдельном постоянном стенде. [Итог и запуск](1c/GILEV_RUN.md).
+
+`/home/aleksey/dev/1c/firebird-gilev/evidence/native-final/summary.json`:
+native isql exit 0, правильный `.fdb`, READ ONLY SNAPSHOT, страница 32768,
+forced writes = 1. Документы, задачи, два основных справочника и четыре
+регистра — по 5000 строк; `_accrged78` — 10000, `_seqb196` — 0,
+`_reference22` — 104, `_inforg165` — 356. Последнее отличается от исходных
+353; counts не являются проверкой каждого значения или предполагаемых FK.
+Исходный PostgreSQL не изменялся.
+
+Screenshot SHA256 `f499e04cff8c0ffa723e806b888a4fd1a48cc3f3c3a073d96f4a006c6d899e3f`,
+`client-ui-20261113T141528/0x1600147.png` внутри стенда. Работа GUI, настоящий
+libpq/TCP и наблюдение через native подтверждены раздельными артефактами.
+Повторяемость полных прогонов, конкурентное редактирование, создание новой
+инфобазы через GUI и сравнительная производительность этой приёмкой не закрыты.
+Балл получен с подробной trace; причинный вклад tracing, prepare и commit
+не разделён. Ограничения переноса схемы и SQL-профиля остаются явными.

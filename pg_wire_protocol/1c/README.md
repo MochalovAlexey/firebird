@@ -4,23 +4,27 @@
 каталоги открытия базы, transaction advisory locks, serial/native LTT identity,
 ANALYZE и fasttruncate для PG LTT. Реальная база перенесена на отдельный стенд;
 успешное открытие настоящим тонким клиентом 1С подтверждено. Затем подключён
-обычный толстый клиент и начаты проверки самого Гилёва на постоянном стенде.
-[Запуск и подключение через GUI](GILEV_GUI.md).
+обычный толстый клиент в изолированном кластере на постоянном стенде
+`/home/aleksey/dev/1c/firebird-gilev`. **13 ноября в 14:15:28 принят один полный
+функциональный Release-прогон:** GUI показал 100%, «TPC: Тест завершен!» и 2.14.
+[Отчёт и доказательства](GILEV_RUN.md), [запуск через GUI](GILEV_GUI.md).
 
 Перенесены и сверены 194 таблицы / 135146 строк, 351 физический индекс
 (337 исходных + 14 для правильной NULL-семантики), все 46 primary keys.
 Остались 16 expression indexes и 3 циклических sequence defaults; стенд
 запускается с явно разрешённым неполным schema profile. Настоящий ibsrv загрузил
-libpq 14.2, прошёл Startup и читает перенесённую конфигурацию, включая Config/version,
+libpq 14.2, прошёл Startup и прочитал перенесённую конфигурацию, включая Config/version,
 через настоящий Bind с binary result. Тонкий клиент `1cv8c 8.5.4.1306` открыл
 базу и отрисовал начальную страницу «Тест Гилёва : 2.1.1.48».
 [Отчёт и доказательства открытия](OPEN_INFOBASE.md).
 
-Текущая цель, **этап 4: успешное открытие базы клиентом 1С**, выполнена. Каталоги,
+**Этап 4: успешное открытие базы клиентом 1С**, выполнен. Каталоги,
 блокировки/служебные функции и подготовка данных (этапы 1–3) имеют проверенные
-ограниченные профили. Этап 5, полный прогон Гилёва, ещё не выполнен; начальная
-страница требует толстый клиент для самого теста. Состояние и ограничения — в
-[PROGRESS](PROGRESS.md); число необходимых исправлений для нагрузки пока неизвестно.
+ограниченные профили. Для этапа 5 принят один полный функциональный прогон.
+Повторяемость, многопользовательское редактирование и `_version`, создание новой
+базы через GUI 1С и загрузка .dt не проверены. Trace был включён, поэтому 2.14
+не является принятой сравнительной оценкой скорости. Состояние и ограничения —
+в [PROGRESS](PROGRESS.md).
 
 - [Каталоги и locale](DATABASE_CATALOG.md).
 - [Блокировки и statement_timeout](ADVISORY_LOCKS.md).
@@ -548,10 +552,10 @@ physical layout по фактическим длинам Bind. Engine созда
 |---|---|
 | 1. Начало сессии | SELECT без FROM, identity-функция, последовательные скрипты и семь startup SET; настоящие libpq 14.2/Startup 1С проверены. Эффекты enable_mergejoin, cpu_operator_cost и lock_timeout отложены |
 | 2. SQL и параметры | Simple scripts, PG BEGIN без опций, последовательные типизированные `$n`, postfix casts и literal LIMIT поддержаны. Реальные Bind с binary result читают конфигурацию. Произвольная нумерация и общий LIMIT/OFFSET не реализованы |
-| 3. Открытие базы | Database/locale/type/proc/extension catalogs, pg_class/pg_tables/pg_attribute/pg_index и visibility реализованы в документированных профилях; настоящие данные перенесены. Открытие начальной страницы тонким клиентом 1С 8.5.4.1306 подтверждено; benchmark не запускался |
+| 3. Открытие базы | Database/locale/type/proc/extension catalogs, pg_class/pg_tables/pg_attribute/pg_index и visibility реализованы в документированных профилях; настоящие данные перенесены. Открытие тонким и толстым клиентами 1С 8.5.4.1306 подтверждено; один полный функциональный Release-прогон принят; [отчёт](GILEV_RUN.md) |
 | 4. Типы и функции | APP-16 принят после независимого review; последняя регрессия 583 / 10054 / 214 PASS. Fulleq, datediff2/vassn и format_number проверены по oracle. Полная система типов/функций PostgreSQL не заявлена |
 | 5. Транзакции/конкуренция | PG BEGIN использует native READ CONSISTENCY; shared/exclusive transaction advisory locks работают с native lock manager, savepoints и recovery. statement_timeout использует native attachment lifetime, не полную PG SET semantics |
-| 6. Временные объекты/нагрузка | PG TEMP, serial/serial4 и native LTT identity, реальные ANALYZE/fasttruncate/fasttrun_ext проверены. ON COMMIT DROP и полный тест Гилёва остаются за границей принятого профиля |
+| 6. Временные объекты/нагрузка | PG TEMP, serial/serial4 и native LTT identity, реальные ANALYZE/fasttruncate/fasttrun_ext проверены. Один функциональный прогон Гилёва принят; ON COMMIT DROP, повторяемость и многопользовательская работа остаются за границей профиля |
 
 ### Принятые основы каталогов: история 11–12 ноября 2026 года
 
@@ -569,9 +573,9 @@ native, metadata BIGINT/VARCHAR (wire20/1043). Это ограниченная �
 данных, не полноценные PG oid/name. Name resolution и temp namespace добавлены
 APP-13…15, regnamespace — APP-16; полный PG catalog остаётся вне контракта. Metadata
 schema/relation/field не заменяет type identity: UNION может сохранить origin
-первой ветви при общем BIGINT. C++/API/codecs в APP-11 не меняются. Путь до первого
-запуска 1С/Гилёва — в [PROGRESS](PROGRESS.md); открытие UI подтверждено 13 ноября,
-полный тест Гилёва не запускался.
+первой ветви при общем BIGINT. C++/API/codecs в APP-11 не меняются. На дату этого
+исторического среза, 11–12 ноября, запуск 1С ещё не был принят.
+Последующий результат открытия и текущий прогон Гилёва — в [PROGRESS](PROGRESS.md).
 
 Реализован [APP-12: pg_class для постоянных таблиц/views](CLASS_CATALOG_TASK.md);
 `13f64d0e00` прошёл review без замечаний и независимую приёмку.
@@ -703,9 +707,10 @@ origin первой ветви даже для общего BIGINT с 4294967296
 native isql и настоящий libpq, text/binary metadata/bytes, права, атомарность
 установки и transaction visibility. Команда, SHA и результат — в
 [VALIDATION](../VALIDATION.md#11-ноября-2026-публичное-представление-namespace-ids).
-APP-01/APP-02/APP-06 и selected04 открыты. APP-12 добавляет ограниченные
-pg_class/relnamespace rows; затем нужны PG/native имена и namespace resolution,
-search-path visibility и temp namespace, чтобы проверить неизменённый selected04.
+На этапе APP-11, 11 ноября 2026 года, APP-01/APP-02/APP-06 и selected04 ещё были
+открыты. Последующие этапы добавили pg_class/relnamespace, PG/native имена,
+namespace resolution, search-path visibility и temp namespace. Их текущее
+состояние и результат Гилёва описаны в [PROGRESS](PROGRESS.md).
 
 ## Внутренние namespace IDs: APP-10
 
@@ -1176,6 +1181,6 @@ psql 'postgres://USER@127.0.0.1:15432/pgwire_test' \
 
 Открытие подготовленной базы настоящим тонким клиентом 1С подтверждено
 13 ноября 2026 года; [доказательства](OPEN_INFOBASE.md) включают отрисованный UI.
-Сам тест Гилёва не запускался. Его результат нельзя заменить отсутствием parser
-errors или успешным открытием. TLS/COPY/pipeline и другие независимые направления
-roadmap остаются вне этой приёмки.
+Прогоны толстым клиентом и текущий статус — в [GILEV_RUN](GILEV_RUN.md).
+Его результат нельзя заменить отсутствием parser errors или успешным открытием.
+TLS/COPY/pipeline и другие независимые направления roadmap остаются вне этой приёмки.
