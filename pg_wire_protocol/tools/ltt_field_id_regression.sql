@@ -1,0 +1,18 @@
+-- Native SQL dialect 3 regression; run on an isolated test database with isql.
+-- Before the fix, INSERT after DROP fails with SQLSTATE 23000 on B even though
+-- B receives 3: relation fields were indexed by position, not stable field ID.
+SET BAIL ON;
+SET LIST ON;
+CREATE LOCAL TEMPORARY TABLE NATIVE_LTT_FIELD_IDS(A INTEGER, B INTEGER NOT NULL)
+    ON COMMIT PRESERVE ROWS;
+COMMIT;
+INSERT INTO NATIVE_LTT_FIELD_IDS VALUES(1, 2);
+COMMIT;
+ALTER TABLE NATIVE_LTT_FIELD_IDS DROP A;
+COMMIT;
+INSERT INTO NATIVE_LTT_FIELD_IDS(B) VALUES(3);
+-- Expected: B = 2, B = 3.
+SELECT B FROM NATIVE_LTT_FIELD_IDS ORDER BY B;
+ROLLBACK;
+DROP TABLE NATIVE_LTT_FIELD_IDS;
+COMMIT;

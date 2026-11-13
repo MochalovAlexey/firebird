@@ -9068,14 +9068,14 @@ void RelationNode::makeLttVersion(thread_db* tdbb, jrd_tra* transaction, LocalTe
 	}
 
 	relation->rel_fields = vec<jrd_fld*>::newVector(attPool, relation->rel_fields,
-		ltt->pendingFields.getCount());
+		ltt->nextFieldId);
 
 	TemporaryField* tempFields = nullptr;
 
 	for (FB_SIZE_T i = 0; i < ltt->pendingFields.getCount(); ++i)
 	{
 		const auto& lttField = ltt->pendingFields[i];
-		auto& relField = (*relation->rel_fields)[i];
+		auto& relField = (*relation->rel_fields)[lttField.id];
 
 		if (!relField)
 			relField = FB_NEW_POOL(attPool) jrd_fld(attPool);

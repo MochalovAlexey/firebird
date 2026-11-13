@@ -1,5 +1,20 @@
 # Проверки реализации
 
+## 13 ноября 2026: native LTT сохраняет field IDs после DROP столбца
+
+Проверка serial4 обнаружила независимый native дефект makeLttVersion:
+rel_fields индексировался позицией столбца, хотя после DROP оставшиеся field IDs
+не перенумеровываются. Две строки исправляют размер вектора и индексирование
+по стабильному field ID; wire, SQL dialect и identity не участвуют в исправлении.
+
+[Native SQL reproducer](tools/ltt_field_id_regression.sql) на исходном APP-16
+получает SQLSTATE 23000 после DROP первого столбца и INSERT в оставшийся NOT NULL.
+На исправленном runtime возвращает B=2,3. Логи:
+`/tmp/pgwire-native-field-id-before-not-null.log`,
+`/tmp/pgwire-native-field-id-after-not-null.log`.
+Дополнительно `/tmp/pgwire-serial-04/summary.json` подтверждает surviving identity,
+POSITION, старые record formats и prepared statements после ALTER/drop-recreate.
+
 ## 13 ноября 2026: TcpNoNagle на подключаемых wire listeners
 
 Перенос настоящей базы выявил около 42 мс на каждый последовательный запрос:
