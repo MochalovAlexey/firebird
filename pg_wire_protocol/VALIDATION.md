@@ -4812,3 +4812,56 @@ reproduction: `/tmp/build_pgwire_temp_faults.py`, `/tmp/probe_pgwire_temp_faults
 без PG histograms/whole-database ANALYZE. Точки последующей изоляции EXT-21 и
 EXT-23; точные профили: [ADVISORY_LOCKS](1c/ADVISORY_LOCKS.md) и
 [TEMP_SERVICES](1c/TEMP_SERVICES.md).
+
+
+## APP-17: partial fulleq profile — 13 ноября 2026
+
+PASS на isolated build10: `/tmp/app17-fulleq-03/summary.json`, 108 записанных SQL
+результатов. Все 78 reference expressions совпали по значениям; boolean OID16
+проверен для каждого результата. Эталон получен только SELECT-запросами к
+Postgres Pro 18.6 с `default_transaction_read_only=on`:
+`/tmp/app17-fulleq-oracle.json`, `/tmp/app17-fulleq-oracle-details.json`;
+reproducer `/tmp/pgwire_fulleq_oracle.py`. Исходная база не менялась.
+
+Проверены NULL с обоими порядками операндов, signed integer границы и bigint
+точность, temporal значения, bytea length/zero bytes, mchar/mvarchar bounded и
+unbounded, case/accent/trailing spaces, 11 реальных typed SQL wrappers. Explicit
+unsupported native text/decimal/float/timetz и mixed profile types дают 0A000.
+Extended Query проверен с typed integer/NULL и mchar/mvarchar parameters и
+binary/text boolean result. Native индексные предикаты и NULL-aware joins дают
+ожидаемые строки.
+
+Установка проверена через общий CLI `--upgrade-from-app17`; injected failure
+откатывает функции и проекцию, повтор отказывается заменять существующие объекты.
+`pg_available_extensions` сохраняет mchar/fasttrun и объявляет partial fulleq2.0
+только при наличии всех 11 standalone functions. SQL-only mchar declaration
+использует text BLOB с PG_MCHAR: native conversion снимает typmod header перед
+PSQL UTF8 validation. Никаких новых type/API/BLR механизмов не добавлено.
+
+Stored-source проверка читает RDB$VIEW_SOURCE, выполняет **native ALTER VIEW из
+этого текста**, затем снова проверяет результаты и повторяет их после остановки
+и запуска сервера. Случаи `false == true IS NULL`,
+`true IS NOT DISTINCT FROM NULL == NULL` и цепочка сравнений сохраняют f/t/t;
+CAST/mchar и вложенные syntax/identifier marks также проверены. Использован
+настоящий FROM SYSTEM.RDB$DATABASE; existing NAT-07 и postfix-cast DDL guard не
+обходились изменениями движка. Оба server runs завершены exit0, без forced kill.
+
+Грамматика проверена отдельно verbose btyacc: baseline/current имеют одинаковые
+165 shift/reduce +12 reduce/reduce conflicts. Сравнение conflict signatures
+(reduced production, lookahead и multiplicity) не выявило ни добавлений, ни
+удалений; PG_FULL_EQ conflicts отсутствуют. Артефакты:
+`/tmp/app17-fulleq-grammar/{baseline,current}/y.output`, `comparison.json`.
+
+Повтор temporary services и native API: PASS
+`/tmp/app17-temp-services-fulleq/summary.json`, включая native dialects1/2/3,
+которые отвергают ==, и неизменные ANALYZE/fasttrun effects/guards.
+
+Проверенные binaries:
+Engine14 `178f3aead73459ecb4cd097815ea03982e1cc3b4bb7f82976d21fcffc25312ef`,
+PgWire `1b4c78d6197fae266a6561fb57babcd4ea9ec1e1bc5dd90235859261cbfeb9b5`.
+
+Ограничения и причины несовместимых типов: [FULLEQ](1c/FULLEQ.md). Это partial
+profile, не полный PostgreSQL extension API и не hash implementation. Отдельный
+APP-16 subtype11 PSQL validation gap зарегистрирован как SQL-11; общий native
+validator не менялся. Реальное открытие клиентом 1С подтверждается отдельно,
+этот PASS относится только к завершённой совместимости fulleq profile.

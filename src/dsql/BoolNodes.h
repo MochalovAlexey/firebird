@@ -134,6 +134,7 @@ private:
 public:
 	UCHAR blrOp;
 	bool dsqlCheckBoolean;
+	bool dsqlPgFullEq = false;
 	DsqlFlag dsqlFlag;
 	NestConst<ValueExprNode> arg1;
 	NestConst<ValueExprNode> arg2;

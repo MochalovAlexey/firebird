@@ -95,3 +95,10 @@ tablespaces в Firebird) и [install_type_catalog.sql](1c/sql/install_type_catal
 | ID | Символы | Состояние и контракт / проверка при переносе |
 |---|---|---|
 | EXT-23 | [PgTempOperations](../src/jrd/PgTempOperations.cpp), AnalyzeNode, RDB$PG_FASTTRUNCATE; QualifiedMetaString lowercase policy | PG policy ограничена собственными LTT attachment; native resolver, IDX_statistics, page instances и undo остаются владельцами операций. Функции возвращают INTEGER0 вместо void. Будущая изоляция должна сохранить необратимую очистку относительно rollback, непрерывность serial, обновление именно текущего index root, native defaults и guarded cursor/second-TX rejection. Опции delPages.onlyIfUnused и discardTempFrameActions.allVersions включаются только явно; обычные native callers сохраняют прежнее поведение. |
+
+
+## APP-17: fulleq syntax lowering
+
+| ID | Точка | Контракт будущего отделения |
+|---|---|---|
+| EXT-24 | Parser PG_FULL_EQ, ComparativeBoolNode::dsqlPgFullEq, stored syntax marks | PG-only generic operator lowers to existing blr_equiv after a DSQL type guard. Native comparator/optimizer remain shared; no new BLR/ABI. Preserve NULL, accepted integer/temporal/bytea/mchar behavior, explicit rejection of incompatible text/decimal/NaN/time-zone cases, PG precedence and parenthesized native source reprepare. SQL wrappers and partial extension inventory stay outside core. |

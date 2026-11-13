@@ -1634,6 +1634,11 @@ int Parser::yylexAux()
 		++lex.ptr;
 		return TOK_DOUBLE_COLON;
 	}
+	if (pgDialect && c == '=' && lex.ptr < lex.end && *lex.ptr == '=')
+	{
+		++lex.ptr;
+		return TOK_PG_FULL_EQ;
+	}
 
 	// Must be punctuation -- test for double character punctuation
 

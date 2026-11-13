@@ -579,6 +579,54 @@ BoolExprNode* ComparativeBoolNode::dsqlPass(DsqlCompilerScratch* dsqlScratch)
 			PASS1_set_parameter_type(dsqlScratch, node->arg3, procArg2, true);
 	}
 
+	if (dsqlPgFullEq)
+	{
+		dsc left, right;
+		DsqlDescMaker::fromNode(dsqlScratch, &left, node->arg1);
+		DsqlDescMaker::fromNode(dsqlScratch, &right, node->arg2);
+		const auto decimal = [](const dsc& desc)
+		{
+			return (desc.isExact() && (desc.dsc_scale || desc.dsc_sub_type)) ||
+				desc.dsc_dtype == dtype_int128 || desc.isDecFloat();
+		};
+		const auto profileType = [](const dsc& desc)
+		{
+			if (desc.isBytea())
+				return 1;
+			if (desc.isPgString() || desc.isMcharBlob())
+				return desc.getCharSet() == CS_PG_MCHAR ? 2 : 3;
+			return 0;
+		};
+		const auto untyped = [](const dsc& desc, ValueExprNode* value)
+		{
+			return desc.isNull() || desc.isUnknown() ||
+				(desc.isText() && nodeAs<LiteralNode>(value));
+		};
+		const auto leftType = profileType(left), rightType = profileType(right);
+		const auto timeWithZone = [](const dsc& desc)
+		{
+			return desc.dsc_dtype == dtype_sql_time_tz || desc.dsc_dtype == dtype_ex_time_tz;
+		};
+		const auto floating = [](const dsc& desc)
+		{
+			return desc.dsc_dtype == dtype_real || desc.dsc_dtype == dtype_double;
+		};
+		// The fulleq profile reuses native NULL-safe comparison only where its
+		// value equality agrees. Ordinary native strings can pad trailing spaces
+		// or use a different collation; do not silently promise exact PG equality.
+		if (decimal(left) || decimal(right) || timeWithZone(left) || timeWithZone(right) ||
+			floating(left) || floating(right) ||
+			(leftType != rightType && !untyped(left, node->arg1) && !untyped(right, node->arg2)) ||
+			(!leftType && !rightType &&
+			((!left.isNull() && (left.isText() || left.isBlob())) ||
+			 (!right.isNull() && (right.isText() || right.isBlob())))))
+		{
+			ERRD_post(Arg::Gds(isc_wish_list) << Arg::Gds(isc_random) <<
+				"PG == operand types are outside the supported fulleq profile" <<
+				Arg::SqlState("0A000"));
+		}
+	}
+
 	return node;
 }
 

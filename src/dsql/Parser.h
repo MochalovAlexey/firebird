@@ -120,7 +120,9 @@ private:
 
 		bool operator >(const StrMark& o) const
 		{
-			return pos > o.pos;
+			// A zero-length opening mark precedes a token replacement at the
+			// same offset; nested opening parentheses may share that offset.
+			return pos > o.pos || (pos == o.pos && length > o.length);
 		}
 
 		bool introduced;

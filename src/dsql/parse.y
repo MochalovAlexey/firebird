@@ -748,6 +748,7 @@ using namespace Firebird;
 %token <metaNamePtr> CPU_OPERATOR_COST
 %token <metaNamePtr> LOCK_TIMEOUT
 %token <metaNamePtr> STATEMENT_TIMEOUT
+%token PG_FULL_EQ
 %token <uintVal> NUMBERED_PARAMETER
 %token DOUBLE_COLON
 %token <metaNamePtr> PG_SUBSTR
@@ -761,6 +762,7 @@ using namespace Firebird;
 %left	NOT
 %left	'=' '<' '>' BETWEEN LIKE CONTAINING STARTING SIMILAR IN NEQ GEQ LEQ NOT_GTR NOT_LSS
 %left	IS
+%left	PG_FULL_EQ
 %left	'+' '-'
 %left	'*' '/'
 %left	UMINUS UPLUS
@@ -8228,6 +8230,20 @@ predicate
 comparison_predicate
 	: value comparison_operator value %prec '='
 		{ $$ = newNode<ComparativeBoolNode>($2, $1, $3); }
+	| value PG_FULL_EQ value %prec PG_FULL_EQ
+		{
+			// Keep generic-operator precedence when stored source is reparsed in
+			// the native dialect, where IS NOT DISTINCT FROM has another priority.
+			auto opening = YYPOSNARG(1), closing = YYPOSNARG(3);
+			opening.lastPos = opening.firstPos;
+			closing.firstPos = closing.lastPos;
+			markPgSyntax(opening, opening, "(");
+			markPgSyntax(YYPOSNARG(2), YYPOSNARG(2), " IS NOT DISTINCT FROM ");
+			markPgSyntax(closing, closing, ")");
+			const auto node = newNode<ComparativeBoolNode>(blr_equiv, $1, $3);
+			node->dsqlPgFullEq = true;
+			$$ = node;
+		}
 	;
 
 %type <blrOp> comparison_operator

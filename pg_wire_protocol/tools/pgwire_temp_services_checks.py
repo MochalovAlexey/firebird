@@ -28,7 +28,7 @@ def checks(config):
         query("SELECT fasttrun_ext('pg_temp." + table + "')", [['0']])
     try:
         query("SELECT name,installed_version FROM pg_catalog.pg_available_extensions ORDER BY name",
-              [['fasttrun','2.0'],['mchar','2.3']])
+              [['fasttrun','2.0'],['fulleq','2.0'],['mchar','2.3']])
         query('CREATE TEMP TABLE tt1(id serial4,v integer,b bytea)')
         query('CREATE UNIQUE INDEX ix_tt1 ON tt1(v)')
         query("INSERT INTO tt1(v,b) VALUES(10,'\\x0100'::bytea)")

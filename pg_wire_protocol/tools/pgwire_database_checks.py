@@ -101,7 +101,9 @@ def run(h, capture):
         query('real_client_fasttrun_version', "SELECT installed_version FROM pg_catalog.pg_available_extensions "
               "WHERE NAME='fasttrun'", [['2.0']])
         query('no_other_extensions', "SELECT name FROM pg_catalog.pg_available_extensions "
-              "WHERE name NOT IN ('mchar','fasttrun')", [])
+              "WHERE name NOT IN ('mchar','fasttrun','fulleq')", [])
+        query('real_client_fulleq_version', "SELECT installed_version FROM pg_catalog.pg_available_extensions "
+              "WHERE NAME='fulleq'", [['2.0']])
         query('real_client_typmod_function', "SELECT 1 FROM pg_catalog.pg_proc WHERE proname IN('mchartypmod_in') "
               "AND pronamespace IN('public'::regnamespace)", [])
         query('real_native_functions', "SELECT proname FROM pg_catalog.pg_proc WHERE proname IN('binrowver','bool_or') "

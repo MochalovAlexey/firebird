@@ -63,10 +63,12 @@ int main(int argc, char** argv)
             statement=attachment->prepare(&status,a,0,"SELECT 1 AS ANALYZE FROM SYSTEM.RDB$DATABASE",dialect,0);
             statement->free(&status);statement=nullptr;
             exec(a,"ANALYZE PGWIRE_TEMP.\"guard_table\"",dialect,"42000");
+            exec(a,"SELECT 1 == 1 FROM SYSTEM.RDB$DATABASE",dialect,"42000");
         }
         a->rollback(&status);a=nullptr;
         attachment->detach(&status); attachment=nullptr;
-        std::puts("{\"passed\":true,\"active_cursor_guard\":true,\"native_transaction_guard\":true,\"native_analyze_rejected\":true}");
+        std::puts("{\"passed\":true,\"active_cursor_guard\":true,\"native_transaction_guard\":true,"
+                  "\"native_analyze_rejected\":true,\"native_fulleq_rejected\":true}");
     }
     catch (const FbException& ex)
     {

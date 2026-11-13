@@ -23,6 +23,7 @@ SCRIPTS = (
     "sql/install_advisory_locks.sql",
     "sql/install_type_catalog.sql",
     "sql/install_temp_services.sql",
+    "sql/install_fulleq.sql",
 )
 
 
@@ -32,6 +33,7 @@ def main():
         epilog="By default, install a fresh profile: each SQL file commits separately. "
                "--upgrade-from-app15 starts with the APP-16 migration; "
                "--upgrade-from-app16 installs catalogs, advisory locks and temporary-table services. "
+               "--upgrade-from-app17 adds the fulleq equality profile. "
                "Installation stops on the first error; existing objects are not repaired.")
     parser.add_argument("-d", "--database", required=True,
                         help="Native Firebird connection string, alias or database file path")
@@ -46,12 +48,17 @@ def main():
                          help="Upgrade APP-15 after native gfix -upgrade")
     upgrade.add_argument("--upgrade-from-app16", action="store_true",
                          help="Install catalogs, advisory locks and temporary-table services on APP-16")
+    upgrade.add_argument("--upgrade-from-app17", action="store_true",
+                         help="Add the fulleq equality profile to the initial APP-17 installation")
     parser.add_argument("--locale", choices=("ru_RU.UTF-8",),
                         help="Configure native ICU ru_RU as the default UTF8 collation before "
                              "importing application tables (existing columns keep their collation)")
     args = parser.parse_args()
-    scripts = SCRIPTS[7:] if args.upgrade_from_app15 else SCRIPTS[8:] if args.upgrade_from_app16 else SCRIPTS
+    scripts = (SCRIPTS[7:] if args.upgrade_from_app15 else SCRIPTS[8:] if args.upgrade_from_app16
+               else SCRIPTS[12:] if args.upgrade_from_app17 else SCRIPTS)
     if args.locale:
+        if args.upgrade_from_app17:
+            parser.error("--locale must be configured before importing application tables")
         scripts = list(scripts)
         scripts.insert(scripts.index("sql/install_database_catalog.sql"), "sql/configure_ru_collation.sql")
     if not args.database or args.database.startswith("-"):
