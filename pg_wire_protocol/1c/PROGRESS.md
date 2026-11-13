@@ -24,11 +24,17 @@ expression indexes и три циклических sequence defaults; запу�
 в Firebird; fulleq, datediff2 и vassn уже приняты его bootstrap-проверками.
 format_number, pg_tables/pg_attribute и pg_index реализованы и проверены.
 Реальный ibsrv прочитал Config/version, конфигурацию и v8users, прошёл проверку
-индексов и сообщил ready. При последующих служебных UPDATE выявлен следующий
-блокер: text timestamp Bind вида `20261113 120430` пока отвергается TemporalCodec.
-Успешное открытие клиентского интерфейса ещё не достигнуто.
+индексов и сообщил ready. Блокер compact timestamp Bind в служебных UPDATE
+исправлен. **Этап 4 выполнен:** настоящий тонкий клиент 1С `1cv8c 8.5.4.1306`
+открыл базу и отрисовал начальную страницу «Тест Гилёва : 2.1.1.48».
+Доказательства: [отчёт открытия](OPEN_INFOBASE.md),
+`/tmp/pgwire-1c-launch/client-ui-confirmed-open/report.json` и `0x160015a.png`.
+Сам тест Гилёва не запускался; начальная страница требует толстый клиент
+для выполнения теста. Это следующая отдельная контрольная точка.
 
-Срез на 12 ноября 2026 года: P2 APP-14 в `11dee63d2a` прошёл code review без замечаний;
+## Исторический срез: 12 ноября 2026 года
+
+На эту дату P2 APP-14 в `11dee63d2a` прошёл code review без замечаний;
 артефакты и evidence 174 libpq / 60 OO PASS проверены.
 [NAT-06](LTT_METADATA_UNDO_TASK.md) принят в `516f55bbb5`: native LTT metadata
 undo переживает освобождение row-root, сохраняет порядок ALTER/DROP и границы
@@ -39,8 +45,9 @@ Review без замечаний; независимый повтор 44 SQL / 3
 PG TEMP/pg_temp, поиск/права, live catalogs, DML/индексы, PRESERVE/DELETE, namespace
 undo, SQL-09/10 и installer. Полный локальный прогон PASS; результаты в VALIDATION.
 APP-10…15/NAT-06 приняты; независимый повтор APP-15: 268 libpq / 8408 OO PASS.
-[APP-16](TYPES_AND_EXPRESSIONS_TASK.md) реализован, локальная приёмка PASS;
-изменения ожидают review. Bytea/индексы/large Bind, mchar/mvarchar, BINROWVER/BOOL_OR,
+[APP-16](TYPES_AND_EXPRESSIONS_TASK.md) был реализован, локальная приёмка PASS;
+на 12 ноября изменения ожидали review. Независимый повтор принят 13 ноября,
+как указано выше. Bytea/индексы/large Bind, mchar/mvarchar, BINROWVER/BOOL_OR,
 regnamespace, операции families, installer/restart и регрессии проверены.
 [571 записей матрицы / 10054 native OO assertions и evidence](../VALIDATION.md#12-ноября-2026-app-16-типы-и-выражения).
 Текущая концепция сохраняется; [будущая изоляция](../EXTENSION_POINTS.md) учитывается отдельно.
@@ -50,43 +57,42 @@ Cache crash NAT-05 предшествует APP-14 в нашем fork, прои�
 работы и ограничения ведутся в [BACKLOG](../BACKLOG.md), доказательства — в
 [VALIDATION](../VALIDATION.md). Обновлять после следующих прикладных этапов.
 
-**Основной wire/SQL-фундамент работает. Реальное открытие базы 1С на Firebird
-и тест Гилёва пока не приняты. Существенная часть прикладной совместимости ещё
-впереди.** Процент готовности по числу выполненных маленьких этапов или SQL
+**Открытие подготовленной базы настоящим тонким клиентом 1С подтверждено.
+Тест Гилёва ещё не запускался; ограничения схемы и поддержанных профилей
+сохраняются.** Процент готовности по числу выполненных маленьких этапов или SQL
 был бы недостоверным: один SET и многопользовательская нагрузка несопоставимы.
 
-## Подтверждённые возможности
+## Подтверждённые возможности на 13 ноября 2026 года
 
 | Участок | Что подтверждено | Граница доказательства |
 |---|---|---|
-| Сетевое подключение | Реальный PostgreSQL wire через libpq/psql, параллельно native endpoint; выполнение на Firebird | Linux/Super и локальный TCP; это ещё не приёмка реального клиента 1С |
-| Начало сессии | Identity-запрос, фиксированные SET, все семь startup SET | Три настройки намеренно без эффекта; версия/Startup фактического клиента 1С ещё требуют проверки |
-| SQL/исполнение | Simple scripts с остановкой на ошибке; Extended/prepared/portals; typed последовательные `$n`, native postfix casts, literal LIMIT | Общая PG-грамматика и произвольные PG types не реализованы |
-| Транзакции | BEGIN, COMMIT/ROLLBACK, I/T/E, savepoints/recovery, native visibility | Не полная эквивалентность isolation/locks PostgreSQL; advisory locks ещё нет |
-| Binary data / APP-16 | Настоящий bytea/BLOB10, exact comparisons/indexes; большие text/binary Bind через native IBlob при Execute | Native key budget ограничивает только индексируемое значение; message/portal/DataRow budgets прежние. BLOB/0 и OCTETS сохраняют прежние native сравнения |
-| Типы / APP-16 | Mchar/mvarchar, BINROWVER/BOOL_OR, regnamespace, type identity/source и операции профиля; ODS 14.1 | 214 oracle expressions; 17 исходных families + один отдельно scoped COUNT/IN fixture. Полный pg_type/coercions не реализован; review ожидается |
-| Native namespace identity | APP-10 принят: устанавливаемый PGWIRE_COMPAT registry, стабильные IDs, native/libpq, права/concurrency/restart | Native DDL под user savepoint запрещён; regnamespace/selected04 добавлены APP-16; полный каталог не принят |
-| Публичные namespace IDs | APP-11 принят: PG_CATALOG.PG_NAMESPACE над APP-10, atomic installer, точные имена/IDs, read-only, text/binary/native/libpq и transaction visibility PASS | BIGINT/VARCHAR, wire20/1043, uppercase labels; native oid/name metadata прежние; temp и visibility добавлены APP-14/15, regnamespace — APP-16; nspowner/nspacl отсутствуют |
-| Постоянные relations | APP-12 принят: PG_CLASS из RDB$RELATIONS + PG_NAMESPACE, native ID+1, атомарная установка, 228 libpq results и native oracle/права/lifecycle PASS | Только schema-level persistent tables/views, native wire20/1043/20/1043. Reuse ID допустим, restore не проверен; полный catalog и selected10/11 открыты; temp/visibility/selected04 добавлены последующими этапами |
-| Имена PG4 / APP-13 | Принят: ASCII lowercase unquoted, точные quoted names, native-safe source, lowercase bootstrap и public-first path; независимые names/strings PASS | Native1/2/3 прежние; ведущий `_`, temp/path/USAGE добавлены APP-15; нужные типы/regnamespace добавлены APP-16 |
-| Видимость / APP-14 | pg_table_is_visible через native resolver/SCL; P2 в 11dee63d2a прошёл review, evidence 174 libpq / 60 OO PASS проверено | APP-15 расширяет effective path/USAGE/$user/pg_temp и PG-owned LTT; wire20→16; guards после вычисления аргумента |
-| PG temporary relations / APP-15 | Принято в 7799cd3a54: независимые 268 libpq results, raw Close/portal, 8408 OO assertions, installer fresh/upgrade/отказы и native регрессии PASS | PRESERVE/DELETE, свои temp catalogs и native types; без ON COMMIT DROP/serial и реальной 1С; APP-16 добавляет нужные типы/regnamespace. NAT-07 persistent view без FROM — отдельный сохранённый FAIL |
-| Прикладные формы | Чтение конфигурации selected06 и запись selected23 неизменённым SQL; форма 92 parameters, включая 68 BLOB | Синтетические таблицы/данные; реальная схема, конфигурация и исходный Bind 1С не приняты |
+| Сетевое подключение | PostgreSQL wire через libpq/psql и реальный ibsrv 1С, параллельно native endpoint; выполнение на Firebird | Linux/Super и локальный TCP; открытие тонким клиентом 8.5.4.1306 подтверждено, полный benchmark не запускался |
+| Начало сессии | Identity-запрос, фиксированные SET, все семь startup SET; загрузка libpq 14.2 настоящим процессом 1С и его Startup проверены | enable_mergejoin, cpu_operator_cost и lock_timeout намеренно без эффекта; не все режимы драйвера приняты |
+| SQL/исполнение | Simple scripts с остановкой на ошибке; Extended/prepared/portals; типизированные последовательные `$n`, postfix casts, literal LIMIT | Общая PG-грамматика, whole-query preparse и произвольные PG types не реализованы |
+| Транзакции и locks | BEGIN, COMMIT/ROLLBACK, I/T/E, savepoints/recovery; shared/exclusive transaction advisory locks через native lock manager, конфликты и lifetime проверены | Не полная эквивалентность isolation/locks PostgreSQL; wrappers возвращают INTEGER 0 вместо void; statement_timeout имеет native attachment lifetime |
+| Binary data / APP-16 | Bytea/BLOB10, точные сравнения/индексы; большие text/binary Bind через native IBlob при Execute | Native key budget ограничивает индексируемое значение; message/portal/DataRow budgets прежние. BLOB/0 и OCTETS сохраняют native сравнения |
+| Типы / APP-16 | Mchar/mvarchar, BINROWVER/BOOL_OR, regnamespace, type identity/source; ODS 14.1. Независимая приёмка и последующие регрессии PASS | 214 oracle expressions; последний повтор — 583 результата матрицы / 10054 OO assertions. Полная система PG types/coercions не заявлена |
+| Namespace и имена | APP-10…13 приняты: registry со стабильными IDs, pg_namespace, lowercase unquoted PG4, точные quoted names и native-safe source | Native1/2/3 прежние; native DDL под user savepoint запрещён. BIGINT/VARCHAR metadata не выдаются за PG oid/name |
+| Каталоги открытия | pg_database/current_database, tablespace/type/proc/extension profile; pg_class для persistent tables/views, своих PG LTT и persistent indexes; pg_tables, persistent pg_attribute и pg_index | Ограниченные проекции реальных объектов, не полный PG catalog. Locale использует native ICU; нет полной эквивалентности PostgreSQL libc |
+| Видимость | pg_table_is_visible через native resolver/SCL; path/USAGE/$user/pg_temp и shared table/index namespace, включая temp shadow | Persistent index IDs — BIGINT в диапазоне выше 2^32; temp index rows не выдаются. Native table/index name collisions явно отклоняются при lookup |
+| PG temporary relations | APP-15/NAT-06 приняты; PRESERVE/DELETE, DML/индексы, savepoints/cleanup, native metadata undo; serial/serial4 и LTT identity добавлены и проверены | ON COMMIT DROP остаётся ограничением; NAT-07 persistent view без FROM — отдельный сохранённый FAIL |
+| Служебные операции | Реальные ANALYZE своей PG LTT, fasttruncate/fasttrun_ext с очисткой страниц и сохранением serial progress; fulleq, datediff2/vassn, format_number проверены по oracle | Контракты ограничены и описаны отдельно: [services](TEMP_SERVICES.md), [fulleq](FULLEQ.md), [functions](APPLICATION_FUNCTIONS.md), [number format](NUMBER_FORMAT.md) |
+| Прикладные данные и обмен | Перенесены 194 таблицы / 135146 строк с binary fingerprints, 351 индекс и все 46 PK; ibsrv читает настоящую конфигурацию через Bind с binary result | 16 expression indexes и 3 cyclic sequence defaults не перенесены; открытие UI подтверждено, полная запись и нагрузка ещё не приняты |
 
 ## Где находимся относительно конечной цели
 
 | Контрольная точка | Состояние |
 |---|---|
 | Обычный libpq-клиент исполняет совместимый SQL в Firebird | Достигнута в описанном профиле |
-| Необходимый базовый обмен параметрами и binary payload | Достигнут ограниченный, проверенный профиль |
-| Каталоги и SQL, необходимые для проверки/открытия базы 1С | Не готовы; APP-01 — ближайший блокер |
-| Реальная подготовленная схема и данные информационной базы | Не приняты; APP-05 (типы записанного профиля APP-16 проверены) |
-| Открытие существующей информационной базы реальным клиентом 1С | Не принято; успешного сквозного прогона нет |
-| Выполнение и проверка результата теста Гилёва на Firebird | Не принято; успешного сквозного прогона нет |
+| Необходимый обмен параметрами и binary payload | Проверенный профиль и реальные чтения ibsrv; compact timestamp Bind исправлен, открытие UI подтверждено |
+| Каталоги и SQL проверок открытия | Реализованы и проверены перечисленные профили; bootstrap и запросы открытия настоящей базы прошли |
+| Настоящая схема и данные информационной базы | Подготовлены и сверены; 194 / 135146 / 351, с явно сохранёнными 19 schema limitations |
+| Открытие информационной базы реальным клиентом 1С | Достигнуто: тонкий клиент 8.5.4.1306 отрисовал начальную страницу «Тест Гилёва : 2.1.1.48» |
+| Выполнение и проверка результата теста Гилёва | Следующий результат после открытия; успешного сквозного прогона нет |
 
-Нынешнее состояние — окончание основного фундамента и переход к прикладным
-каталогам/типам. Последние BLOB-этапы устранили реальный пробел обмена данными,
-но не заменили проверки, которые 1С делает до чтения конфигурации.
+Открытие UI подтверждено отдельно от startup/ready сервера. До полного сценария
+Гилёва остаётся прогон нагрузки толстым клиентом, проверка результата и устранение
+обязательных отказов этого сценария. Число необходимых исправлений пока неизвестно.
 
 ## Исходные 24 выбранных примера
 
@@ -99,48 +105,39 @@ Cache crash NAT-05 предшествует APP-14 в нашем fork, прои�
 | 06, 23 | Исходный SQL проверен на синтетической схеме и данных |
 | 19 | Проверен механизм 92 parameters/68 BLOB; исходный запрос на полной исходной схеме не принят |
 | 04, 07, 08, 12, 17, 18, 24 | APP-16: исходный SQL без rewriting, synthetic typed fixtures, строки/tags/metadata и version rollback PASS |
-| 05 | Не принят: полный catalog, current_database/collation |
-| 10, 11 | Не приняты: advisory locks, каталоги и timeout contract |
-| 13, 14, 15, 16 | Не приняты: serial/defaults, ANALYZE и fasttrun |
+| 05 | current_database/pg_database и locale profile проверены; это ограниченный catalog и native ICU, не полная PG locale semantics |
+| 10, 11 | Исходные формы, реальные advisory locks и native statement_timeout проверены; lifetime/return-type отличия описаны в ADVISORY_LOCKS |
+| 13, 14, 15, 16 | Исходные формы serial4, ANALYZE и fasttrun проверены на PG LTT с реальными эффектами; не произвольные defaults/служебные операции |
 | 20 | Не принят: исходная register schema/types и полноценная проверка записи |
 
-Нельзя складывать эти строки в процент. В частности, успешные 06/23 не означают
-чтение настоящей конфигурации, а количество проверок codec не показывает долю
+Нельзя складывать эти строки в процент. Synthetic проверки 06/23 сами по себе
+не доказывают чтение настоящей конфигурации: оно подтверждено отдельно реальным
+ibsrv. Ни эти проверки, ни количество codec assertions не показывают долю
 работающего теста Гилёва.
 
-## Ближайший путь до целевого результата
+## Текущая последовательность до целевого результата
 
-Оценка на 12 ноября 2026 года: **APP-16 реализован и прошёл локальную приёмку; осталось пять крупных результатов**.
-Изменения APP-16 ожидают пользовательского review.
-Это рабочая группировка известных задач до успешного
-открытия подготовленной информационной базы реальным клиентом 1С и повторяемого
-теста Гилёва на Firebird. Это не обещание фиксированного числа инструкций/коммитов: новые
-отказы реального клиента и блокирующие дефекты могут потребовать дополнительных
-итераций. NAT-06 уже потребовал отдельной технической инструкции перед завершением
-первого этапа; семь прикладных результатов остаются теми же. Процент готовности
-из этой нумерации не вычислять.
+На 13 ноября 2026 года APP-15, NAT-06 и APP-16 — принятый фундамент. Прежняя
+семиэтапная схема от 12 ноября включала APP-15/16 отдельными первыми пунктами;
+после их приёмки используются следующие пять результатов. **Этап 4 — успешное
+открытие базы настоящим клиентом 1С**, граница текущего поручения пользователя.
+Этап 5 — полный тест Гилёва после открытия. Эта нумерация не задаёт число
+будущих коммитов или исправлений.
 
-| № | Этап | Проверяемый результат / основные backlog ID |
+| № | Этап | Состояние и критерий результата |
 |---|---|---|
-| 1 | **Временные таблицы — APP-15** | [Единая инструкция](TEMPORARY_RELATIONS_TASK.md): native LTT, PG TEMP/pg_temp, имена с `_`, DML/индексы, PRESERVE/DELETE, live catalogs/visibility, rollback/savepoints, две сессии и cleanup. Принят в 7799cd3a54; независимая приёмка PASS. APP-01/04/15, SQL-09/10. |
-| 2 | **Типы и выражения 1С** | [APP-16: реализация и приёмка](TYPES_AND_EXPRESSIONS_TASK.md). bytea/binary IDs с правильными сравнениями и индексами, mchar/mvarchar, BINROWVER, regnamespace и требуемые функции; согласованные SQL metadata/codecs. Приёмка исходного SQL на синтетических данных PASS, review ожидается. APP-02/09, нужная часть SQL-03…06. |
-| 3 | **Каталоги и проверки открытия базы** | Selected04 уже проверен в APP-16; selected05 и остальные нужные catalog queries работают с реальными объектами; определены current_database и collation contract. Простое native имя collation не выдаётся за PostgreSQL LC_COLLATE. APP-01. |
-| 4 | **Блокировки и служебные операции нагрузки** | Shared/exclusive advisory locks с правильным lifetime и конфликтами; serial/defaults, необходимые ANALYZE/fasttrun и оставшиеся операции временных объектов имеют проверенные эффекты. APP-03/04, нужная часть SES-07. |
-| 5 | **Подготовка настоящей информационной базы** | Исходная схема, конфигурация и данные размещены в отдельной Firebird БД; чтение и DML проверены на настоящей структуре/типах. Синтетические fixtures заменены прикладными данными для приёмки. APP-05. |
-| 6 | **Успешное открытие базы клиентом 1С** | Реальный процесс 1С подключается и открывает информационную базу, читает конфигурацию; подтверждены фактическая libpq, Startup/Bind/formats. Устранены обнаруженные обязательные блокеры. APP-06, промежуточная приёмка. |
-| 7 | **Гилёв и итоговая проверка целевого сценария** | Реальный тест завершается с корректными данными, транзакциями и конкуренцией; повторные прогоны устойчивы. Зафиксированы версии/настройки, измерена производительность, проверены native coexistence/права/cleanup; остающиеся ограничения явно согласованы. APP-06 и применимая часть VAL-05. |
+| 1 | **Каталоги и проверки открытия** | Реализованы профили database/locale/types/proc/extensions/tables/attributes/indexes и visibility; независимая приёмка PASS. Реальный bootstrap до открытия UI прошёл; полный catalog не обещан. APP-01. |
+| 2 | **Блокировки и служебные операции** | Advisory locks, serial/LTT identity, ANALYZE/fasttrun и необходимые прикладные функции имеют проверенные эффекты. Ограничения возвращаемых типов, timeout и supported types явные. APP-03/04. |
+| 3 | **Подготовка настоящей базы** | Перенесены и сверены 194 таблицы / 135146 строк / 351 индекс, все 46 PK. 16 expression indexes и 3 sequence defaults остаются в очереди, incomplete schema разрешена явно. Это готовый стенд запуска, не полная миграция PG semantics. APP-05. |
+| 4 | **Успешное открытие клиентом 1С** | **Выполнен.** Настоящие libpq 14.2/Startup, чтение Config/version и открытие начальной страницы «Тест Гилёва : 2.1.1.48» тонким клиентом 8.5.4.1306 подтверждены. [Доказательства](OPEN_INFOBASE.md). APP-06 — часть открытия. |
+| 5 | **Гилёв и итоговая проверка** | После этапа 4: реальный тест завершается с корректными данными, транзакциями и конкуренцией; повторные прогоны устойчивы, версии/настройки/производительность зафиксированы. Пока не выполнен. APP-06, применимая часть VAL-05. |
 
-Пункты 2–4 имеют взаимные зависимости; порядок частей уточняется целым прикладным
-сценарием. В частности, locks/temp SQL встречаются уже в начале записи и могут
-потребоваться до открытия базы. Пробные подключения и диагностику реального 1С
-проводить раньше по мере готовности стенда: пункт 6 означает успешное открытие,
-а не запрет запускать клиент до завершения всей разработки.
-
-Для APP-15 поддержаны native типы и PRESERVE/DELETE. ON COMMIT DROP остаётся
-явным ограничением; он отсутствует в выбранных temporary CREATE. Исходные
-selected04/12/13 после одного APP-15 ещё не считаются пройденными: нужны результаты
-типового и служебного этапов. Регnamespace не заменяется специальным AST для одного
-predicate. Принятые APP-10…14 повторно не реализуются; P2 APP-14 прошёл review.
+Текущая цель до этапа 4 достигнута. До полной исходной цели остаётся этап 5:
+запуск Гилёва толстым клиентом и проверка результата, включая обнаруженные
+обязательные исправления. Число таких исправлений неизвестно; сохранённые
+schema limitations не закрываются самим фактом успешного открытия UI.
+ON COMMIT DROP остаётся явным ограничением PG TEMP; исходные selected04/12/13
+проверены последующими типовым и служебным этапами, без подмены их SQL.
 
 Отложенные пользователем реальные эффекты трёх SET не возвращаются в обязательный
 объём автоматически. По каждому открытому пункту BACKLOG к финалу нужно либо
@@ -156,11 +153,24 @@ Linux/Super прогон их не закрывает. Полная совмес
 базы средствами 1С и загрузка .dt не добавляются молча к текущему сценарию открытия
 подготовленной базы и Гилёва.
 
-## Что ещё не доказано данными записи
+## Запись SQL и доказательства реального запуска
 
-Исходная запись не содержит полных Startup/Bind/result formats и всех ответов
-сервера. DETAIL — текстовое представление параметров, не исходные Bind bytes.
-Успех через libpq 14.24 не доказывает, что 1С загрузила ту же библиотеку; в исходном
-исследовании поставляемая с 1С библиотека на диске сообщала 14.2, путь в процессе
-не проверялся. Создание новой базы средствами 1С и загрузка .dt — отдельные
-сценарии, не принятые этой записью открытия существующей базы/Гилёва.
+Исходная запись от 9 ноября не содержала полных Startup/Bind/result formats
+и всех ответов сервера. DETAIL — текстовое представление параметров, не Bind bytes.
+На стенде 13 ноября отдельно подтверждены загруженная реальным ibsrv libpq 14.2,
+Startup и реальные Bind/result formats: `/tmp/pgwire-1c-launch/actual-libpq.json`,
+`actual-wire.jsonl`, `firebird-trace.log`. Эти наблюдения относятся к прошедшим
+запросам; они не доказывают все возможные формы обмена. Открытие UI отдельно
+подтверждено `/tmp/pgwire-1c-launch/client-ui-confirmed-open/report.json`
+и снимком `0x160015a.png`; сводка — в [OPEN_INFOBASE](OPEN_INFOBASE.md).
+
+Перенос и сверка данных: `/tmp/pgwire-1c-launch/migration/32k-copy.json` и
+`32k-index-reconciliation.json`. Последняя APP-16 регрессия:
+`/tmp/app17-index-app16-regression-final/summary.json` — 583 / 10054 / 214.
+Индексы: `/tmp/app17-index-03/summary.json` — 109 SQL результатов;
+независимые `/tmp/app17-index-challenge-03/summary.json` — 46 проверок.
+Подробные результаты остальных профилей и ограничения — в [VALIDATION](../VALIDATION.md)
+и [BACKLOG](../BACKLOG.md). Локальные `/tmp` артефакты не входят в Git.
+
+Создание новой базы средствами 1С и загрузка .dt — отдельные сценарии,
+не принятые текущей задачей открытия подготовленной базы и Гилёва.

@@ -1,0 +1,181 @@
+{
+  "accepted": true,
+  "scope": "Real thin 1C client opens the prepared Gilev infobase; benchmark not run",
+  "recorded_utc": "2026-11-13T09:13:10.352843+00:00",
+  "source_revision": "db0ffc4dd3037579154ddfbf2aa02137eb8d6b63",
+  "runtime": "/tmp/pgwire-1c-launch/runtime",
+  "database": "/tmp/pgwire-1c-launch/data/gilev_32k.fdb",
+  "alias": "gilev_firebird",
+  "native_port": 23050,
+  "pgwire_port": 25432,
+  "processes": {
+    "server": {
+      "pid": 677763,
+      "executable": "/tmp/pgwire-1c-launch/runtime/bin/firebird",
+      "state": "S"
+    },
+    "ibsrv": {
+      "pid": 677868,
+      "executable": "/opt/1cv8/x86_64/8.5.4.1306/ibsrv",
+      "state": "S",
+      "tcp_connections": [
+        {
+          "local": {
+            "address": "127.0.0.1",
+            "port": 41390
+          },
+          "remote": {
+            "address": "127.0.0.1",
+            "port": 25432
+          }
+        },
+        {
+          "local": {
+            "address": "127.0.0.1",
+            "port": 41402
+          },
+          "remote": {
+            "address": "127.0.0.1",
+            "port": 25432
+          }
+        },
+        {
+          "local": {
+            "address": "127.0.0.1",
+            "port": 18314
+          },
+          "remote": {
+            "address": "127.0.0.1",
+            "port": 60822
+          }
+        },
+        {
+          "local": {
+            "address": "127.0.0.1",
+            "port": 41386
+          },
+          "remote": {
+            "address": "127.0.0.1",
+            "port": 25432
+          }
+        },
+        {
+          "local": {
+            "address": "127.0.0.1",
+            "port": 18314
+          },
+          "remote": {
+            "address": "127.0.0.1",
+            "port": 60824
+          }
+        },
+        {
+          "local": {
+            "address": "127.0.0.1",
+            "port": 41410
+          },
+          "remote": {
+            "address": "127.0.0.1",
+            "port": 25432
+          }
+        },
+        {
+          "local": {
+            "address": "127.0.0.1",
+            "port": 41376
+          },
+          "remote": {
+            "address": "127.0.0.1",
+            "port": 25432
+          }
+        }
+      ]
+    },
+    "client": {
+      "pid": 678469,
+      "executable": "/opt/1cv8/x86_64/8.5.4.1306/1cv8c",
+      "state": "S",
+      "tcp_connections": [
+        {
+          "local": {
+            "address": "127.0.0.1",
+            "port": 60822
+          },
+          "remote": {
+            "address": "127.0.0.1",
+            "port": 18314
+          }
+        },
+        {
+          "local": {
+            "address": "127.0.0.1",
+            "port": 60824
+          },
+          "remote": {
+            "address": "127.0.0.1",
+            "port": 18314
+          }
+        }
+      ]
+    }
+  },
+  "actual_libpq": {
+    "pid": 677868,
+    "executable": "/opt/1cv8/x86_64/8.5.4.1306/ibsrv",
+    "libraries": [
+      {
+        "path": "/opt/1cv8/x86_64/8.5.4.1306/libpq.so.5.14",
+        "sha256": "04a9848fa7d8bd699caec697d0437596c650a18f38a52a6507b620ba184171b9"
+      }
+    ],
+    "PQlibVersion": 140002
+  },
+  "binaries": {
+    "bin/firebird": "0700e26089dd5f0467800408d25b3df104973aba62e02438776211a07152020a",
+    "plugins/libEngine14.so": "9f64567ea7b4678acc56e426363b10e62f7c5864474dc18078ac71516f8ce3de",
+    "plugins/libPgWire.so": "a3b26fd4a98bfe001ab38202a8c2647aa2f2fda14eb378ed53112ea64145799b"
+  },
+  "native_coexistence": {
+    "exit_code": 0,
+    "log": "/tmp/pgwire-1c-launch/native-after-client.log"
+  },
+  "ui_report": "/tmp/pgwire-1c-launch/client-ui-confirmed-open/report.json",
+  "screenshot": "/tmp/pgwire-1c-launch/client-ui-confirmed-open/0x160015a.png",
+  "wire_evidence": "/tmp/pgwire-1c-launch/actual-wire.jsonl",
+  "native_trace": "/tmp/pgwire-1c-launch/firebird-trace.log",
+  "migration": {
+    "report": "/tmp/pgwire-1c-launch/migration/32k-copy.json",
+    "reconciliation": "/tmp/pgwire-1c-launch/migration/32k-index-reconciliation.json",
+    "tables": 194,
+    "rows": 135146,
+    "physical_indexes": 351,
+    "pending_expression_indexes": 16,
+    "pending_sequence_defaults": 3
+  },
+  "limitations": [
+    "Benchmark not started; ordinary thick-client mode requires a separate 1C cluster, not this managed-only ibsrv",
+    "16 expression indexes and 3 cyclic sequence defaults remain unimplemented",
+    "Linux/Super loopback only; not a full PostgreSQL or 1C compatibility claim"
+  ],
+  "screenshot_sha256": "6598f27fcfd53260f966fbf70d449e94dbf9bda97053b55bab2de727eb0fb274",
+  "platform": "Linux/Super, loopback TCP, Debug runtime",
+  "client_version": "8.5.4.1306",
+  "configuration": "Тест Гилёва : 2.1.1.48",
+  "startup": {
+    "protocol": 196608,
+    "encoding": "UTF8"
+  },
+  "observed_bind": {
+    "parameter_types": "inferred",
+    "mixed_parameter_formats": [
+      0,
+      0,
+      1,
+      0,
+      0
+    ],
+    "result_formats": [
+      1
+    ]
+  }
+}

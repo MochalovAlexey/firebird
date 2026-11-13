@@ -1,9 +1,24 @@
 # Записанный профиль 1С: этапы совместимости
 
-13 ноября: APP-16 (`78e193be68`) прошёл независимую приёмку. Добавлены проверенные
+13 ноября 2026 года: APP-16 (`78e193be68`) прошёл независимую приёмку. Добавлены проверенные
 каталоги открытия базы, transaction advisory locks, serial/native LTT identity,
 ANALYZE и fasttruncate для PG LTT. Реальная база перенесена на отдельный стенд;
-успешное открытие клиентом 1С и тест Гилёва пока не заявлены.
+успешное открытие настоящим тонким клиентом 1С подтверждено. Тест Гилёва ещё не запускался.
+
+Перенесены и сверены 194 таблицы / 135146 строк, 351 физический индекс
+(337 исходных + 14 для правильной NULL-семантики), все 46 primary keys.
+Остались 16 expression indexes и 3 циклических sequence defaults; стенд
+запускается с явно разрешённым неполным schema profile. Настоящий ibsrv загрузил
+libpq 14.2, прошёл Startup и читает перенесённую конфигурацию, включая Config/version,
+через настоящий Bind с binary result. Тонкий клиент `1cv8c 8.5.4.1306` открыл
+базу и отрисовал начальную страницу «Тест Гилёва : 2.1.1.48».
+[Отчёт и доказательства открытия](OPEN_INFOBASE.md).
+
+Текущая цель, **этап 4: успешное открытие базы клиентом 1С**, выполнена. Каталоги,
+блокировки/служебные функции и подготовка данных (этапы 1–3) имеют проверенные
+ограниченные профили. Этап 5, полный прогон Гилёва, ещё не выполнен; начальная
+страница требует толстый клиент для самого теста. Состояние и ограничения — в
+[PROGRESS](PROGRESS.md); число необходимых исправлений для нагрузки пока неизвестно.
 
 - [Каталоги и locale](DATABASE_CATALOG.md).
 - [Блокировки и statement_timeout](ADVISORY_LOCKS.md).
@@ -194,8 +209,10 @@ initial/RESET и session lifetime SET сохранены. Helper читает с
 Review `8ffd22cb76`: 174 libpq results / 46 OO checks PASS; найденный P2 при
 аргументе, меняющем состояние attachment, исправлен в принятом `11dee63d2a`.
 Текущий guard проверяет состояние после EVL_expr, в том числе при NULL результате.
-Исходный selected04 всё ещё требует regnamespace; pg_my_temp_schema добавлен APP-15; синтетическая
-замена namespace predicate не считается его PASS. APP-01/02/03/04/06 остаются открытыми.
+На момент APP-14 (12 ноября) исходному selected04 ещё требовался regnamespace.
+pg_my_temp_schema добавлен APP-15, а исходный selected04 без подмены predicate
+прошёл в APP-16. Видимость persistent indexes и общий table/index namespace
+добавлены 13 ноября; текущий [контракт](INDEX_CATALOG.md) не меняет native dialects.
 
 Незавершённые этапы, ограничения частичных реализаций и пробелы приёмки ведутся
 в общем [BACKLOG](../BACKLOG.md). Обновлять его после каждого этапа и review.
@@ -207,6 +224,8 @@ Review `8ffd22cb76`: 174 libpq results / 46 OO checks PASS; найденный P
 записью Bind. Полный журнал, конфигурационные BLOB и credentials в Git не входят.
 
 ## Первый срез: SELECT без FROM и идентификация подключения
+
+Исторический объём от 9 ноября 2026 года; последующие результаты указаны выше.
 
 Первый запрос пяти новых соединений — `SELECT pg_catalog.pg_backend_pid()`
 (selected `01-backend-pid`, capture_seq 98). Для его выполнения используются:
@@ -304,6 +323,10 @@ I/T/E/recovery и запреты. Это синтетическая форма s
 
 ## Postfix cast `expression::type`: первый срез
 
+Исторический объём APP-04 от 10–11 ноября 2026 года. Последующий APP-16 добавил
+profile types/casts, включая bytea, mchar/mvarchar и regnamespace; ограничения
+корней DDL/stored PSQL для postfix syntax сохраняются.
+
 В клиентском PG dialect 4 непрерывный токен `::` создаёт прежний CastNode.
 Значения, округление, truncation, overflow и вывод входных типов соответствуют
 **Firebird CAST**, а не всем PostgreSQL coercion/typmod rules. Приоритет `::`
@@ -398,9 +421,10 @@ rse_first и FirstRowsStream; plugin, API, metadata, codecs и optimizer не м
 прошли; команды и evidence — в [VALIDATION](../VALIDATION.md).
 
 SQL-01 закрывает только этот literal-срез; SQL-02 остаётся открытым. NULL count
-нельзя просто передать native stream: там он означает ноль строк. Исходные
-selected 04/17 ещё требуют каталогов/custom types; их полная приёмка и открытие
-базы 1С не заявляются.
+нельзя просто передать native stream: там он означает ноль строк. В исходной
+приёмке этого среза (11 ноября) selected04/17 ещё требовали каталогов/custom types;
+оба исходных запроса позже проверены в APP-16. Открытие базы тонким клиентом
+подтверждено отдельно 13 ноября; оно не входило в приёмку literal LIMIT.
 
 ## Binary BLOB как bytea: только output
 
@@ -448,8 +472,8 @@ Engine/parser/публичные API/зависимости также не ме
 `pgwire_1c_smoke.py --blobs` использует прежние libpq/raw/native wrappers и небольшой
 native OO fixture helper. Проверена неизменная форма selected06 с WHERE `$1` и
 ORDER BY PartNo на синтетической PUBLIC.PARAMS, без исходных данных или записанного
-Bind. APP-07 прошёл review и закрыт; APP-02/SQL-06 и открытие
-базы 1С остаются отдельными задачами. Команды, SHA, размеры и результаты — в
+Bind. APP-07 прошёл review и закрыт; типы/large Bind добавлены APP-16,
+а открытие базы настоящим клиентом подтверждено отдельно 13 ноября. Команды, SHA, размеры и результаты — в
 [VALIDATION](../VALIDATION.md).
 
 ## Установка на отдельной тестовой базе
@@ -464,10 +488,11 @@ Bind. APP-07 прошёл review и закрыт; APP-02/SQL-06 и открыт�
 4. Через PgWire выполнить `SELECT 42 AS "answer"` и `SELECT pg_catalog.pg_backend_pid()`.
    Synthetic fixtures не переносят реальные данные 1С и не подтверждают её открытие.
 
-## Следующие небольшие этапы
+## История небольших этапов: 9–12 ноября 2026 года
 
-История прежних небольших срезов. Начиная с APP-15 связанные изменения объединяются
-в цельный прикладной этап; текущая инструкция указана в начале файла.
+Ниже сохранён объём прежних срезов. Начиная с APP-15 связанные изменения объединяются
+в цельный прикладной этап; результат открытия клиента и последующая цель Гилёва
+указаны в начале файла и [PROGRESS](PROGRESS.md).
 
 [Синтаксический приём трёх startup SET](IGNORED_STARTUP_SETTINGS_TASK.md)
 без эффекта реализован по явному решению пользователя; контракт описан ниже.
@@ -504,21 +529,28 @@ physical layout по фактическим длинам Bind. Engine созда
 Проверены libpq/raw/native readback, selected23 на синтетической PUBLIC.FILES
 и 68 BLOB среди 92 mixed параметров; `c27a3a4c5a` прошёл review и независимую
 приёмку на свежей сборке, APP-08 закрыт. APP-16 реализует большие значения
-и исходные SQL bytea types/casts; настоящая схема/данные APP-05 не приняты.
+и исходные SQL bytea types/casts. Настоящая схема/данные были подготовлены
+13 ноября; остающиеся 19 schema limitations перечислены в [PREPARE_INFOBASE](PREPARE_INFOBASE.md).
 
 Срез [фиксированной диагностики](FIXED_DIAGNOSTICS_TASK.md) реализован через
 существующий SetPgSessionNode: только `escape_string_warning=off` и
 `client_min_messages=error`. Ревизия `4abc5af919` прошла архитектурный review
 и повторную целевую проверку; результаты — в VALIDATION.
 
-| Группа исходного задания | Текущее состояние / что требуется |
+### Текущее состояние групп исходного задания: 13 ноября 2026 года
+
+Номера групп здесь относятся к исходному заданию, а не к этапам 1–5 в PROGRESS.
+
+| Группа исходного задания | Текущее состояние / границы |
 |---|---|
-| 1. Начало сессии | SELECT без FROM, ограниченная identity-функция, последовательные скрипты и все семь startup SET принимаются; реальные эффекты enable_mergejoin, cpu_operator_cost и lock_timeout отложены |
-| 2. SQL и параметры | Simple Query выполняет скрипты совместимого SQL; PG BEGIN без опций и последовательные типизированные `$n` поддержаны; postfix `::` добавлен для native builtin types; literal LIMIT 0…2147483647 поддержан; произвольная нумерация и общий LIMIT/OFFSET ещё не реализованы |
-| 3. Открытие базы | APP-12 даёт pg_class для постоянных таблиц/views; полный catalog, pg_database/visibility и служебные таблицы 1С ещё требуют реализации и настоящих данных |
-| 4. Типы и функции | APP-16 реализован: bytea/indexes/large Bind, mchar/mvarchar, regnamespace, BINROWVER/BOOL_OR и требуемые операции. Локальный PASS, ожидает review; полная типовая система PostgreSQL и реальная база не заявлены |
-| 5. Транзакции/конкуренция | PG BEGIN без опций использует реальные READ CONSISTENCY транзакции; native controls сохраняются; advisory locks и PG timeout semantics ещё не реализованы |
-| 6. Временные объекты/нагрузка | PG TEMP поддержан в профиле APP-15; serial4, ANALYZE и fasttrun_ext ещё не реализованы |
+| 1. Начало сессии | SELECT без FROM, identity-функция, последовательные скрипты и семь startup SET; настоящие libpq 14.2/Startup 1С проверены. Эффекты enable_mergejoin, cpu_operator_cost и lock_timeout отложены |
+| 2. SQL и параметры | Simple scripts, PG BEGIN без опций, последовательные типизированные `$n`, postfix casts и literal LIMIT поддержаны. Реальные Bind с binary result читают конфигурацию. Произвольная нумерация и общий LIMIT/OFFSET не реализованы |
+| 3. Открытие базы | Database/locale/type/proc/extension catalogs, pg_class/pg_tables/pg_attribute/pg_index и visibility реализованы в документированных профилях; настоящие данные перенесены. Открытие начальной страницы тонким клиентом 1С 8.5.4.1306 подтверждено; benchmark не запускался |
+| 4. Типы и функции | APP-16 принят после независимого review; последняя регрессия 583 / 10054 / 214 PASS. Fulleq, datediff2/vassn и format_number проверены по oracle. Полная система типов/функций PostgreSQL не заявлена |
+| 5. Транзакции/конкуренция | PG BEGIN использует native READ CONSISTENCY; shared/exclusive transaction advisory locks работают с native lock manager, savepoints и recovery. statement_timeout использует native attachment lifetime, не полную PG SET semantics |
+| 6. Временные объекты/нагрузка | PG TEMP, serial/serial4 и native LTT identity, реальные ANALYZE/fasttruncate/fasttrun_ext проверены. ON COMMIT DROP и полный тест Гилёва остаются за границей принятого профиля |
+
+### Принятые основы каталогов: история 11–12 ноября 2026 года
 
 Реализован [APP-10: внутренний namespace registry](NAMESPACE_REGISTRY_TASK.md),
 ревизия `5bbdaa763d` прошла review и независимую приёмку, см. VALIDATION.
@@ -531,19 +563,21 @@ physical layout по фактическим длинам Bind. Engine созда
 `a3e3c80123` прошёл review без замечаний и независимую приёмку.
 SQL-view OID/NSPNAME над этим registry и отдельная установка; имена точные
 native, metadata BIGINT/VARCHAR (wire20/1043). Это ограниченная проекция реальных
-данных, не полноценные PG oid/name/regnamespace. Их типизацию и name resolution,
-полный pg_class/visibility/temp namespace предстоит согласовать отдельно. Metadata
+данных, не полноценные PG oid/name. Name resolution и temp namespace добавлены
+APP-13…15, regnamespace — APP-16; полный PG catalog остаётся вне контракта. Metadata
 schema/relation/field не заменяет type identity: UNION может сохранить origin
 первой ветви при общем BIGINT. C++/API/codecs в APP-11 не меняются. Путь до первого
-запуска 1С/Гилёва — в [PROGRESS](PROGRESS.md); сквозной запуск пока не принят.
+запуска 1С/Гилёва — в [PROGRESS](PROGRESS.md); открытие UI подтверждено 13 ноября,
+полный тест Гилёва не запускался.
 
 Реализован [APP-12: pg_class для постоянных таблиц/views](CLASS_CATALOG_TASK.md);
 `13f64d0e00` прошёл review без замечаний и независимую приёмку.
 Четыре поля читаются из SYSTEM.RDB$RELATIONS с JOIN PG_NAMESPACE. OID — native
 relation ID+1; новый allocator/registry/hook не нужен. Сохраняются точные native
 имена и BIGINT/VARCHAR metadata, native reuse после DROP/wrap допустим.
-Этот независимый срез предшествует решению name resolution/regnamespace;
-полный pg_class, visibility и temporary objects пока не реализуются.
+Этот независимый срез предшествовал name resolution/regnamespace и temporary
+objects. Они добавлены APP-13…16; persistent index catalog — 13 ноября.
+Полный набор полей/видов объектов pg_class по-прежнему не заявлен.
 
 Пользователь выбрал PG-правила имён и укрупнение следующих инструкций.
 [APP-13](PG_IDENTIFIER_NAMES_TASK.md) объединяет lowercase unquoted identifiers
@@ -552,11 +586,15 @@ bootstrap/catalog labels, initial path/RESET и savepoint journal. Native1/2/3
 не меняются; старые uppercase объекты в PG4 требуют точных quoted имён.
 Ревизия `4520f371e9` прошла review и независимые names/strings проверки;
 установка и новый контракт описаны выше. APP-14 с ограниченной visibility
-проверен: целевая матрица PASS, P2 исправлен отдельно 12.11. Инструкция APP-15 выше
-нацелена на общий TEMP lifecycle и готова к возобновлению после принятия NAT-06; regnamespace/типы 1С,
-transactional search_path и полные каталоги остаются открытыми.
+проверен: целевая матрица PASS, P2 исправлен отдельно 12.11. После NAT-06
+приняты APP-15 с общим TEMP lifecycle и APP-16 с regnamespace/типами 1С.
+Транзакционный search_path и полный PG catalog остаются отдельными ограничениями.
 
 ## Постоянные таблицы и представления в PG_CLASS: APP-12
+
+Исторический контракт от 11 ноября 2026 года. Последующие установщики добавляют
+свои PG LTT и [persistent indexes](INDEX_CATALOG.md) в lowercase pg_class;
+описанные ниже исключения относятся к исходному срезу APP-12.
 
 [install_class_catalog.sql](sql/install_class_catalog.sql) устанавливает только
 PG_CATALOG.PG_CLASS(OID, RELNAME, RELNAMESPACE, RELKIND). Предусловия: исправные
@@ -599,9 +637,10 @@ OID локален этому каталогу/БД, одинаков между
 Диапазон native 0…32767 отображается в 1…32768. Движок допускает wrap/reuse,
 поэтому вечная уникальность и монотонность не обещаются; generation registry
 не добавлен. После backup/restore/переноса стабильность IDs не проверена.
-Числа могут совпадать с namespace IDs. Будущие indexes/sequences потребуют
-непересекающихся ключей, visibility/locks — этого же relation mapping; APP-03
-должен отдельно решить lifetime и DDL/reuse.
+Числа могут совпадать с namespace IDs. Добавленные 13 ноября persistent indexes
+используют отдельный BIGINT диапазон выше 2^32. Advisory locks имеют собственные
+ключи приложения и native transaction lifetime; они не выделяют catalog IDs.
+Sequence catalog остаётся вне профиля.
 
 External/virtual relations (2/3), GTT (4/5), local/declared/packaged temporary
 tables, indexes/sequences и остальные поля pg_class исключены. Это ограниченный
@@ -612,8 +651,10 @@ catalog постоянных таблиц/views. Native DDL под user savepoin
 и helpers namespace-проверок. Результаты и SHA — в
 [VALIDATION](../VALIDATION.md#11-ноября-2026-pg_class-для-постоянных-таблиц-и-представлений).
 Диагностический SELECT с relkind/relname/relnamespace/LIMIT прошёл; это изменённый
-SQL, не приёмка selected04/10/11. APP-01/03/04/06 открыты. APP-13 реализует согласованный PG naming contract; затем нужны regnamespace,
-search-path visibility и temp namespace.
+SQL, а не приёмка selected04/10/11 на дату APP-12. Позже selected04 принят
+в APP-16, selected10/11 — с каталогами/advisory locks; PG naming, regnamespace,
+search-path visibility и temp namespace также добавлены. Открытие
+клиентского интерфейса 1С подтверждено отдельно 13 ноября.
 
 ## Публичное представление namespace IDs: APP-11
 
@@ -721,9 +762,10 @@ attachments и после нормального restart сервера; фик�
 DROP+CREATE нельзя восстановить по одному совпадению имён; lookup ничего не
 чинит. Upgrade/uninstall/repair не автоматизированы. Backup/restore/migration
 не проверены и не заявляются. Ограниченный публичный view добавлен в APP-11 выше.
-Полные pg_namespace/pg_class, PG name mapping, regnamespace/oid/name,
-search-path visibility и pg_my_temp_schema остаются APP-01;
-selected04 и APP-06 не приняты. Следующая часть не начинается автоматически.
+На дату APP-10 (11 ноября) PG name mapping, regnamespace, search-path visibility
+и pg_my_temp_schema ещё не входили в этот срез. Они добавлены последующими
+APP-13…16; selected04 принят в APP-16, открытие UI — 13 ноября. Полные
+pg_namespace/pg_class и PG oid/name semantics остаются вне профиля.
 
 ## Bytea input: ограниченный APP-08
 
@@ -761,7 +803,9 @@ Parse/Bind/Describe/Flush/close без Execute не создают transaction/�
 RETURNING, rollback/savepoint/E/25P02/disconnect. Правила text сверены с отдельным
 Postgres Pro 18.6. Это проверка исходной формы SQL на synthetic schema/values;
 исходный Bind format не записан, конфигурация 1С не восстановлена и база не открывалась.
-Большие input — APP-09; APP-02/SQL-06/APP-05 и все прочие открытые задачи сохраняются.
+На дату APP-08 (11 ноября) большие input и исходные типы оставались отдельными
+задачами. Их проверенный профиль добавлен APP-16; настоящие данные перенесены
+13 ноября с ограничениями [PREPARE_INFOBASE](PREPARE_INFOBASE.md).
 
 ## PG BEGIN через штатную транзакцию Firebird
 
@@ -901,7 +945,8 @@ AUTOTERM после ошибки; PG SET внутри PSQL по-прежнему
 
 Эти две команды проверены отдельно и в полном `03-session-batch.sql` с описанным
 ниже исключением для трёх настроек. Другие значения fixed SET, SET LOCAL/SESSION/DEFAULT, SHOW,
-startup GUC, $n и следующие этапы не добавлены. Whole-query preparse
+произвольные startup GUC этим срезом не добавлены. Последовательные `$n`
+поддержаны отдельным принятым этапом. Whole-query preparse
 по-прежнему отложен; ранний явный COMMIT сохраняется при поздней ошибке.
 
 ## Временный приём трёх startup SET без эффекта
@@ -1126,6 +1171,8 @@ psql 'postgres://USER@127.0.0.1:15432/pgwire_test' \
 Реальная семантика отложена; успешный разбор пакета не доказывает её поддержку.
 Успешный SHOW на эталоне не доказывает эффект настройки планировщика/блокировок.
 
-Открытие существующей базы 1С и тест Гилёва на Firebird ещё не выполнены.
-Выдача строк несколькими SQL или отсутствие parser errors не заменяет такую
-приёмку. TLS/COPY/pipeline и другие независимые этапы roadmap сюда не включаются.
+Открытие подготовленной базы настоящим тонким клиентом 1С подтверждено
+13 ноября 2026 года; [доказательства](OPEN_INFOBASE.md) включают отрисованный UI.
+Сам тест Гилёва не запускался. Его результат нельзя заменить отсутствием parser
+errors или успешным открытием. TLS/COPY/pipeline и другие независимые направления
+roadmap остаются вне этой приёмки.

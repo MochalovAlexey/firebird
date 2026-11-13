@@ -1,5 +1,46 @@
 # Проверки реализации
 
+## 13 ноября 2026: APP-17 — настоящее открытие информационной базы 1С
+
+**Этап 4 принят:** 1cv8c 8.5.4.1306 отрисовал начальную страницу конфигурации
+«Тест Гилёва : 2.1.1.48». Запущенный ibsrv читает подготовленную базу Firebird
+через собственную libpq 14.2 и настоящий TCP PgWire. Это проверка реального
+клиента, а не воспроизведение выбранного SQL синтетическим harness.
+Сам benchmark не запускался. Для его ordinary thick-client режима потребуется
+отдельный кластер 1С; текущий standalone обслуживает managed режим.
+
+Исходная PostgreSQL-база использовалась только для чтения. Перед открытием
+проверены 194 таблицы / 135146 строк binary fingerprints, 337 поддержанных
+исходных индексов + 14 helpers и все 46 PK. Незавершённые 16 expression indexes
+и три cyclic defaults остаются явным ограничением схемы. После переноса реальные
+служебные UPDATE 1С изменяют только целевую тестовую базу.
+
+Наблюдения: Startup protocol 196608 / UTF8; inferred Parse parameters;
+Bind text inputs, binary bytea, binary results. Фактический timestamp input
+`20261113 120430` привёл к проверенному plugin-only исправлению db0ffc4dd3.
+Последний запуск ibsrv после этого не завершился с прежним DataBaseException.
+В UI видны заголовок конфигурации, «Начальная страница» и её содержимое.
+Native isql одновременно прочитал ту же базу: Firebird 6.0.0, ODS 14.1,
+page size 32768, config COUNT=230, exit 0. Исходный пользовательский сервер
+и его конфигурация не менялись.
+
+Приёмка кода: последняя полная APP-16 регрессия — 583 записи / 10054 OO assertions
+и 214 oracle expressions PASS на build11; последующее изменение build12
+ограничено TemporalCodec. Для него temporal 369, input 645, result codec tests
+и focused wire/real libpq temporal + invalid-before-effects PASS, штатный exit 0.
+Независимые review индексов и compact timestamp без блокирующих замечаний.
+
+[Повторение и ограничения](1c/OPEN_INFOBASE.md),
+[сохранённая сводка и hashes](evidence/1c-opening-20261113.json).
+Полный JSON: `/tmp/pgwire-1c-launch/opening-summary.json`; снимок:
+`/tmp/pgwire-1c-launch/client-ui-confirmed-open/0x160015a.png`.
+Runtime source revision db0ffc4dd3037579154ddfbf2aa02137eb8d6b63;
+Engine14 SHA256 `9f64567ea7b4678acc56e426363b10e62f7c5864474dc18078ac71516f8ce3de`,
+PgWire `a3b26fd4a98bfe001ab38202a8c2647aa2f2fda14eb378ed53112ea64145799b`.
+Снимок захватывает только собственное окно тестового клиента; пароли/BLOB values
+в repo/evidence отсутствуют. Локальные промежуточные коммиты сделаны по прямому
+разрешению пользователя; push не выполнялся.
+
 ## 13 ноября 2026: компактный timestamp реального клиента 1С
 
 При UPDATE `public.params` настоящий клиент передал timestamp-параметр

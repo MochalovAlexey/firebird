@@ -1,14 +1,29 @@
 # Незавершённые задачи PgWire и профиля 1С
 
-13 ноября 2026: работа продолжается до реального открытия отдельной базы 1С;
-локальные промежуточные коммиты разрешены пользователем, push запрещён.
-APP-16 принят независимым повтором. Исправлены binary Bind пустых mchar/mvarchar
-(`dab0178aa5`) и неприменение штатного TcpNoNagle (`6d33f6daf4`).
-Ниже сохраняется перечень ограничений; окончательные статусы текущего цикла
-обновляются по результатам переноса и запуска, а не по одному успешному SQL.
+13 ноября 2026: **реальное открытие отдельной базы 1С принято** на ревизии
+`db0ffc4dd3`. Тонкий клиент `1cv8c` 8.5.4.1306 отобразил начальную страницу
+«Тест Гилёва : 2.1.1.48»; `ibsrv` той же версии использует настоящий libpq
+(`PQlibVersion=140002`) и TCP PgWire 25432 к Firebird. Параллельная native
+проверка на 23050 завершилась с кодом 0. Доказательства:
+`/tmp/pgwire-1c-launch/opening-summary.json`, `actual-wire.jsonl`, native trace
+и `client-ui-confirmed-open/0x160015a.png`; условия воспроизведения —
+[OPEN_INFOBASE](1c/OPEN_INFOBASE.md).
+
+**Полный тест Гилёва не запускался и не принят.** Поддержанный профиль открытия
+не закрывает оставшиеся ограничения схемы, SQL, эксплуатации и производительности.
+APP-16 принят независимым повтором; исправления empty strings, TcpNoNagle и
+compact timestamp прошли проверки и вошли в используемую сборку.
+Локальные промежуточные коммиты разрешены пользователем, push запрещён.
 
 Обнаруженные при настоящем переносе ограничения, которые нельзя забыть:
 
+- Для нагрузочного прогона Гилёв требует толстый клиент в режиме обычного
+  приложения (это прямо показано в открывшейся начальной странице).
+  Текущий standalone `ibsrv` поддерживает только управляемое приложение;
+  следующий нагрузочный стенд требует отдельного изолированного кластера 1С.
+  Не подключать cluster и `ibsrv` одновременно к одной базе: это запрещено
+  условиями standalone и может повредить её. Основание:
+  [официальное руководство 1С, §7.2](https://1c-dn.com/library/tutorials/1c_enterprise_administrator_guide_file_mode_8_3_27/).
 - 16 составных неуникальных expression indexes с COALESCE пока не перенесены.
   Это ограничение схемы/производительности, не разрешение пропускать уникальность.
 - Три неиспользованные в источнике int32 CYCLE последовательности и их nextval
@@ -28,7 +43,8 @@ APP-16 принят независимым повтором. Исправлен�
   DSQL cache/statement с сохранением независимости порталов, курсоров и транзакций;
   простое хранение одного общего активного statement этим требованиям не отвечает.
 
-Актуализировано 12 ноября 2026 года: P2 APP-14 в `11dee63d2a` прошёл review.
+Исторический срез на 12 ноября 2026 года (числа и статусы этого абзаца
+относятся к той дате): P2 APP-14 в `11dee63d2a` прошёл review.
 NAT-06 принят в `516f55bbb5`: review без замечаний, независимый повтор 44 native SQL
 сценариев и 38 OO assertions PASS. APP-15, включая SQL-09/10, принят в `7799cd3a54`:
 независимые 268 libpq / 8408 OO PASS. APP-16 реализован, локальная приёмка типов/выражений PASS;
@@ -92,15 +108,15 @@ NAT-06 принят в `516f55bbb5`: review без замечаний, неза�
 
 | ID | Статус | Что осталось / условие закрытия | Основание |
 |---|---|---|---|
-| APP-01 | Проверенный профиль расширен, остальное открыто | `92b47bef36`: pg_database/current_database, pg_tablespace, pg_type/visibility, pg_proc и уровни mchar/fasttrun; реальная locale и обычные права проверены. Полные PG catalogs, extension loader и ещё обнаруживаемые запросы 1С не заявлены. | [Каталоги](1c/DATABASE_CATALOG.md), [проверки](VALIDATION.md) |
-| APP-02 | Реализован профиль APP-16; ожидает review | bytea/BLOB, mchar/mvarchar, regnamespace, BINROWVER/BOOL_OR, metadata/formats/comparisons/sort/indexes и обязательные операции families PASS. Полная PostgreSQL type/coercion система и реальная схема 1С не заявлены. | [Приёмка APP-16](VALIDATION.md#12-ноября-2026-app-16-типы-и-выражения) |
+| APP-01 | Профиль открытия 1С принят 13.11.2026; расширения открыты | Каталоги database/type/proc/tables/persistent indexes, visibility и необходимые реальные функции прошли startup настоящего `ibsrv` и открытие клиента на `db0ffc4dd3`. Полные PG catalogs, extension loader, temporary index rows и ещё не исполнявшиеся запросы нагрузки не заявлены. | [Каталоги](1c/DATABASE_CATALOG.md), [открытие](1c/OPEN_INFOBASE.md), [проверки](VALIDATION.md) |
+| APP-02 | Профиль APP-16 принят 13.11.2026; расширения открыты | Независимая APP-16 приёмка и повтор 583/10054 PASS; bytea/BLOB, mchar/mvarchar, regnamespace, BINROWVER/BOOL_OR и требуемые операции проверены также на 194 реальных таблицах и открытии 1С. Полная PG type/coercion система не заявлена; bare mchar PSQL-параметры остаются SQL-11. | [APP-16](1c/TYPES_AND_EXPRESSIONS_TASK.md), [открытие](1c/OPEN_INFOBASE.md), [проверки](VALIDATION.md) |
 | APP-03 | Transaction bigint профиль закрыт, 13.11.2026 | `92b47bef36`: native shared/exclusive advisory locks, savepoint undo и immediate E abort, retaining/EOF/cancellation и несколько native transactions проверены. Session/try-locks и two-int overloads не реализованы. | [Контракт](1c/ADVISORY_LOCKS.md), [проверки](VALIDATION.md) |
 | APP-04 | Требуемые службы реализованы; расширения открыты | `92b47bef36`: serial/serial4 через native identity, LTT counters, реальные ANALYZE/fasttrun. APP-15 TEMP/pg_temp + PRESERVE/DELETE и WITHOUT OIDS сохраняются. ON COMMIT DROP, полноценные sequence APIs/ALTER identity, CTAS/full constraints, native GTT/unmanaged LTT в PG services не реализованы. Fasttrun INTEGER return и active-use guard явно ограничены. | [serial](1c/SERIAL_IDENTITY.md), [службы](1c/TEMP_SERVICES.md) |
-| APP-05 | Реальные данные подготовлены; прикладной DML ещё не принят | 194 таблицы/135146 строк перенесены с binary fingerprints; 337 исходных поддержанных индексов + 14 helpers сохраняют NULL uniqueness, все 46 PK. Открыты 16 expression indexes и три циклических defaults; полный DML исходной нагрузки не подтверждается одним переносом. | [Подготовка](1c/PREPARE_INFOBASE.md), [проверки](VALIDATION.md) |
-| APP-06 | Открыто | Сквозной сценарий 1С/Гилёва с зафиксированными версиями, настройками и фактической библиотекой клиента. Открытие базы и нагрузка ещё не приняты. | [Профиль 1С](1c/README.md), P11/P12 в [PLAN](PLAN.md) |
+| APP-05 | Перенос и стартовый DML приняты 13.11.2026; нагрузка открыта | 194 таблицы/135146 строк перенесены с binary fingerprints; 337 исходных поддержанных индексов + 14 helpers сохраняют NULL uniqueness, все 46 PK. Реальный startup прочитал конфигурацию и выполнил UPDATE params, включая binarydata и compact timestamp. Открыты 16 expression indexes и три циклических defaults; DML полного Гилёва не проверен. | [Подготовка](1c/PREPARE_INFOBASE.md), [открытие](1c/OPEN_INFOBASE.md), [проверки](VALIDATION.md) |
+| APP-06 | Открытие принято 13.11.2026; полный прогон не выполнен | На `db0ffc4dd3` настоящий `1cv8c` 8.5.4.1306 открыл Гилёв 2.1.1.48 через `ibsrv`/libpq/TCP PgWire; UI, версии, библиотека и native coexistence зафиксированы в opening-summary.json. Нагрузка не запускалась: требуется толстый ordinary client и изолированный кластер вместо текущего managed-only standalone, без одновременной работы cluster/ibsrv с одной БД. | [Открытие и evidence](1c/OPEN_INFOBASE.md), [PROGRESS](1c/PROGRESS.md), P11/P12 в [PLAN](PLAN.md) |
 | APP-07 | Закрыто, 11.11.2026 | `5478a589d8`: subtype 0 → bytea OID 17 через IBlob, text/binary, общий DataRow budget, lifetime/cleanup. Review без замечаний; независимые libpq/raw/native/unit и scalar codecs PASS. InputCodec/engine/API/dependencies прежние; APP-02/SQL-06 остаются открыты. | [BINARY_BLOB_OUTPUT_TASK](1c/BINARY_BLOB_OUTPUT_TASK.md), [review](VALIDATION.md#11-ноября-2026-архитектурный-review-binary-blob-output) |
 | APP-08 | Закрыто, 11.11.2026 | `c27a3a4c5a`: bytea input → native BLOB через VARCHAR OCTETS/MOVE, ≤65533 bytes, layout конкретного Bind. Review без замечаний; свежая сборка, 9 unit executables, input 125/output 92 libpq checks и raw/native PASS. Production только InputCodec.cpp/h; engine/API прежние. | [BINARY_BLOB_INPUT_TASK](1c/BINARY_BLOB_INPUT_TASK.md), [review](VALIDATION.md#11-ноября-2026-архитектурный-review-bytea-input) |
-| APP-09 | Реализовано в APP-16; ожидает review | Native IBlob материализуется при Execute в application transaction; >65533 bytes, text/binary, mixed/repeated portals, partial failure/cleanup и прежние budgets PASS. | [APP-16](1c/TYPES_AND_EXPRESSIONS_TASK.md), [приёмка](VALIDATION.md#12-ноября-2026-app-16-типы-и-выражения) |
+| APP-09 | Поддержанный профиль принят 13.11.2026 | Native IBlob при Execute в application transaction: >65533 bytes, text/binary, mixed/repeated portals, partial failure/cleanup и прежние budgets PASS. При настоящем переносе проверены 564155 bytea-ячеек, 26573030 байт, максимум 347472; чтение конфигурации и запись binarydata реальным 1С startup завершились открытием UI. | [APP-16](1c/TYPES_AND_EXPRESSIONS_TASK.md), [подготовка](1c/PREPARE_INFOBASE.md), [открытие](1c/OPEN_INFOBASE.md) |
 | APP-10 | Закрыто, 11.11.2026 | `5bbdaa763d`: private namespace IDs в PGWIRE_COMPAT, одноразовый SQL installer, sequence/read-only view/definer hook. Review без замечаний, независимые native/libpq, права, rollback, concurrency/restart PASS. Native DDL под user savepoint запрещён (0A000): refusal/recovery проверены, положительный schema-DDL undo через ROLLBACK TO не заявлен. C++/API прежние; APP-01 и selected04 не закрыты. | [NAMESPACE_REGISTRY_TASK](1c/NAMESPACE_REGISTRY_TASK.md), [review](VALIDATION.md#11-ноября-2026-архитектурный-review-namespace-registry) |
 | APP-11 | Закрыто, 11.11.2026 | `a3e3c80123`: SQL-only PG_NAMESPACE над APP-10, точные IDs/native имена, read-only/atomic install. Review без замечаний; независимый PASS: 6 групп установки, 4 native/libpq группы, 128 results и normal shutdown. Native BIGINT/VARCHAR, wire20/1043; PG oid/name/regnamespace и nspowner/nspacl не добавлены. | [NAMESPACE_CATALOG_TASK](1c/NAMESPACE_CATALOG_TASK.md), [review](VALIDATION.md#11-ноября-2026-архитектурный-review-публичного-namespace-catalog) |
 | APP-12 | Закрыто, 11.11.2026 | `13f64d0e00`: SQL-only PG_CLASS для schema-level persistent tables/views, native ID+1, JOIN PG_NAMESPACE, wire20/1043/20/1043. Review без замечаний; независимый PASS: 5 групп установки, 4 native/libpq группы, 228 results и normal shutdown. Reuse допустим, restore не проверен; полный catalog/visibility/temp и selected04/10/11 открыты. | [CLASS_CATALOG_TASK](1c/CLASS_CATALOG_TASK.md), [review](VALIDATION.md#11-ноября-2026-архитектурный-review-pg_class) |
