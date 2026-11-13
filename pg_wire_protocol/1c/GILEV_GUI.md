@@ -35,6 +35,23 @@ working processes use `12560:12589` and RAS monitoring uses 12555. The latter tw
 defaults can be overridden by `process_port_range` and `monitor_port` in the
 same JSON. Other endpoints and the infobase name come from that JSON.
 
+To start only the services and select the base yourself in the normal 1C list:
+
+```sh
+python3 pg_wire_protocol/1c/run_gilev.py start --no-client \
+  --stand-dir /home/aleksey/dev/1c/firebird-gilev
+```
+
+This does not require DISPLAY or open a client. `status` tracks only clients
+started by this script, not those opened manually from the 1C list.
+
+For the prepared manual run on 13 November 2026, the stand uses the verified
+Release binaries with `AuditTraceConfigFile` empty. The existing base is listed
+as **Гилёв (Firebird)** in the user's 1C launcher. Its settings select the
+64-bit thick client 8.5.4.1306 and `/RunModeOrdinaryApplication`. Existing list
+entries were preserved; no database or benchmark was started from that list.
+The earlier scored run in GILEV_RUN.md used tracing and remains historical.
+
 The GUI connects to `127.0.0.1:12541/GilevFirebird`. Start the benchmark yourself
 using its normal GUI controls. Opening the client does not click the test button
 or submit results publicly. Successful opening is separate from completion of

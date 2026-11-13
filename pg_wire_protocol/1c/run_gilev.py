@@ -145,6 +145,8 @@ def run(args):
                     '127.0.0.1:' + str(config['cluster_port']) + '/' + config['infobase'],
                     '/RunModeOrdinaryApplication', '/AppAutoCheckVersion-', '/L', 'ru',
                     '/Out', str(stand / 'logs/client-out.log')], [])]
+    if args.action == 'start' and args.no_client:
+        commands = commands[:-1]
     state_path = stand / 'launcher-state.json'
     # status creates no files and does not open database/network connections.
     lock = None
@@ -170,7 +172,7 @@ def run(args):
 
         if not (stand / 'cluster/1cv8wsrv.lst').is_file() or not Path(config['database']).is_file():
             raise RuntimeError('Existing cluster registry and database are required; this tool does not provision them')
-        if not records['client'] and not os.environ.get('DISPLAY'):
+        if 'client' in records and not records['client'] and not os.environ.get('DISPLAY'):
             raise RuntimeError('DISPLAY is required to open the thick client GUI')
         for name, command, ports in commands:
             if not os.access(command[0], os.X_OK):
@@ -230,7 +232,12 @@ def main():
     parser.add_argument('action', choices=('start', 'status', 'stop'))
     parser.add_argument('--stand-dir', type=Path, required=True)
     parser.add_argument('--one-c-dir', type=Path, help='Override connection.json one_c_dir')
-    return run(parser.parse_args())
+    parser.add_argument('--no-client', action='store_true',
+                        help='With start, run services without opening the thick client')
+    args = parser.parse_args()
+    if args.no_client and args.action != 'start':
+        parser.error('--no-client is only valid with start')
+    return run(args)
 
 
 if __name__ == '__main__':
