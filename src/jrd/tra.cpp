@@ -4203,6 +4203,12 @@ void jrd_tra::checkBlob(thread_db* tdbb, const bid* blob_id, jrd_fld* fld, bool 
 		auto* blobRelation = MetadataCache::getPerm<Cached::Relation>(tdbb, rel_id, CacheFlag::AUTOCREATE);
 		if (blobRelation)
 		{
+			// LTT metadata lookup resolves only this attachment's own relation.
+			// Such relations have no persistent security class; their BLOBs use
+			// the same attachment-local ownership as their rows and page space.
+			if (blobRelation->isLTT())
+				return;
+
 			auto security_name = (fld && fld->fld_security_name.hasData()) ?
 				fld->fld_security_name : blobRelation->getSecurityName().object;
 			fb_assert(security_name.hasData());

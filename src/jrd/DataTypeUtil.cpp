@@ -49,6 +49,11 @@ SSHORT DataTypeUtilBase::getResultBlobSubType(const dsc* value1, const dsc* valu
 	if (value2->isUnknown())
 		return subType1;
 
+	if (value1->isBytea() || value2->isBytea())
+		return isc_blob_bytea;
+	if (value1->isPgString() || value2->isPgString())
+		return getResultTextType(value1, value2) == TTypeId(CS_PG_MCHAR) ? isc_blob_pg_mchar : isc_blob_text;
+
 	if (subType2 == isc_blob_untyped)	// binary
 		return subType2;
 
@@ -58,6 +63,11 @@ SSHORT DataTypeUtilBase::getResultBlobSubType(const dsc* value1, const dsc* valu
 
 TTypeId DataTypeUtilBase::getResultTextType(const dsc* value1, const dsc* value2)
 {
+	if (value1->getCharSet() == CS_PG_MVARCHAR || value2->getCharSet() == CS_PG_MVARCHAR)
+		return TTypeId(CS_PG_MVARCHAR);
+	if (value1->isPgString() || value2->isPgString())
+		return value1->isPgString() ? value1->getTextType() : value2->getTextType();
+
 	const auto cs1 = value1->getCharSet();
 	const auto cs2 = value2->getCharSet();
 
@@ -263,7 +273,7 @@ void DataTypeUtilBase::makeConcatenate(dsc* result, const dsc* value1, const dsc
 		result->dsc_dtype = dtype_dbkey;
 		result->dsc_length = value1->dsc_length + value2->dsc_length;
 	}
-	else if (value1->isBlob() || value2->isBlob())
+	else if (value1->isBlob() || value2->isBlob() || value1->isPgString() || value2->isPgString())
 	{
 		result->dsc_dtype = dtype_blob;
 		result->dsc_length = sizeof(ISC_QUAD);
@@ -294,11 +304,12 @@ void DataTypeUtilBase::makeSubstr(dsc* result, const dsc* value, const dsc* offs
 		return;
 	}
 
-	if (value->isBlob())
+	if (value->isBlob() || value->isPgString())
 	{
 		result->dsc_dtype = dtype_blob;
 		result->dsc_length = sizeof(ISC_QUAD);
-		result->setBlobSubType(value->getBlobSubType());
+		result->setBlobSubType(value->isPgString() ?
+			(value->getCharSet() == CS_PG_MCHAR ? isc_blob_pg_mchar : isc_blob_text) : value->getBlobSubType());
 	}
 	else
 	{

@@ -18,6 +18,7 @@
 #include <cstdio>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <stdexcept>
 
 using namespace Firebird;
@@ -219,42 +220,119 @@ void text()
 	require(codec.metadata() == originalMetadata, "Scalar Bind unnecessarily rebuilt metadata");
 }
 
+// ABI probes exercise deferred creation, consuming close and partial-write cancellation.
+struct WriteBlob : IBlob
+{
+	WriteBlob() : IBlob(DoNotInherit())
+	{
+		table.version = VERSION;
+		table.release = [](IReferenceCounted* self) noexcept
+			{ auto& b = *static_cast<WriteBlob*>(self); ++b.releases; b.open = false; return 0; };
+		table.putSegment = [](IBlob* self, IStatus* status, unsigned size, const void* data) noexcept
+		{
+			auto& b = *static_cast<WriteBlob*>(self);
+			if (b.failWrite)
+			{
+				const ISC_STATUS error[] = {isc_arg_gds, isc_io_error, isc_arg_end};
+				status->setErrors(error); return;
+			}
+			b.bytes.append(static_cast<const char*>(data), size);
+		};
+		table.close = [](IBlob* self, IStatus*) noexcept
+			{ auto& b = *static_cast<WriteBlob*>(self); ++b.closes; b.open = false; };
+		table.cancel = [](IBlob* self, IStatus*) noexcept
+			{ auto& b = *static_cast<WriteBlob*>(self); ++b.cancels; b.open = false; };
+		cloopVTable = &table;
+	}
+	VTable table{};
+	std::string bytes;
+	unsigned closes = 0, cancels = 0, releases = 0;
+	bool open = true, failWrite = false;
+};
+struct BlobTransaction : ITransaction
+{
+	BlobTransaction() : ITransaction(DoNotInherit()) {}
+};
+struct BlobWrites : IAttachment
+{
+	BlobWrites() : IAttachment(DoNotInherit())
+	{
+		table.version = VERSION;
+		table.createBlob = [](IAttachment* self, IStatus*, ITransaction* transaction,
+			ISC_QUAD* id, unsigned bpbLength, const unsigned char*) noexcept -> IBlob*
+		{
+			auto& a = *static_cast<BlobWrites*>(self);
+			a.wrongContext |= transaction != &a.transaction || bpbLength != 0;
+			a.blobs.push_back(std::make_unique<WriteBlob>());
+			a.blobs.back()->failWrite = a.blobs.size() == a.failAt;
+			*id = {0, static_cast<ISC_ULONG>(a.blobs.size())};
+			return a.blobs.back().get();
+		};
+		cloopVTable = &table;
+	}
+	void run(InputCodec& codec, std::vector<unsigned char>& buffer)
+	{
+		blobs.clear();
+		codec.materialize(this, &transaction, buffer);
+		require(!wrongContext, "BLOB escaped the supplied application transaction");
+		for (const auto& b : blobs)
+			require(!b->open && b->closes == 1 && !b->cancels && !b->releases,
+				"BLOB consuming close/release differs");
+	}
+	std::string value(const InputCodec& codec, const std::vector<unsigned char>& buffer, unsigned i)
+	{
+		FbLocalStatus status;
+		ISC_QUAD id;
+		std::memcpy(&id, buffer.data() + codec.metadata()->getOffset(&status, i), sizeof(id));
+		check(&status);
+		require(id.gds_quad_low && id.gds_quad_low <= blobs.size(), "Bad materialized ID");
+		return blobs[id.gds_quad_low - 1]->bytes;
+	}
+	VTable table{};
+	BlobTransaction transaction;
+	std::vector<std::unique_ptr<WriteBlob>> blobs;
+	unsigned failAt = 0;
+	bool wrongContext = false;
+};
+
 void blobs()
 {
 	auto metadata = describe({{SQL_LONG, 4}, {SQL_BLOB, sizeof(ISC_QUAD)}, {SQL_SHORT, 2},
 		{SQL_BLOB, sizeof(ISC_QUAD)}});
 	InputCodec codec(metadata, {0, 17});
+	BlobWrites writes;
 	require(codec.parameterTypes() == std::vector<std::uint32_t>({23, 17, 21, 17}), "BLOB OIDs differ");
 	expectError([&] { InputCodec other(metadata, {0, 25}); }, "0A000");
 	FbLocalStatus status;
-	require(codec.metadata()->getType(&status, 1) == SQL_VARYING &&
-		codec.metadata()->getLength(&status, 1) == 0 && codec.metadata()->getCharSet(&status, 1) == 1 &&
+	require(codec.metadata()->getType(&status, 1) == SQL_BLOB &&
+		codec.metadata()->getLength(&status, 1) == sizeof(ISC_QUAD) &&
 		codec.metadata()->getSubType(&status, 1) == 0 && codec.metadata()->getScale(&status, 1) == 0,
-		"BLOB did not start with an empty OCTETS slot");
+		"BLOB input must retain native ID layout");
 	check(&status);
 	std::string allBytes;
 	for (unsigned i = 0; i < 256; ++i)
 		allBytes.push_back(i);
 	std::vector<unsigned char> buffer;
-	for (const auto& input : std::vector<std::optional<std::string>>{std::string(65533, '\xff'),
-		std::nullopt, "", allBytes, "x", std::string(65533, '\0')})
+	for (const auto& input : std::vector<std::optional<std::string>>{std::string(150001, '\xff'),
+		std::nullopt, "", allBytes, "x", std::string(150001, '\0')})
 	{
 		buffer = codec.encode({"123", input, "-7", "\\x00FF"}, {0, 1, 0, 0});
+		writes.run(codec, buffer);
 		require(buffer.size() == codec.messageLength() &&
-			codec.metadata()->getLength(&status, 1) == (input ? input->size() : 0), "BLOB layout retained old capacity");
+			codec.metadata()->getLength(&status, 1) == sizeof(ISC_QUAD), "BLOB layout retained old capacity");
 		check(&status);
 		require(value<ISC_LONG>(codec, buffer, 0) == 123 && value<ISC_SHORT>(codec, buffer, 2) == -7,
 			"Scalar neighbours changed after BLOB resize");
 		require(value<ISC_SHORT>(codec, buffer, 1, true) == (input ? 0 : -1), "BLOB NULL differs from empty");
 		if (input)
-			require(textValue(codec, buffer, 1) == *input, "Binary BLOB bytes changed");
-		require(textValue(codec, buffer, 3) == std::string("\0\xff", 2), "Other BLOB slot changed");
+			require(writes.value(codec, buffer, 1) == *input, "Binary BLOB bytes changed");
+		require(writes.value(codec, buffer, 3) == std::string("\0\xff", 2), "Other BLOB slot changed");
 	}
 	const auto oldLength = codec.messageLength();
 	auto* oldMetadata = codec.metadata();
 	expectError([&] { codec.encode({"invalid", "short", "0", ""}); }, "22P02");
 	require(codec.metadata() == oldMetadata && codec.messageLength() == oldLength &&
-		textValue(codec, buffer, 1) == std::string(65533, '\0'), "Failed encode changed the retained layout");
+		writes.value(codec, buffer, 1) == std::string(150001, '\0'), "Failed encode changed the retained layout");
 	InputCodec single(describe({{SQL_BLOB, sizeof(ISC_QUAD)}}));
 	for (const auto& test : std::vector<std::pair<std::string, std::string>>{
 		{"", ""}, {"\\x", ""}, {"\\x \t\r\n", ""}, {"\\x 00 aB\tCd\nEf\r ", std::string("\0\xab\xcd\xef", 4)},
@@ -262,7 +340,8 @@ void blobs()
 		{" \\\\x41", " \\x41"}, {"\\x5c303030", "\\000"}})
 	{
 		buffer = single.encode({test.first});
-		require(textValue(single, buffer, 0) == test.second, "Text bytea decoding differs");
+		writes.run(single, buffer);
+		require(writes.value(single, buffer, 0) == test.second, "Text bytea decoding differs");
 	}
 	for (const auto text : {"\\x0", "\\x 0 ", "\\xgg", "\\x0 0", "\\x00\v", "\\x\f00", "\\x00z0"})
 		expectError([&] { single.encode({text}); }, "22023");
@@ -270,16 +349,15 @@ void blobs()
 		expectError([&] { single.encode({text}); }, "22P02");
 	for (const auto& text : {std::string("a\0b", 3), std::string("\xc0\x80", 2)})
 		expectError([&] { single.encode({text}); }, "22021");
-	for (const unsigned size : {0, 1, 32765, 32766, 40444, 65533})
+	for (const unsigned size : {0, 1, 32765, 32766, 40444, 65533, 65534, 150001})
 	{
 		buffer = single.encode({std::string(size, '\xff')}, {1});
-		require(textValue(single, buffer, 0) == std::string(size, '\xff'), "Binary boundary changed bytes");
+		writes.run(single, buffer);
+		require(writes.value(single, buffer, 0) == std::string(size, '\xff'), "Binary boundary changed bytes");
 		buffer = single.encode({"\\x" + std::string(size * 2, 'f')});
-		require(textValue(single, buffer, 0) == std::string(size, '\xff'), "Hex boundary changed bytes");
+		writes.run(single, buffer);
+		require(writes.value(single, buffer, 0) == std::string(size, '\xff'), "Hex boundary changed bytes");
 	}
-	expectError([&] { single.encode({std::string(65534, 'a')}, {1}); }, "0A000");
-	expectError([&] { single.encode({"\\x" + std::string(65534 * 2, 'a')}); }, "0A000");
-	expectError([&] { single.encode({std::string(65534, 'a')}); }, "0A000");
 
 	// 68 independently sized BLOBs amongst 92 fields must not reserve 68 maximum slots.
 	std::vector<Spec> specs;
@@ -292,28 +370,46 @@ void blobs()
 	}
 	InputCodec mixed(describe(specs));
 	buffer = mixed.encode(inputs);
+	writes.run(mixed, buffer);
 	require(buffer.size() < 2048, "Short BLOBs reserved maximum slots");
 	for (unsigned i = 0; i < inputs.size(); ++i)
 	{
 		if (specs[i].type == SQL_LONG)
 			require(value<ISC_LONG>(mixed, buffer, i) == 42, "Mixed scalar differs");
 		else if (inputs[i])
-			require(textValue(mixed, buffer, i) == *inputs[i], "Mixed BLOB differs");
+			require(writes.value(mixed, buffer, i) == *inputs[i], "Mixed BLOB differs");
 		else
 			require(value<ISC_SHORT>(mixed, buffer, i, true) == -1, "Mixed BLOB NULL differs");
 	}
-	// Include prefixes, NULL indicators and scalar alignment in the 1 MiB limit.
+	// Payload plus the native message retains the 1 MiB aggregate budget.
 	specs.assign(16, {SQL_BLOB, sizeof(ISC_QUAD)});
 	specs.push_back({SQL_SHORT, 2});
 	InputCodec boundary(describe(specs));
-	inputs.assign(16, std::string(65532, 'a'));
-	inputs[15] = std::string(65528, 'b');
+	inputs.assign(16, std::string(65000, 'a'));
+	inputs[15] = std::string(1024 * 1024 - boundary.messageLength() - 15 * 65000, 'b');
 	inputs.push_back("1");
 	buffer = boundary.encode(inputs);
-	require(buffer.size() == 1024 * 1024 && value<ISC_SHORT>(boundary, buffer, 16) == 1,
-		"Exact native message boundary differs");
-	inputs[15] = std::string(65530, 'b');
+	writes.run(boundary, buffer);
+	require(buffer.size() < 1024 && value<ISC_SHORT>(boundary, buffer, 16) == 1,
+		"Payload was copied into the native scalar message");
+	*inputs[15] += 'b';
 	expectError([&] { boundary.encode(inputs); }, "0A000");
+
+	InputCodec partial(describe({{SQL_BLOB,8},{SQL_BLOB,8}}));
+	buffer = partial.encode({std::string(150001,'x'), "second"}, {1});
+	BlobWrites failing;
+	require(failing.blobs.empty(), "Bind created a native BLOB");
+	failing.failAt = 2;
+	bool caught = false;
+	try { partial.materialize(&failing, &failing.transaction, buffer); }
+	catch (const status_exception&) { caught = true; }
+	require(caught && failing.blobs.size() == 2, "Partial materialization did not fail");
+	for (const auto& blob : failing.blobs)
+		require(blob->cancels == 1 && !blob->open && !blob->closes && !blob->releases,
+			"Partial materialization leaked a BLOB or released it twice");
+	writes.run(partial, buffer);
+	require(writes.value(partial,buffer,0)==std::string(150001,'x') &&
+		writes.value(partial,buffer,1)=="second", "Failed materialization changed Bind bytes");
 }
 
 void metadataValidation()

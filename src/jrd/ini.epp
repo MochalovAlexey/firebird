@@ -664,7 +664,7 @@ static void store_default_pub(thread_db*, const MetaName&);
 static void store_generator(thread_db*, const gen*, AutoRequest&, NonRelationSecurity&);
 static void store_global_field(thread_db*, const gfld*, AutoRequest&, NonRelationSecurity&);
 static void store_indices(thread_db*, USHORT = 0);
-static void store_intlnames(thread_db*, NonRelationSecurity&);
+static void store_intlnames(thread_db*, NonRelationSecurity&, USHORT = 0);
 static void store_relation(thread_db*, int, const char*, int, int, AutoRequest&, RelationSecurity&);
 static void store_relation_field(thread_db*, int, const char*, const char*, const char*, int, AutoRequest&);
 static void store_packages(thread_db*, NonRelationSecurity&, USHORT = 0);
@@ -1351,12 +1351,27 @@ void INI_upgrade(thread_db* tdbb)
 	context = "packages";
 	store_packages(tdbb, nonRelSec2, odsVersion);
 
-	// There are no new built-in charsets and collations introduced in ODS 13.1.
-	// But if it happens in some future minor ODS, the corresponding INTL structures
-	// should have the ODS field added and here we need code that conditionally adds
-	// the missing charsets/collations.
-	//
-	// The same about the new types being introduced in minor ODS versions.
+	if (odsVersion < ODS_14_1)
+	{
+		context = "profile character sets";
+		store_intlnames(tdbb, nonRelSec2, CS_PG_MCHAR);
+		handle.reset();
+		for (const auto* charSet = IntlManager::defaultCharSets; charSet->name; ++charSet)
+		{
+			if (charSet->id < CS_PG_MCHAR)
+				continue;
+			STORE(REQUEST_HANDLE handle TRANSACTION_HANDLE transaction) X IN RDB$TYPES
+			{
+				PAD(names[nam_charset_name], X.RDB$FIELD_NAME);
+				PAD(charSet->name, X.RDB$TYPE_NAME);
+				X.RDB$TYPE = charSet->id;
+				X.RDB$SYSTEM_FLAG = RDB_system;
+				X.RDB$SYSTEM_FLAG.NULL = FALSE;
+			}
+			END_STORE
+		}
+
+	}
 
 	updateFormats.make(tdbb);
 
@@ -1778,7 +1793,7 @@ static void store_indices(thread_db* tdbb, USHORT odsVersion)
 }
 
 
-static void store_intlnames(thread_db* tdbb, NonRelationSecurity& security)
+static void store_intlnames(thread_db* tdbb, NonRelationSecurity& security, USHORT firstCharSet)
 {
 	const auto attachment = tdbb->getAttachment();
 	const auto transaction = tdbb->getTransaction();
@@ -1790,6 +1805,7 @@ static void store_intlnames(thread_db* tdbb, NonRelationSecurity& security)
 	for (const IntlManager::CharSetDefinition* charSet = IntlManager::defaultCharSets;
 		 charSet->name; ++charSet)
 	{
+		if (charSet->id < firstCharSet) continue;
 		const auto securityClass = security.storeSecurityClass(tdbb);
 
 		STORE(REQUEST_HANDLE handle TRANSACTION_HANDLE transaction)
@@ -1822,6 +1838,7 @@ static void store_intlnames(thread_db* tdbb, NonRelationSecurity& security)
 	for (const IntlManager::CollationDefinition* collation = IntlManager::defaultCollations;
 		collation->name; ++collation)
 	{
+		if (collation->charSetId < firstCharSet) continue;
 		const auto securityClass = security.storeSecurityClass(tdbb);
 
 		STORE(REQUEST_HANDLE handle TRANSACTION_HANDLE transaction)

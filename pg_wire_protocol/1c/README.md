@@ -1,18 +1,25 @@
 # Записанный профиль 1С: этапы совместимости
 
 
-12 ноября: **APP-15 реализован, оставлен для review без коммита** поверх принятого
+12 ноября: **APP-15 принят в `7799cd3a54` после review и независимой приёмки** поверх принятого
 NAT-06 (`516f55bbb5`) и P2 APP-14 (`11dee63d2a`). PG TEMP использует native LTT:
 PRESERVE/DELETE, DML/индексы, rollback/savepoints, свой pg_temp namespace и живые
 каталоги. Поиск SELECT и visibility согласован по temp/path/USAGE/$user.
 [Контракт](../COMPATIBILITY.md#app-15-временные-отношения) · [проверки](../VALIDATION.md#12-ноября-2026-app-15-полный-цикл-поддержанных-pg-temporary-tables).
-Типы 1С, regnamespace, ON COMMIT DROP и реальная 1С/Гилёв остаются открытыми.
+[APP-16](TYPES_AND_EXPRESSIONS_TASK.md) реализован; локальная приёмка PASS, изменения ожидают review.
+Работают bytea/casts/точные индексы/large Bind, mchar/mvarchar, BINROWVER/BOOL_OR
+и regnamespace. Проверены исходные selected04/07/08/12/17/18/24, операции профиля,
+metadata, lifecycle, fresh/APP-15 upgrade и регрессии. Нужен runtime с ODS 14.1.
+[Результаты и hashes](../VALIDATION.md#12-ноября-2026-app-16-типы-и-выражения) ·
+[контракт](../COMPATIBILITY.md#app-16-типы-и-выражения-1с).
+ON COMMIT DROP, serial/defaults, оставшиеся каталоги, locks и реальная 1С/Гилёв
+сохраняются в backlog. Будущая изоляция учтена в [EXTENSION_POINTS](../EXTENSION_POINTS.md).
 
 ## Общая установка SQL совместимости
 
-[install_compat.py](install_compat.py) устанавливает все семь текущих SQL-скриптов
+[install_compat.py](install_compat.py) устанавливает все восемь текущих SQL-скриптов
 в порядке зависимостей на указанную существующую базу. Нужны Python 3 и native
-`isql` из этого fork с поддержкой APP-15; запускать владельцем/администратором
+`isql` из этого fork с поддержкой APP-16 / ODS 14.1; запускать владельцем/администратором
 без конкурентного DDL. Например, через родной сетевой порт Firebird:
 
 ```sh
@@ -28,7 +35,7 @@ python3 pg_wire_protocol/1c/install_compat.py \
 самого установщика, поэтому запуск не зависит от текущего каталога.
 
 Порядок: namespace registry → compat.sql → namespace catalog → class catalog →
-lowercase PG names → relation visibility → temporary relations. Каждый файл выполняется native isql
+lowercase PG names → relation visibility → temporary relations → types/expressions. Каждый файл выполняется native isql
 с BAIL ON, отключённым AUTODDL, UTF8 и client dialect 3. При первой ошибке следующие
 файлы не запускаются; сообщение содержит имя неуспешного шага и ненулевой exit code.
 **Это первоначальная установка, не повторяемая миграция:** повтор полного набора
@@ -38,13 +45,29 @@ lowercase PG names → relation visibility → temporary relations. Каждый
 Автоматического пропуска завершённых этапов,
 отката всего пакета или исправления частичной установки нет.
 
+Для принятой базы APP-15 используется отдельный путь обновления (owner/admin,
+без concurrent DDL):
+
+```sh
+gfix -upgrade DATABASE_ALIAS
+python3 pg_wire_protocol/1c/install_compat.py --isql PATH_TO_NEW_ISQL \
+  --database DATABASE_ALIAS --upgrade-from-app15
+```
+
+Credentials передаются через ISC_USER/ISC_PASSWORD. Штатный gfix обновляет ODS
+14.0 → 14.1 и intl metadata; это отдельная завершённая native операция. Последующий
+восьмой SQL-скрипт атомарно добавляет функции APP-16 и grants. При его ошибке старый
+профиль, данные и IDs сохраняются, ODS обратно не понижается. Повтор/коллизии дают
+отказ; старый runtime отвергает ODS 14.1. Новые базы получают новую ODS при CREATE.
+[Типы, форматы и ограничения](../COMPATIBILITY.md#app-16-типы-и-выражения-1с).
+
 При добавлении нового SQL installer включать его в список SCRIPTS общего
 установщика и проверять порядок зависимостей. Отдельные скрипты ниже остаются
 доступны для явно выбранного этапа установки.
 
 ## APP-15: временные отношения
 
-Реализован весь согласованный профиль; рабочий diff оставлен для review. Native LTT
+Профиль принят в `7799cd3a54` после review и независимой приёмки. Native LTT
 обеспечивают PG TEMP/pg_temp, PRESERVE/DELETE, DML/индексы, rollback/savepoints и
 изоляцию сессий. Живые pg_class/pg_namespace/pg_my_temp_schema и visibility читают
 тот же attachment state. `_` names, effective relation path, USAGE/$user и cache
@@ -63,8 +86,8 @@ IDs/grants сохраняются; sequence gaps после rollback допус�
 
 [Полный контракт и права allocator](../COMPATIBILITY.md#app-15-временные-отношения),
 [приёмка и hashes](../VALIDATION.md#12-ноября-2026-app-15-полный-цикл-поддержанных-pg-temporary-tables).
-ON COMMIT DROP, regnamespace, типы 1С/serial/defaults, ANALYZE/fasttrun и исходные
-selected04/12/13 остаются открытыми. Отдельно найден прежний assertion persistent
+APP-16 добавляет типы/regnamespace и проверяет selected04/12. ON COMMIT DROP,
+serial/defaults, ANALYZE/fasttrun и selected13 остаются открытыми. Отдельно найден прежний assertion persistent
 view без FROM (NAT-07); сохранён reproducer, исправление не включено в APP-15.
 
 ## APP-13: имена и установка lowercase профиля
@@ -368,6 +391,9 @@ selected 04/17 ещё требуют каталогов/custom types; их по�
 
 ## Binary BLOB как bytea: только output
 
+Ниже исторический контракт APP-07 для BLOB/0. APP-16 добавляет SQL bytea и profile
+строки; актуальный общий контракт указан в начале документа.
+
 По [BINARY_BLOB_OUTPUT_TASK](BINARY_BLOB_OUTPUT_TASK.md), 11 ноября 2026 года,
 ResultCodec принимает только native SQL_BLOB subtype 0 (BINARY), с корректным
 размером ISC_QUAD и прежними проверками offsets/null offsets/message length.
@@ -455,8 +481,8 @@ review и повторную целевую приёмку, см. VALIDATION.
 
 Реализована [выдача binary BLOB как bytea](BINARY_BLOB_OUTPUT_TASK.md), APP-07:
 ResultCodec + штатный IBlob, text/binary output и общий предел DataRow. Ревизия
-`5478a589d8` прошла review и повторную целевую приёмку; APP-07 закрыт. Большие
-входные BLOB, bytea grammar и полный APP-02 остаются открытыми, как и каталоговый APP-01.
+`5478a589d8` прошла review и повторную целевую приёмку; APP-07 закрыт. APP-16 добавляет большие
+входные BLOB, bytea grammar и рабочий профиль APP-02; полный catalog APP-01 открыт.
 
 Реализован [bytea input через native VARCHAR OCTETS](BINARY_BLOB_INPUT_TASK.md),
 APP-08: text hex/escape и raw binary до 65533 decoded bytes на параметр,
@@ -464,8 +490,8 @@ physical layout по фактическим длинам Bind. Engine созда
 при Execute; новых handles/transaction lifecycle в плагине не требуется.
 Проверены libpq/raw/native readback, selected23 на синтетической PUBLIC.FILES
 и 68 BLOB среди 92 mixed параметров; `c27a3a4c5a` прошёл review и независимую
-приёмку на свежей сборке, APP-08 закрыт. Большие значения
-остаются APP-09; исходные SQL bytea types/casts и APP-05 не закрываются.
+приёмку на свежей сборке, APP-08 закрыт. APP-16 реализует большие значения
+и исходные SQL bytea types/casts; настоящая схема/данные APP-05 не приняты.
 
 Срез [фиксированной диагностики](FIXED_DIAGNOSTICS_TASK.md) реализован через
 существующий SetPgSessionNode: только `escape_string_warning=off` и
@@ -477,15 +503,15 @@ physical layout по фактическим длинам Bind. Engine созда
 | 1. Начало сессии | SELECT без FROM, ограниченная identity-функция, последовательные скрипты и все семь startup SET принимаются; реальные эффекты enable_mergejoin, cpu_operator_cost и lock_timeout отложены |
 | 2. SQL и параметры | Simple Query выполняет скрипты совместимого SQL; PG BEGIN без опций и последовательные типизированные `$n` поддержаны; postfix `::` добавлен для native builtin types; literal LIMIT 0…2147483647 поддержан; произвольная нумерация и общий LIMIT/OFFSET ещё не реализованы |
 | 3. Открытие базы | APP-12 даёт pg_class для постоянных таблиц/views; полный catalog, pg_database/visibility и служебные таблицы 1С ещё требуют реализации и настоящих данных |
-| 4. Типы и функции | Binary BLOB output выдаётся как bytea; input до 65533 decoded bytes поддержан. Большие input и SQL bytea type/casts/storage/index semantics не добавлены. mchar/mvarchar, regnamespace и BINROWVER остаются открытыми |
+| 4. Типы и функции | APP-16 реализован: bytea/indexes/large Bind, mchar/mvarchar, regnamespace, BINROWVER/BOOL_OR и требуемые операции. Локальный PASS, ожидает review; полная типовая система PostgreSQL и реальная база не заявлены |
 | 5. Транзакции/конкуренция | PG BEGIN без опций использует реальные READ CONSISTENCY транзакции; native controls сохраняются; advisory locks и PG timeout semantics ещё не реализованы |
 | 6. Временные объекты/нагрузка | PG TEMP поддержан в профиле APP-15; serial4, ANALYZE и fasttrun_ext ещё не реализованы |
 
 Реализован [APP-10: внутренний namespace registry](NAMESPACE_REGISTRY_TASK.md),
 ревизия `5bbdaa763d` прошла review и независимую приёмку, см. VALIDATION.
 Устанавливаемые SQL table/sequence/view/DDL trigger поддерживают
-устойчивые IDs точных native имён; C++/parser/API не меняются. Это основа будущих
-каталогов, selected04 ещё не выполняется. Native DDL под пользовательским savepoint
+устойчивые IDs точных native имён; C++/parser/API не меняются. Эта основа использована
+последующими каталогами; selected04 прошёл в APP-16. Native DDL под пользовательским savepoint
 запрещён (0A000); проверены отказ и ROLLBACK TO recovery без изменения registry.
 
 Реализован [APP-11: публичный pg_namespace](NAMESPACE_CATALOG_TASK.md);
@@ -687,6 +713,10 @@ search-path visibility и pg_my_temp_schema остаются APP-01;
 selected04 и APP-06 не приняты. Следующая часть не начинается автоматически.
 
 ## Bytea input: ограниченный APP-08
+
+Исторический контракт APP-08 до APP-16. Сейчас InputCodec материализует native
+IBlob при Execute, принимает значения больше 65533 и сохраняет прежние budgets.
+Предел VARCHAR OCTETS ниже больше не является пределом входного bytea.
 
 InputCodec принимает выведенный engine SQL_BLOB subtype 0, scale 0, ISC_QUAD;
 ParameterDescription — OID 17, Parse hint отсутствующий/0/17. Другой hint —

@@ -29,6 +29,9 @@
  */
 
 #include "firebird.h"
+#include "../jrd/cvt2_proto.h"
+#include "../jrd/Attachment.h"
+#include <algorithm>
 #include <errno.h>
 #include <string.h>
 #include "../jrd/jrd.h"
@@ -204,6 +207,8 @@ Sort::Sort(Database* dbb,
 		for (FB_SIZE_T i = 0; i < keys; i++)
 		{
 			m_description.add(key_description[i]);
+			m_blobKeys |= key_description[i].skd_dtype == SKD_bytea ||
+				key_description[i].skd_dtype == SKD_pg_string;
 		}
 
 		const sort_key_def* p = m_description.end() - 1;
@@ -683,6 +688,7 @@ void Sort::diddleKey(UCHAR* record, bool direction, bool duplicateHandling)
 
 	for (sort_key_def* key = m_description.begin(), *end = m_description.end(); key < end; key++)
 	{
+		if (key->skd_dtype == SKD_bytea || key->skd_dtype == SKD_pg_string) continue;
 		UCHAR* p = record + key->getSkdOffset();
 		SORTP* lwp = (SORTP*) p;
 		USHORT n = key->getSkdLength();
@@ -886,6 +892,7 @@ void Sort::diddleKey(UCHAR* record, bool direction, bool duplicateHandling)
 
 	for (sort_key_def* key = m_description.begin(), *end = m_description.end(); key < end; key++)
 	{
+		if (key->skd_dtype == SKD_bytea || key->skd_dtype == SKD_pg_string) continue;
 		UCHAR* p = (UCHAR*) record + key->getSkdOffset();
 		USHORT* wp = (USHORT*) p;
 		SORTP* lwp = (SORTP*) p;
@@ -1300,7 +1307,10 @@ sort_record* Sort::getMerge(merge_control* merge)
 		//l = m_key_length;
 		l = m_unique_length;
 
-		DO_32_COMPARE(p, q, l);
+		if (m_blobKeys)
+			l = compare(p, q, l) != 0;
+		else
+			DO_32_COMPARE(p, q, l);
 
 		if (l == 0 && m_dup_callback)
 		{
@@ -1323,11 +1333,11 @@ sort_record* Sort::getMerge(merge_control* merge)
 		if (l == 0)
 		{
 			l = m_key_length - m_unique_length;
-			if (l != 0)
+			if (l != 0 && !m_blobKeys)
 				DO_32_COMPARE(p, q, l);
 		}
 
-		if (p[-1] < q[-1])
+		if (m_blobKeys ? compare(p, q, m_key_length) < 0 : p[-1] < q[-1])
 		{
 			record = merge->mrg_record_a;
 			merge->mrg_record_a = NULL;
@@ -2042,6 +2052,39 @@ void Sort::putRun(thread_db* tdbb)
 }
 
 
+int Sort::compare(const SORTP* a, const SORTP* b, ULONG words) const
+{
+	ULONG offset = 0;
+	for (const auto& key : m_description)
+	{
+		if ((key.skd_dtype != SKD_bytea && key.skd_dtype != SKD_pg_string) ||
+			key.getSkdOffset() >= words * sizeof(SORTP))
+			continue;
+		const ULONG at = key.getSkdOffset() / sizeof(SORTP);
+		for (; offset < at; ++offset)
+			if (a[offset] != b[offset]) return a[offset] < b[offset] ? -1 : 1;
+		// Equal references need no I/O. This also covers two NULL keys: their
+		// null flags compared equal above and their zero BLOB IDs must not open.
+		if (memcmp(a + at, b + at, sizeof(ISC_QUAD)) == 0)
+		{
+			offset += sizeof(ISC_QUAD) / sizeof(SORTP);
+			continue;
+		}
+		dsc left, right;
+		const auto subtype = key.skd_dtype == SKD_bytea ? isc_blob_bytea :
+			(key.skd_vary_offset == CS_PG_MCHAR ? isc_blob_pg_mchar : isc_blob_text);
+		const auto textType = key.skd_dtype == SKD_bytea ? ttype_binary : TTypeId(key.skd_vary_offset);
+		left.makeBlob(subtype, textType, (ISC_QUAD*) (a + at));
+		right.makeBlob(subtype, textType, (ISC_QUAD*) (b + at));
+		const int result = CVT2_blob_compare(&left, &right, JRD_get_thread_data()->getAttachment()->att_dec_status);
+		if (result) return key.skd_flags & SKD_descending ? -result : result;
+		offset += sizeof(ISC_QUAD) / sizeof(SORTP);
+	}
+	for (; offset < words; ++offset)
+		if (a[offset] != b[offset]) return a[offset] < b[offset] ? -1 : 1;
+	return 0;
+}
+
 void Sort::sortBuffer(thread_db* tdbb)
 {
 /**************************************
@@ -2052,7 +2095,7 @@ void Sort::sortBuffer(thread_db* tdbb)
  * been requested, detect and handle them.
  *
  **************************************/
-	EngineCheckout cout(tdbb, FB_FUNCTION);
+	EngineCheckout cout(tdbb, FB_FUNCTION, m_blobKeys ? EngineCheckout::AVOID : EngineCheckout::REQUIRED);
 
 	// First, insert a pointer to the high key
 
@@ -2064,11 +2107,19 @@ void Sort::sortBuffer(thread_db* tdbb)
 	SORTP** j = (SORTP**) (m_first_pointer) + 1;
 	const ULONG n = (SORTP**) (m_next_pointer) - j;	// calculate # of records
 
-	quick(n, j, m_longs);
+	if (m_blobKeys)
+	{
+		std::sort(j, j + n, [this](const SORTP* a, const SORTP* b)
+			{ return compare(a, b, m_key_length) < 0; });
+		for (auto p = j; p != j + n; ++p)
+			((SORTP***) (*p))[BACK_OFFSET] = p;
+	}
+	else
+		quick(n, j, m_longs);
 
 	// Scream through and correct any out of order pairs
 	// hvlad: don't compare user keys against high_key
-	while (j < (SORTP**) m_next_pointer - 1)
+	while (!m_blobKeys && j < (SORTP**) m_next_pointer - 1)
 	{
 		SORTP** i = j;
 		j++;
@@ -2107,13 +2158,16 @@ void Sort::sortBuffer(thread_db* tdbb)
 	{
 		SORTP** i = j;
 		j++;
-		if (**i != **j)
+		if (!m_blobKeys && **i != **j)
 			continue;
 		const SORTP* p = *i;
 		const SORTP* q = *j;
 
 		ULONG l = m_unique_length;
-		DO_32_COMPARE(p, q, l);
+		if (m_blobKeys)
+			l = compare(p, q, l) != 0;
+		else
+			DO_32_COMPARE(p, q, l);
 		if (l == 0)
 		{
 			diddleKey((UCHAR*) *i, false, true);
@@ -2393,7 +2447,10 @@ sort_record* PartitionedSort::getMerge()
 		//l = m_key_length;
 		ULONG l = aSort->m_unique_length;
 
-		DO_32_COMPARE(p, q, l);
+		if (aSort->m_blobKeys)
+			l = aSort->compare(p, q, l) != 0;
+		else
+			DO_32_COMPARE(p, q, l);
 
 		if (l == 0 && aSort->m_dup_callback)
 		{
@@ -2418,11 +2475,11 @@ sort_record* PartitionedSort::getMerge()
 		if (l == 0)
 		{
 			l = aSort->m_key_length - aSort->m_unique_length;
-			if (l != 0)
+			if (l != 0 && !aSort->m_blobKeys)
 				DO_32_COMPARE(p, q, l);
 		}
 
-		if (p[-1] < q[-1])
+		if (aSort->m_blobKeys ? aSort->compare(p, q, aSort->m_key_length) < 0 : p[-1] < q[-1])
 		{
 			record = merge->mrg_record_a;
 			merge->mrg_record_a = NULL;

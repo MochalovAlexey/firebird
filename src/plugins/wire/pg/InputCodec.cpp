@@ -13,6 +13,8 @@
 
 #include "firebird.h"
 #include "InputCodec.h"
+#include "StringCodec.h"
+#include "../common/Bytea.h"
 #include "FloatCodec.h"
 #include "NumericCodec.h"
 #include "TemporalCodec.h"
@@ -59,54 +61,15 @@ std::string byteaText(std::string_view text, std::size_t remaining)
 	std::string bytes;
 	const auto append = [&](unsigned char byte)
 	{
-		if (bytes.size() >= MAX_VARYING || bytes.size() >= remaining)
+		if (bytes.size() >= remaining)
 			throw ProtocolError("0A000", "Binary BLOB parameter exceeds supported limits");
 		bytes.push_back(byte);
 	};
-	if (text.size() >= 2 && text[0] == '\\' && text[1] == 'x')
+	decodeBytea(text, append, [](bool hex)
 	{
-		const auto hex = [](char c) -> int
-		{
-			if (c >= '0' && c <= '9') return c - '0';
-			if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-			if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-			return -1;
-		};
-		for (std::size_t i = 2; i < text.size();)
-		{
-			const char c = text[i];
-			if (c == ' ' || c == '\t' || c == '\n' || c == '\r')
-			{
-				++i;
-				continue;
-			}
-			if (i + 1 == text.size() || hex(c) < 0 || hex(text[i + 1]) < 0)
-				throw ProtocolError("22023", "Invalid hexadecimal bytea parameter");
-			append((hex(c) << 4) | hex(text[i + 1]));
-			i += 2;
-		}
-	}
-	else
-	{
-		for (std::size_t i = 0; i < text.size(); ++i)
-		{
-			if (text[i] != '\\')
-				append(text[i]);
-			else if (i + 1 < text.size() && text[i + 1] == '\\')
-			{
-				append('\\');
-				++i;
-			}
-			else if (i + 3 < text.size() && text[i + 1] >= '0' && text[i + 1] <= '3' &&
-				text[i + 2] >= '0' && text[i + 2] <= '7' && text[i + 3] >= '0' && text[i + 3] <= '7')
-			{
-				append((text[i + 1] - '0') * 64 + (text[i + 2] - '0') * 8 + text[i + 3] - '0');
-				i += 3;
-			}
-			else
-				throw ProtocolError("22P02", "Invalid escape in bytea parameter");
-		}
-	}
+		throw ProtocolError(hex ? "22023" : "22P02", hex ?
+			"Invalid hexadecimal bytea parameter" : "Invalid escape in bytea parameter");
+	});
 	return bytes;
 }
 
@@ -262,6 +225,11 @@ InputCodec::InputCodec(IMessageMetadata* logicalMetadata, const std::vector<std:
 		case SQL_LONG:
 		case SQL_INT64:
 		case SQL_INT128:
+			if (type == SQL_INT64 && subtype == 3 && !scale && capacity == sizeof(ISC_INT64))
+			{
+				oid = 4089;
+				break;
+			}
 			if (subtype < 0 || subtype > 2 || scale < (type == SQL_INT128 ? -38 : -18) || scale > 0)
 				throw ProtocolError("0A000", "Exact numeric parameter metadata is not supported");
 			physicalSize = type == SQL_SHORT ? sizeof(ISC_SHORT) :
@@ -293,13 +261,22 @@ InputCodec::InputCodec(IMessageMetadata* logicalMetadata, const std::vector<std:
 			oid = 16;
 			break;
 		case SQL_BLOB:
-			if (subtype || scale)
+			charset = CSetId(logicalMetadata->getCharSet(&status, i));
+			check(&status);
+			if (((subtype && subtype != isc_blob_bytea && subtype != isc_blob_pg_mchar) && !(subtype == isc_blob_text &&
+				(charset == CS_PG_MCHAR || charset == CS_PG_MVARCHAR))) || scale)
 				throw ProtocolError("0A000", "BLOB parameter subtype or scale is not supported");
 			if (capacity != sizeof(ISC_QUAD))
 				invalidMetadata();
-			oid = 17;
-			charset = CS_BINARY;
-			hasBlobs = true;
+			if (subtype == isc_blob_pg_mchar)
+			{
+				charset = CS_PG_MCHAR;
+				builder->setSubType(&status, i, isc_blob_text);
+				check(&status);
+				builder->setCharSet(&status, i, CS_UTF8);
+				check(&status);
+			}
+			oid = charset == CS_PG_MCHAR ? MCHAR_OID : charset == CS_PG_MVARCHAR ? MVARCHAR_OID : 17;
 			break;
 		case SQL_TEXT:
 		case SQL_VARYING:
@@ -310,13 +287,15 @@ InputCodec::InputCodec(IMessageMetadata* logicalMetadata, const std::vector<std:
 			check(&status);
 			charset = CSetId(textType);
 			if (textType > std::numeric_limits<ISC_USHORT>::max() ||
-				(charset != CS_UTF8 && charset != CS_NONE && charset != CS_ASCII))
+				(charset != CS_UTF8 && charset != CS_NONE && charset != CS_ASCII &&
+				charset != CS_PG_MCHAR && charset != CS_PG_MVARCHAR))
 			{
 				throw ProtocolError("0A000", "Parameter character set is not supported");
 			}
 			if (capacity > MAX_VARYING)
 				throw ProtocolError("0A000", "Text parameter exceeds supported limits");
-			oid = type == SQL_TEXT ? 1042 : 1043;
+			oid = charset == CS_PG_MCHAR ? MCHAR_OID : charset == CS_PG_MVARCHAR ? MVARCHAR_OID :
+				type == SQL_TEXT ? 1042 : 1043;
 			if (type == SQL_TEXT)
 			{
 				// Let the engine apply CHAR padding/conversion to the actual input length.
@@ -333,7 +312,7 @@ InputCodec::InputCodec(IMessageMetadata* logicalMetadata, const std::vector<std:
 		if (i < parseTypes.size() && parseTypes[i])
 		{
 			const auto supplied = parseTypes[i];
-			const bool compatibleText = (type == SQL_TEXT || type == SQL_VARYING) &&
+			const bool compatibleText = (profileString(oid) || type == SQL_TEXT || type == SQL_VARYING) &&
 				(supplied == 25 || supplied == 1042 || supplied == 1043);
 			if (supplied != oid && !compatibleText)
 				throw ProtocolError("0A000", "Parse parameter type does not match engine metadata");
@@ -345,24 +324,22 @@ InputCodec::InputCodec(IMessageMetadata* logicalMetadata, const std::vector<std:
 		check(&status);
 		checkRange(offset, physicalSize, logicalLength);
 		checkRange(nullOffset, sizeof(ISC_SHORT), logicalLength);
-		if (type == SQL_BLOB)
+
+		if (oid == 4089)
 		{
-			// The engine converts OCTETS to a BLOB at Execute, in the current transaction.
-			// Bind sizes this physical slot; Parse never reserves the maximum payload.
 			builder->setType(&status, i, SQL_VARYING);
 			check(&status);
 			builder->setSubType(&status, i, 0);
 			check(&status);
-			builder->setScale(&status, i, 0);
-			check(&status);
-			builder->setCharSet(&status, i, CS_BINARY);
-			check(&status);
 			builder->setLength(&status, i, 0);
 			check(&status);
+			builder->setCharSet(&status, i, CS_UTF8);
+			check(&status);
 		}
+
 		types.push_back(oid);
-		fields.push_back({type == SQL_TEXT ? SQL_VARYING : type,
-			type == SQL_BLOB ? 0 : capacity, 0, 0, charset, scale});
+		fields.push_back({type == SQL_TEXT || oid == 4089 ? SQL_VARYING : type,
+			oid == 4089 ? 0 : capacity, 0, 0, charset, scale});
 	}
 	bindMetadata.assignRefNoIncr(builder->getMetadata(&status));
 	check(&status);
@@ -386,7 +363,7 @@ unsigned InputCodec::layout(IMessageMetadata* metadata, std::vector<Field>& fiel
 		field.nullOffset = metadata->getNullOffset(&status, i);
 		check(&status);
 		checkRange(field.offset, field.length +
-			(field.type == SQL_VARYING || field.type == SQL_BLOB ? sizeof(ISC_USHORT) : 0), length);
+			(field.type == SQL_VARYING ? sizeof(ISC_USHORT) : 0), length);
 		checkRange(field.nullOffset, sizeof(ISC_SHORT), length);
 	}
 	return length;
@@ -394,12 +371,17 @@ unsigned InputCodec::layout(IMessageMetadata* metadata, std::vector<Field>& fiel
 
 std::size_t InputCodec::retainedBytes() const noexcept
 {
-	return sizeof(*this) + fields.capacity() * sizeof(Field) + types.capacity() * sizeof(std::uint32_t);
+	std::size_t size = sizeof(*this) + fields.capacity() * sizeof(Field) + types.capacity() * sizeof(std::uint32_t) +
+		blobs.capacity() * sizeof(blobs[0]);
+	for (const auto& blob : blobs)
+		if (blob) size += blob->capacity();
+	return size;
 }
 
-std::vector<unsigned char> InputCodec::encode(const std::vector<std::optional<std::string>>& values,
+std::vector<unsigned char> InputCodec::encode(const std::vector<std::optional<std::string>>& inputValues,
 	const std::vector<std::int16_t>& formats)
 {
+	auto values = inputValues;
 	if (values.size() != fields.size())
 		throw ProtocolError("08P01", "Bind parameter count does not match the prepared statement");
 	if (!formats.empty() && formats.size() != 1 && formats.size() != fields.size())
@@ -409,48 +391,69 @@ std::vector<unsigned char> InputCodec::encode(const std::vector<std::optional<st
 		if (format != 0 && format != 1)
 			throw ProtocolError("08P01", "Bind parameter format code is invalid");
 	}
-	// Stage the new descriptor locally so an unsuccessful encode preserves the old layout.
-	RefPtr<IMessageMetadata> nextMetadata;
-	std::vector<Field> nextFields;
-	std::vector<std::string> decoded;
-	unsigned nextLength = length;
-	if (hasBlobs)
+	FbLocalStatus status;
+	RefPtr<IMetadataBuilder> builder;
+	auto nextFields = fields;
+	for (unsigned i = 0; i < fields.size(); ++i)
 	{
-		FbLocalStatus status;
-		RefPtr<IMetadataBuilder> builder(REF_NO_INCR, bindMetadata->getBuilder(&status));
-		check(&status);
-		nextFields = fields;
-		decoded.resize(fields.size());
-		std::size_t remaining = MAX_MESSAGE;
-		for (unsigned i = 0; i < fields.size(); ++i)
+		const bool pgString = fields[i].charset == CS_PG_MCHAR || fields[i].charset == CS_PG_MVARCHAR;
+		if ((!pgString && types[i] != 4089) || !values[i]) continue;
+		const auto format = formats.empty() ? 0 : formats[formats.size() == 1 ? 0 : i];
+		if (format && types[i] == 4089)
 		{
-			if (fields[i].type != SQL_BLOB)
-				continue;
-			std::size_t size = 0;
-			if (values[i])
-			{
-				const auto format = formats.empty() ? 0 : formats[formats.size() == 1 ? 0 : i];
-				if (values[i]->size() > MAX_MESSAGE)
-					throw ProtocolError("0A000", "Parameter value exceeds supported limits");
-				if (!format)
-					decoded[i] = byteaText(*values[i], remaining);
-				size = format ? values[i]->size() : decoded[i].size();
-				if (size > MAX_VARYING || size > remaining)
-					throw ProtocolError("0A000", "Binary BLOB parameter exceeds supported limits");
-			}
-			remaining -= size;
-			nextFields[i].length = size;
-			builder->setLength(&status, i, size);
+			if (values[i]->size() != 4)
+				throw ProtocolError("22P03", "Invalid binary regnamespace parameter length");
+			std::uint32_t number = 0;
+			for (unsigned char c : *values[i]) number = (number << 8) | c;
+			values[i] = std::to_string(number);
+		}
+		else if (format && profileString(types[i])) values[i] = stringFromBinary(*values[i]);
+		validateText(*values[i]);
+		if (fields[i].type == SQL_BLOB)
+		{
+			if (fields[i].charset == CS_PG_MCHAR)
+				while (!values[i]->empty() && values[i]->back() == ' ') values[i]->pop_back();
+			continue;
+		}
+		if (values[i]->size() > MAX_VARYING)
+			throw ProtocolError("0A000", "Native text message field exceeds supported limits");
+		if (!builder)
+		{
+			builder.assignRefNoIncr(bindMetadata->getBuilder(&status));
 			check(&status);
 		}
+		nextFields[i].length = values[i]->size();
+		builder->setLength(&status, i, values[i]->size());
+		check(&status);
+		builder->setCharSet(&status, i, CS_UTF8);
+		check(&status);
+	}
+	RefPtr<IMessageMetadata> nextMetadata(bindMetadata);
+	if (builder)
+	{
 		nextMetadata.assignRefNoIncr(builder->getMetadata(&status));
 		check(&status);
-		nextLength = layout(nextMetadata, nextFields);
 	}
+	const auto nextLength = layout(nextMetadata, nextFields);
+	// Decode into temporary ownership: a failed Bind cannot alter the old portal.
+	std::vector<std::optional<std::string>> nextBlobs(fields.size());
+	std::size_t remaining = MAX_MESSAGE - nextLength;
+	for (unsigned i = 0; i < fields.size(); ++i)
+	{
+		if (fields[i].type != SQL_BLOB || !values[i])
+			continue;
+		const auto format = formats.empty() ? 0 : formats[formats.size() == 1 ? 0 : i];
+		const bool pgString = fields[i].charset == CS_PG_MCHAR || fields[i].charset == CS_PG_MVARCHAR;
+		nextBlobs[i] = format || pgString ? *values[i] : byteaText(*values[i], remaining);
+		if (nextBlobs[i]->size() > remaining)
+			throw ProtocolError("0A000", "Binary BLOB parameters exceed supported limits");
+		remaining -= nextBlobs[i]->size();
+	}
+
 	std::vector<unsigned char> buffer(nextLength);
 	for (unsigned i = 0; i < fields.size(); ++i)
 	{
-		const auto& field = hasBlobs ? nextFields[i] : fields[i];
+		const auto& field = nextFields[i];
 		if (!values[i])
 		{
 			store<ISC_SHORT>(buffer.data() + field.nullOffset, -1);
@@ -507,25 +510,71 @@ std::vector<unsigned char> InputCodec::encode(const std::vector<std::optional<st
 			}
 			if (value.size() > field.length)
 				throw ProtocolError("22001", "Text parameter is too long");
-			[[fallthrough]];
-		case SQL_BLOB:
 		{
-			const std::string_view bytes = field.type == SQL_BLOB && !format ? decoded[i] : value;
-			store<ISC_USHORT>(address, bytes.size());
-			std::memcpy(address + sizeof(ISC_USHORT), bytes.data(), bytes.size());
+			store<ISC_USHORT>(address, value.size());
+			std::memcpy(address + sizeof(ISC_USHORT), value.data(), value.size());
 			break;
 		}
+		case SQL_BLOB:
+			break; // Filled by materialize only after the application transaction starts.
 		default:
 			invalidMetadata();
 		}
 	}
-	if (hasBlobs)
-	{
-		bindMetadata = nextMetadata;
-		fields.swap(nextFields);
-		length = nextLength;
-	}
+	bindMetadata = nextMetadata;
+	fields.swap(nextFields);
+	length = nextLength;
+	blobs.swap(nextBlobs);
 	return buffer;
+}
+
+void InputCodec::materialize(IAttachment* attachment, ITransaction* transaction,
+	std::vector<unsigned char>& buffer)
+{
+	if (!attachment || !transaction || buffer.size() != length)
+		invalidMetadata();
+	FbLocalStatus status;
+	std::vector<RefPtr<IBlob>> opened(blobs.size());
+	std::vector<ISC_QUAD> ids(blobs.size());
+	try
+	{
+		for (unsigned i = 0; i < blobs.size(); ++i)
+		{
+			if (!blobs[i]) continue;
+			opened[i].assignRefNoIncr(attachment->createBlob(&status, transaction, &ids[i], 0, nullptr));
+			check(&status);
+			const auto& bytes = *blobs[i];
+			for (std::size_t offset = 0; offset < bytes.size();)
+			{
+				const unsigned size = std::min<std::size_t>(65535, bytes.size() - offset);
+				opened[i]->putSegment(&status, size, bytes.data() + offset);
+				check(&status);
+				offset += size;
+			}
+		}
+		// Keep all handles cancellable until every parameter has been written.
+		for (auto& blob : opened)
+		{
+			if (!blob) continue;
+			blob->close(&status);
+			check(&status);
+			blob.clear();
+		}
+		for (unsigned i = 0; i < blobs.size(); ++i)
+			if (blobs[i]) store<ISC_QUAD>(buffer.data() + fields[i].offset, ids[i]);
+	}
+	catch (...)
+	{
+		for (auto& blob : opened)
+		{
+			if (!blob) continue;
+			FbLocalStatus cleanup;
+			blob->cancel(&cleanup);
+			if (!(cleanup->getState() & IStatus::STATE_ERRORS)) blob.clear();
+		}
+		throw;
+	}
+
 }
 
 } // namespace Firebird::PgWire

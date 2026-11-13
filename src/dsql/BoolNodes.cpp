@@ -19,6 +19,7 @@
  */
 
 #include "firebird.h"
+#include "../jrd/PgString.h"
 #include "../common/classes/VaryStr.h"
 #include "../dsql/BoolNodes.h"
 #include "../dsql/ExprNodes.h"
@@ -954,7 +955,8 @@ TriState ComparativeBoolNode::stringBoolean(thread_db* tdbb, Request* request,
 			return TriState(false);
 
 		// Non-text blob is treated here as NONE, not OCTETS
-		type1 = desc1->dsc_sub_type == isc_blob_text ? desc1->dsc_blob_ttype() : ttype_none;
+		type1 = desc1->isMcharBlob() ? desc1->getTextType() :
+			(desc1->dsc_sub_type == isc_blob_text ? desc1->dsc_blob_ttype() : ttype_none);
 	}
 
 	Collation* obj = INTL_texttype_lookup(tdbb, type1);
@@ -1085,7 +1087,26 @@ TriState ComparativeBoolNode::stringBoolean(thread_db* tdbb, Request* request,
 		evaluator = cache->matcher;
 	}
 	else
-		autoEvaluator = evaluator = desc1->isBlob() ? createMatcher() : nullptr;
+		autoEvaluator = evaluator = (desc1->isBlob() ||
+			(blrOp == blr_like && desc1->getCharSet() == CS_PG_MCHAR)) ? createMatcher() : nullptr;
+
+	if (blrOp == blr_like && desc1->getCharSet() == CS_PG_MCHAR)
+	{
+		// mchar LIKE accepts either its stored padded value or the value without
+		// trailing ASCII spaces. Intermediate padding still matters to patterns.
+		const auto value = readPgString(tdbb, desc1);
+		const auto* bytes = reinterpret_cast<const UCHAR*>(value.text.c_str());
+		evaluator->process(bytes, value.text.length());
+		if (evaluator->result())
+			return TriState(true);
+		auto length = value.text.length();
+		while (length && bytes[length - 1] == ' ') --length;
+		if (length == value.text.length())
+			return TriState(false);
+		evaluator->reset();
+		evaluator->process(bytes, length);
+		return TriState(evaluator->result());
+	}
 
 	if (!desc1->isBlob())
 	{
@@ -1122,6 +1143,12 @@ TriState ComparativeBoolNode::stringBoolean(thread_db* tdbb, Request* request,
 	}
 
 	fb_assert(evaluator);
+	if (desc1->isMcharBlob())
+	{
+		const auto value = readPgString(tdbb, desc1);
+		evaluator->process(reinterpret_cast<const UCHAR*>(value.text.c_str()), value.text.length());
+		return TriState(evaluator->result());
+	}
 
 	// Source string is a blob, things get interesting
 
@@ -1179,6 +1206,7 @@ bool ComparativeBoolNode::sleuth(thread_db* tdbb, Request* request,
 	// and never Multibyte (see note in EVL_mb_sleuthCheck)
 	bool ret_val;
 	MoveBuffer data_str;
+
 	if (!desc1->isBlob())
 	{
 		// Source is not a blob, do a simple search

@@ -1184,7 +1184,12 @@ void IDX_create_index(thread_db* tdbb,
 	const int nullIndLen = !isDescending && (idx->idx_count == 1) ? 1 : 0;
 	const USHORT key_length = ROUNDUP(BTR_key_length(tdbb, relation, idx) + nullIndLen, sizeof(SINT64));
 
-	if (key_length >= dbb->getMaxIndexKeyLength())
+	bool variableBlobKey = false;
+	for (unsigned i = 0; i < idx->idx_count; ++i)
+		variableBlobKey |= idx->idx_rpt[i].idx_itype == idx_bytea;
+	// BLOB values have no declared maximum. The sort buffer includes its null
+	// prefix/alignment; IndexKey::compose checks every actual B-tree key.
+	if (!variableBlobKey && key_length >= dbb->getMaxIndexKeyLength())
 	{
 		ERR_post(Arg::Gds(isc_no_meta_update) <<
 				 Arg::Gds(isc_keytoobig) << index_name.toQuotedString());
@@ -1511,7 +1516,9 @@ void IDX_garbage_collect(thread_db* tdbb, record_param* rpb, RecordStack& going,
 
 				if (const auto result = key.compose(rec))
 				{
-					if (result == idx_e_conversion)
+					// A rejected key was never inserted. This includes an unbounded
+					// bytea value whose actual key exceeded the B-tree budget.
+					if (result == idx_e_conversion || result == idx_e_keytoobig)
 						continue;
 
 					CCH_RELEASE(tdbb, &window);
@@ -1545,7 +1552,7 @@ void IDX_garbage_collect(thread_db* tdbb, record_param* rpb, RecordStack& going,
 
 				if (const auto result = key.compose(rec))
 				{
-					if (result == idx_e_conversion)
+					if (result == idx_e_conversion || result == idx_e_keytoobig)
 						continue;
 
 					CCH_RELEASE(tdbb, &window);

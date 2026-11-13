@@ -1,8 +1,231 @@
 # Проверки реализации
 
+## 12 ноября 2026: APP-16 типы и выражения
+
+**PASS локальной приёмки; implementation diff ожидает review, без git add/commit.**
+Основа — принятая `7799cd3a54`, ветка `pg_wire_protocol`. Выполнена полная редакция
+[TYPES_AND_EXPRESSIONS_TASK](1c/TYPES_AND_EXPRESSIONS_TASK.md). Исследование стало
+основанием production-кода: parser/DSQL, native descriptors/BLR, BLOB/MOVE,
+comparison/B-tree/sort/intl, wire codecs и SQL installer. Контракт представления
+и migration — [COMPATIBILITY](COMPATIBILITY.md#app-16-типы-и-выражения-1с),
+точки будущего выделения — [EXT-12…19](EXTENSION_POINTS.md).
+
+### Сборка и идентичность результата
+
+`make -C /tmp/gen -j6` — PASS, финальный лог `/tmp/app16-build-34.log`, Linux/Debug/Super.
+Source manifest `/tmp/app16-final-source-manifest.json` включает tracked **и новые**
+code/test/installer files; SHA256 канонического списка 67 файлов:
+`1d285313ea55153b96fca72567db4907d8f0cd3704b290704a0e0b015c36ee34`.
+Это не только git diff hash, который не учитывает untracked production helpers.
+CLI help harness также отражает IBlob вместо старого VARCHAR пути;
+семантика проверенных команд не менялась.
+
+| Runtime artifact | SHA256 |
+|---|---|
+| libEngine14.so | d4b0392bc00a4eb7766b2fc64a2b9d80c6066fbfcf94f06a112ba01e04208982 |
+| libPgWire.so | 9640c20f3d00dc7838747987e32bdc9ad638d69d649ac454f17d8604c04835af |
+| libfbclient.so | 71c988008254b975e28fca11c9bf7576abbfdbb010edac0846da325fef5e628f |
+| firebird | 30319f7bfd430e52d66605ad2153e6f60b39857ccb7b87c5d7584a150a668b12 |
+| libfbintl.so | 5344c333d88d89cb3663da857ec93d8c0976c13353e212f008f475db98f0d20b |
+
+В сборке 33 завершено native чтение regnamespace BLR в InternalMessageBuffer.
+Последняя сборка 34 добавляет native source spelling SUBSTRING для PG SUBSTR;
+полная types/native remote/restart и names/strings повторены на ней. Остальные
+финальные регрессии выполнены на том же коде своих подсистем до этой source-only
+правки parser; их отдельные runtime hashes сохранены в summaries.
+Parser: 165 shift/reduce, 12 reduce/reduce (основа 164/11); новые ветви — native
+BIGINT SUB_TYPE и bounded profile type. Таблица btyacc выросла до 200307 entries,
+поэтому MAXTABLE поднят с 200000 до 250000; это предел генератора, не runtime budget.
+
+### Oracle и исходные материалы
+
+Private Postgres Pro 18.6 `/opt/pgpro/1c-18`, mchar 2.3, UTF8/C.UTF-8, collation
+version 153.112. Использован реальный libpq 14.24: загружен
+`/usr/lib/x86_64-linux-gnu/libpq.so.5.14`, SHA256
+`efaae20afb704c5f59a958c577437a6e07354ce5da734312a74ad8087b50afae`.
+Путь поставляемого libpq и его hash записаны отдельно, они не выдаются за загруженный.
+Process maps oracle backend подтверждают ICU 70.1 и mchar.so; native engine тоже
+загрузил ICU 70.1. Paths/hashes: `/tmp/app16-oracle-families-04/summary.json`
+и `/tmp/app16-final-native-libraries.json` (read-only native probe, exit 0).
+
+Oracle artifacts: `/tmp/app16-oracle-03/summary.json` (типы, formats, исходные
+selected, BINROWVER), `/tmp/app16-oracle-expressions-02/summary.json`
+(214 дополнительных выражений и metadata), `/tmp/app16-oracle-families-04/summary.json`
+(конечные operation fixtures). Все private PostgreSQL instances остановлены exit 0.
+Capture/schema/families/selected читаются с внешнего пути на исполнении, hashes
+сохранены в summaries. Captured SQL/literals/payload/credentials в Git не добавлены.
+
+### Expected / actual и финальная матрица
+
+| Проверка | Expected и actual | Evidence |
+|---|---|---|
+| Полный APP-16 | PASS, 571 записей основной матрицы; 214 oracle expressions совпали по rows/OID/mod/size с явным mapping custom OIDs | `/tmp/app16-final-types-03/summary.json`, `types-progress.json` |
+| selected04/07/08/12/17/18/24 | SQL без rewriting; SELECT rows и OIDs совпали с oracle, DROP/CREATE tags проверены; DELETE 1/rollback/DELETE 0 по версии | `types-selected-hashes.json`, основной summary |
+| Bytea comparison/sort | NULL/empty/00/01/0100/010000/ff, all 256 bytes; 65536-byte common prefix с различным хвостом; equality/order/join/DISTINCT/GROUP/MIN/MAX; 12000 rows и multiple sort runs | Основная матрица |
+| B-tree | Persistent/LTT, ordinary/UNIQUE/composite/descending, forced INDEX vs NATURAL, range, UPDATE/DELETE/rollback/rebuild; 1023-byte key проходит, 1024 → 54000 на 8 KiB page; unindexed oversized INSERT проходит | Основная матрица; failed build/duplicate/Extended Sync/retry сохраняют session и rows |
+| Типы/строки | Реальные mchar/mvarchar, Unicode/case/accent/PAD, assignment vs explicit cast, SUBSTR/LIKE/concat, bare value typmod и NULL sort; stable OIDs, binary UTF16LE/text UTF8 | Основная матрица и oracle |
+| Namespace | Quoted/keyword/numeric/uint32, missing/syntax/overflow, zero/unknown, actual temp name, prepared DROP/recreate; column/CASE/COALESCE/UNION/function и binary forms | Основная матрица |
+| Version lifecycle | BINROWVER NULL/negative/int32/byte boundaries; indexed UPDATE 0/1, rollback restores old version; committed update; исходный DELETE version predicate | Основная матрица |
+| Native API/restart | PASS, 10054 assertions: physical metadata/subtypes/charsets, dialect3/4 remote fetch, retained dropped-index plans → reprepare, exact BLOB bytes, ordinary native LTT BLOB copy under non-owner; reopen/restart сохраняют typed fields/indexes/value typmod | `types_api.log`, `types_restart` |
+| Installer | Fresh 8-script installation; APP-15 ODS14.0 → gfix14.1 → atomic SQL migration, old IDs/data/grants/charset metadata сохранены; injected error/foreign function/repeat rollback; old runtime явно отвергает ODS14.1 | `types_install`, `types_*install*.log`, `types_upgrade*.log` |
+| APP-07 / selected06 | PASS, 92 libpq checks, raw/IBlob/readback и DataRow границы; bytea cast теперь положительная проверка, syntax/discard проверяется отдельным неверным SELECT | `/tmp/app16-final-blobs-03/summary.json` |
+| APP-08/09 / selected23 | PASS, 127 libpq checks, 9 native readbacks, 7 raw groups; >65533 text/binary/150001 bytes, mixed 92/68, Close без Execute, repeated portals, 1 MiB message и 8 MiB portal границы | `/tmp/app16-final-blob-input/summary.json` |
+| APP-15 | PASS, 268 libpq / 8408 OO, raw и installer upgrade; принятую NAT-06 реализацию не переписывали | `/tmp/app16-final-temporary/summary.json` |
+| Names / strings / BEGIN | PASS: names109; strings156 queries +1205 OO и raw; BEGIN88 queries/43 native observations и raw | `pg-names-02`, `strings-02`, `begin` в `/tmp/app16-final-*/summary.json` |
+| Native transactions | PASS, 14 групп, C libpq, I/T/E/retaining/RESET, timeouts, EOF/Terminate, прежние failed commit/reset fatal boundaries | `/tmp/app16-final-transactions/summary.json` |
+| Unit | 9 executables PASS; input625, numeric502, float112, temporal313, SQL576, session5, error/protocol/result; injected partial second BLOB write отменяет все открытые handles, повтор использует сохранённые bytes | `/tmp/app16-final-unit-results-02.json` |
+
+Сводный результат всех финальных групп с hashes summaries:
+`/tmp/app16-final-acceptance.json` — все группы PASS.
+Во всех финальных Firebird runs — normal shutdown, exit 0, `forced_kill=false`;
+no-attachments проверены harness. Database/DPB dialect 3, client Prepare PG4;
+native1/2/3 сохраняют CHAR/VARCHAR/OCTETS/BLOB0 сравнения. Cache включён, рабочие
+БД employee/pgwire_test/gilev_demo_ru и пользовательские сервисы не менялись.
+
+### Конечный перечень операций families
+
+Это перечень типовых операций, не заявление о прохождении всех 243 полных запросов.
+`pgwire_profile_type_checks.py` читает original examples извне; их hashes/family IDs
+и проверенные результаты находятся в основной и oracle summaries.
+
+| Операции записи | Проверенное представление и результат |
+|---|---|
+| Bytea casts, =/<>/ordering/IN/IS NULL, JOIN, CASE, DISTINCT/GROUP, INSERT…SELECT | Full bytes + actual length; native predicates/sorter/indexes согласованы, zero tails различаются |
+| MIN (7 families), MAX (6), BOOL_OR (1, вместе с MIN) | 13 исходных aggregate families: timestamps, numeric derived join, mchar code/number, temp DISTINCT/CASE/group/binary predicates; rows/tags совпали с oracle |
+| Binary NOT EXISTS | 2 исходных INSERT…SELECT families; `01` исключается, `0100` и `010000` вставляются, tag INSERT 0 2 |
+| COUNT(*) | 2 исходных families на synthetic typed tables, включая NULL/empty; count 3 |
+| COUNT(*) + IN по pg_tables | Исходная форма выражения проверена на явно отдельной type_catalog_rows, count 2; **полный pg_tables query не принят**, полный catalog вне этапа |
+| Mchar/mvarchar casts/comparisons/order, SUBSTR, LIKE, concat | Oracle rows/type metadata, mixed operands/Bind, case/accent/PAD/Unicode и empty/NULL; selected08 с исходным CASE/SUBSTR ordering |
+| BINROWVER (12 families используют функцию) | Вывод selected08 и исходный selected18 predicate, synthetic indexed UPDATE predicate; bytes по exact external function при записанном strings=off |
+| Regnamespace / namespace predicates | Исходный selected04 с настоящими IDs, плюс общий input/output/lifecycle proof; pg_my_temp_schema/visibility переиспользованы |
+
+Итого 17 неизменённых operation families и одна отдельно обозначенная expression
+проверка. Native numeric/timestamp/boolean операции переиспользованы. Advisory locks,
+fasttrun, current_database/collation/full catalogs не подменены успешными no-op.
+
+### Найденные отказы и внесённые исправления
+
+Промежуточные FAIL сохранены в `/tmp/app16-types-01`…`23`, build logs и private probes;
+они не включены в финальный PASS как успешные прогоны. Существенные причины:
+потеря charset параметра, oversized-key rollback, диагностический BLOB printer,
+канонизация типа в source, преждевременный выход native index-name lookup после
+первой LTT, retired index maintenance, NULL BLOB sort, неполное native BLR чтение.
+
+`types-18/19` локализовали LTT deferred index build: ошибка возникает при COMMIT,
+а не при Execute; штатный rollback сохраняет таблицу, но phase0 не освобождала
+base/instance index slots и retry приводил к assertion BTR_reserve_slot. Добавлена
+очистка в существующий DFW backout. PgWire разрешает recoverable implicit boundary
+только для native keytoobig/no_dup, nonfatal diagnostics и успешного полного rollback;
+explicit/uncertain boundary policy сохранена и прошла transaction regression.
+
+`types-22` выявил assertion `security_name.hasData()` для собственного LTT BLOB после
+INSERT…SELECT. Native dialect3/BLOB0/non-owner reproducer падает и на принятой APP-15:
+`/tmp/app16-ltt-blob-baseline2.log`, private previous-runtime/firebird.log. Owner probe
+не падал из-за штатного locksmith bypass. Исправлен только checkBlob для фактически
+найденной собственной LTT: MetadataCache::getPerm разрешает LTT ID через attachment,
+persistent SCL проверки прежние. Native BLOB0 proof включён в финальные OO assertions.
+NAT-01…05/NAT-07 не переименованы и не объявлены исправленными.
+
+Заключительный source probe `/tmp/app16-substr-reprepare-before.log` обнаружил
+native Function unknown SUBSTR после успешного PG CREATE VIEW. Grammar-confirmed
+source marks теперь сохраняют SUBSTRING(... FROM ... FOR ...), включая nested
+SUBSTR и type marks, через тот же механизм канонизации. В types-03 проверены
+native ALTER VIEW из сохранённого source, rows/OID и повтор после restart.
+Names-02/strings-02 регрессии после этой правки PASS.
+
+### Повторяемые команды и оставшиеся границы
+
+```sh
+make -C /tmp/gen -j6
+make -C /tmp/gen -j6 TARGET=Debug pgwire_tests
+python3 -B pg_wire_protocol/tools/pgwire_types_oracle.py \
+  --work NEW_TMP_ORACLE --capture-dir /home/aleksey/dev/1c/captures/20261109T105635Z
+# Дополнительные oracle modes: --expression-details и --profile-families-only.
+python3 -B pg_wire_protocol/tools/pgwire_1c_smoke.py \
+  --firebird-dir /tmp/gen/Debug/firebird --work-dir NEW_TMP_TYPES --types \
+  --previous-firebird-dir /tmp/app15-architect-review-7799cd3a54-net/runtime \
+  --types-oracle /tmp/app16-oracle-03/summary.json \
+  --types-oracle-details /tmp/app16-oracle-expressions-02/summary.json \
+  --capture-dir /home/aleksey/dev/1c/captures/20261109T105635Z --timeout 240
+```
+
+Регрессии того же harness: `--blobs`, `--blob-input`, `--temporary`, `--pg-names`,
+`--strings`, `--begin`, каждая с новым private work-dir. Полные команды группы —
+`/tmp/app16-final-runs.json`; окончательные повторы types-03/blobs-03/names-02/strings-02 указаны выше.
+Native transactions: `tools/pgwire_transaction_smoke.py --firebird-dir RUNTIME
+--work-dir NEW_TMP --libpq-include-dir /tmp/nat06-deps/libpq-dev/usr/include/postgresql
+--libpq-library /lib/x86_64-linux-gnu/libpq.so.5 --timeout 180`.
+
+SKIP/вне согласованного этапа: real 1C и Гилёв, serial/defaults/selected13,
+ANALYZE/fasttrun/selected14–16, advisory locks, полный catalog/current_database,
+ON COMMIT DROP, Windows/Classic/удалённый deployment, исходные NAT-01…05/07 repro.
+Synthetic selected/families fixtures не объявляются настоящей информационной базой.
+APP-16 реализован; до целевого прикладного результата остаётся пять крупных этапов.
+
+
+## 12 ноября 2026: архитектурный review APP-15
+
+**Принято в `7799cd3a54`.** Scoped review production diff относительно `516f55bbb5`
+не обнаружил дефектов, блокирующих следующий этап. Проверены ownership/undo
+namespace, root release/retaining, actual-target DDL guard, resolver/SCL, cache
+identity/invalidation и live provider snapshot. SQL-09/10 закрыты в описанном
+профиле; native ограничения и NAT-05/NAT-07 сохраняются.
+
+Независимо выполнено на существующей итоговой сборке, без rebuild:
+
+```sh
+python3 -B pg_wire_protocol/tools/pgwire_1c_smoke.py --temporary \
+  --firebird-dir /tmp/gen/Debug/firebird \
+  --previous-firebird-dir /tmp/app15-native-base-runtime \
+  --work-dir /tmp/app15-architect-review-7799cd3a54-net --timeout 300
+```
+
+Результат `summary.json` в этом каталоге: script exit 0, completed/temporary_passed
+true, **268 libpq results / 8 групп, 8408 native OO assertions**, raw Close без
+allocation и paused portal PASS. Fresh installer и APP-14 upgrade/rollback/collisions
+PASS, ODS14.0. Server exit 0, forced_kill=false, shutdown 0.164 s, server log пуст.
+Native OO база удалена, процессов тестового runtime нет; fixture/upgrade databases
+остаются private артефактами `/tmp`. Исходники/production конфигурация не менялись.
+
+Все 31 implementation files и все 250 artifacts из `/tmp/app15-review` существуют
+и совпадают по SHA256. Engine `7ce4a4e3e11e112faef52ae88b39ad8805602e9f6d1b4e8b46d119c4b8a792b8`,
+PgWire `167f51a616cbfc41b0c2e75c85424cea39ba389596d8000a089847312779ba16`
+и baseline Engine совпали с отчётом реализации. Новый прогон фиксирует HEAD
+`7799cd3a54ac3e1cd2825789141bb93a214410df` и пустой source diff.
+
+Первый запуск `/tmp/app15-architect-review-7799cd3a54` остановился до проверок
+из-за sandbox EPERM на sockets; успешный повтор выполнен с разрешённым escalation.
+Это инфраструктурная остановка, не SQL FAIL. Остальные широкие регрессии и
+исходные NAT-05/NAT-07 reproducer в этом review не повторялись.
+Исходные selected04/12/13, типы 1С и реальная 1С/Гилёв этим не приняты.
+
+Следующий рабочий этап типов —
+[APP-16: реализация и приёмка](1c/TYPES_AND_EXPRESSIONS_TASK.md).
+По уточнению пользователя исследование входит в этот этап; его завершение
+требует новых работающих SQL/types/codecs/indexes, а не отдельного отчёта.
+По решению пользователя архитектура сохраняется, будущая изоляция ведётся в
+[EXTENSION_POINTS](EXTENSION_POINTS.md); рефакторинг сейчас не выполняется.
+
+## 12 ноября 2026: предварительная проверка binary type reuse
+
+В private embedded runtime выполнены три native probes без изменения исходников:
+`/tmp/app16-native-types-9b_8gttz/{probe,probe2,probe3}.{sql,log}`.
+VARBINARY и BLOB SUB_TYPE 0 дают TRUE при сравнении bytes `01` и `0100`;
+UNIQUE VARBINARY отвергает вторую вставку с 23000. Это наблюдение текущего native
+контракта, не регрессия APP-15 и не основание менять native comparison глобально.
+
+OCTETS NO PAD создать не удалось: HY000 Invalid collation attributes.
+Контроль OCTETS PAD SPACE также не прошёл, поэтому причина не приписывается
+исключительно NO PAD. UTF8 FROM SYSTEM.UNICODE NO PAD контроль успешен.
+Последующие ошибки отсутствующих объектов в первом логе — следствия отказа CREATE
+COLLATION, не независимые semantic results. Пользовательский OCTETS comparator
+runtime не проверен, невозможность иной collation реализации не заявляется.
+Все три тестовые базы удалены. Pg oracle этой матрицы ещё не выполнялся;
+его вместе с wire/metadata/index proof требует APP-16.
+
 ## 12 ноября 2026: APP-15 полный цикл поддержанных PG temporary tables
 
-**Реализовано, оставлено для review без git add/commit.** Основа
+**Отчёт реализации; последующий review `7799cd3a54` выше.** Основа
 `516f55bbb5e310f0bb35377385f4004f78fee208` (NAT-06), принятый P2 `11dee63d2a`
 сохранён. Исходные пользовательские изменения документов о принятии NAT-06
 сохранены; начальный diff — `/tmp/app15-resume-initial.diff`.

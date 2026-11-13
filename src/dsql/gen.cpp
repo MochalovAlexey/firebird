@@ -192,7 +192,7 @@ void GEN_port(DsqlCompilerScratch* dsqlScratch, dsql_msg* message)
 		parameter->par_parameter = (USHORT) i;
 
 		const auto fromCharSet = parameter->par_desc.getCharSet();
-		const auto toCharSet = (fromCharSet == CS_NONE || fromCharSet == CS_BINARY) ?
+		const auto toCharSet = (fromCharSet == CS_NONE || fromCharSet == CS_BINARY || parameter->par_desc.isPgString()) ?
 			fromCharSet : tdbb->getCharSet();
 
 		if (parameter->par_desc.dsc_dtype <= dtype_any_text &&
@@ -389,6 +389,11 @@ void GEN_descriptor( DsqlCompilerScratch* dsqlScratch, const dsc* desc, bool tex
 		break;
 
 	case dtype_int64:
+		if (desc->isRegNamespace())
+		{
+			dsqlScratch->appendUChar(blr_pg_regnamespace);
+			break;
+		}
 		dsqlScratch->appendUChar(blr_int64);
 		dsqlScratch->appendUChar(desc->dsc_scale);
 		break;

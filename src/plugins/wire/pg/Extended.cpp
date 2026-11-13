@@ -484,6 +484,7 @@ bool QueryExecutor::process(Protocol& protocol, const Message& message)
 				if (hasCursor && !hasOutput)
 					throw ProtocolError("XX000", "Inconsistent engine output metadata");
 				startImplicit();
+				portal.input->materialize(attachment, transaction, portal.parameters);
 				portal.started = true;
 				if (hasCursor)
 				{

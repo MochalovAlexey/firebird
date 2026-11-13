@@ -105,6 +105,10 @@ def temporary_fixture(h, previous):
     require(previous is not None,'--temporary requires --previous-firebird-dir')
     old_runtime=h.work/'previous-runtime'
     shutil.copytree(previous.resolve(),old_runtime,symlinks=False)
+    (old_runtime/'firebird.conf').write_text(
+        f'ServerMode = Super\nProviders = Engine14\nDatabaseAccess = Restrict {h.database.parent}\n'
+        f'SecurityDatabase = {old_runtime}/security6.fdb\n')
+    (old_runtime/'databases.conf').write_text('')
     old_db=h.database.parent/'temporary_upgrade.fdb'
     env=h.env.copy()
     env.update(FIREBIRD=str(old_runtime),LD_LIBRARY_PATH=str(old_runtime/'lib'),ISC_USER='SYSDBA')

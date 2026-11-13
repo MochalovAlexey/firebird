@@ -311,6 +311,11 @@ void DsqlCompilerScratch::putType(const TypeClause& type, bool useSubType, bool 
 
 void DsqlCompilerScratch::putDtype(const TypeClause& type, const bool useSubType)
 {
+	if (type.dtype == dtype_int64 && type.subType == 3 && type.scale == 0)
+	{
+		appendUChar(blr_pg_regnamespace);
+		return;
+	}
 	switch (type.dtype)
 	{
 		case dtype_cstring:

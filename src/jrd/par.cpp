@@ -317,6 +317,11 @@ USHORT PAR_datatype(thread_db* tdbb, BlrReader& blrReader, dsc* desc)
 			desc->dsc_scale = (int) blrReader.getByte();
 			break;
 
+		case blr_pg_regnamespace:
+			desc->makeInt64(0);
+			desc->dsc_sub_type = 3;
+			break;
+
 		case blr_int64:
 			desc->dsc_dtype = dtype_int64;
 			desc->dsc_length = sizeof(SINT64);

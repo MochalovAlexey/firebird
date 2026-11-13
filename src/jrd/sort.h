@@ -150,6 +150,9 @@ inline constexpr int SKD_sql_time_tz	= 18;
 inline constexpr int SKD_timestamp_tz	= 19;
 inline constexpr int SKD_int128			= 20;
 
+inline constexpr int SKD_bytea = 21; // Full value comparison using native BLOB storage
+inline constexpr int SKD_pg_string = 22; // Text BLOB; skd_vary_offset stores its text type
+
 // skd_flags
 inline constexpr UCHAR SKD_ascending		= 0;	// default initializer
 inline constexpr UCHAR SKD_descending		= 1;
@@ -306,6 +309,8 @@ public:
 	}
 
 private:
+	int compare(const SORTP*, const SORTP*, ULONG) const;
+	bool m_blobKeys = false;
 	void allocateBuffer(MemoryPool&);
 	void releaseBuffer();
 

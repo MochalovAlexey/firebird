@@ -1,12 +1,19 @@
 # Wire-протоколы через плагины Firebird 6
 
 
-12 ноября: **APP-15 реализован, оставлен для review без коммита** поверх принятого
+12 ноября: **APP-15 принят в `7799cd3a54` после review и независимой приёмки** поверх принятого
 NAT-06 (`516f55bbb5`) и P2 APP-14 (`11dee63d2a`). PG TEMP использует native LTT:
 PRESERVE/DELETE, DML/индексы, rollback/savepoints, свой pg_temp namespace и живые
 каталоги. Поиск SELECT и visibility согласован по temp/path/USAGE/$user.
 [Контракт](COMPATIBILITY.md#app-15-временные-отношения) · [проверки](VALIDATION.md#12-ноября-2026-app-15-полный-цикл-поддержанных-pg-temporary-tables).
-Типы 1С, regnamespace, ON COMMIT DROP и реальная 1С/Гилёв остаются открытыми.
+[APP-16](1c/TYPES_AND_EXPRESSIONS_TASK.md) реализован; локальная приёмка PASS, изменения ожидают review.
+Работают bytea/casts/точные индексы/large Bind, mchar/mvarchar, BINROWVER/BOOL_OR
+и regnamespace. Проверены исходные selected04/07/08/12/17/18/24, операции профиля,
+metadata, lifecycle, fresh/APP-15 upgrade и регрессии. Нужен runtime с ODS 14.1.
+[Результаты и hashes](VALIDATION.md#12-ноября-2026-app-16-типы-и-выражения) ·
+[контракт](COMPATIBILITY.md#app-16-типы-и-выражения-1с).
+ON COMMIT DROP, serial/defaults, оставшиеся каталоги, locks и реальная 1С/Гилёв
+сохраняются в backlog. Будущая изоляция учтена в [EXTENSION_POINTS](EXTENSION_POINTS.md).
 
 Что ещё нужно доделать и проверить: [единый BACKLOG](BACKLOG.md).
 Порядок этапов — [PLAN](PLAN.md), фактические проверки — [VALIDATION](VALIDATION.md).
@@ -94,8 +101,8 @@ Binary BLOB subtype 0 теперь выдаётся как bytea (OID 17, size/t
 NUL/invalid UTF8 в payload допустимы. Simple/Extended, RETURNING и native PSQL
 используют текущую transaction и IBlob только на время decode одной строки.
 Общий бюджет DataRow учитывает все поля и фактический frameBytes; превышение —
-0A000 без частичного DataRow. Другие BLOB subtypes остаются отвергнутыми;
-SQL type/cast bytea и SET bytea_output не добавлены. Контракт и синтетическая
+0A000 без частичного DataRow. APP-16 также поддерживает свои BLOB subtypes 10/11 и profile text BLOB;
+SQL bytea/casts реализованы, SET bytea_output остаётся за рамками. Контракт и синтетическая
 selected06-проверка — в [1c/README](1c/README.md), evidence — в [VALIDATION](VALIDATION.md).
 
 APP-08 добавляет bytea input OID 17 для выведенного движком BLOB subtype 0:
@@ -105,7 +112,7 @@ BLOB создаётся штатным преобразованием движк
 NULL и empty различаются; Parse/Bind не создают BLOB/application transaction.
 Общие лимиты frame/native message/cache сохранены: 1 MiB / 1 MiB / 8 MiB.
 Проверены selected23 на синтетической PUBLIC.FILES и 68 BLOB среди 92 параметров;
-большие входные BLOB остаются APP-09, SQL bytea grammar и открытие 1С не приняты.
+APP-16 расширяет input на native IBlob и большие значения; открытие 1С не принято.
 
 
 ## Внутренние namespace IDs

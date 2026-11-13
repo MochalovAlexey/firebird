@@ -2187,9 +2187,6 @@ ElementBase::ReturnedId MetadataCache::lookup_index_name(thread_db* tdbb, const 
 				return lttIndex.id;
 			}
 		}
-
-		// WHY Search for index only in first LTT ???????????
-		return -1;
 	}
 
 	AutoCacheRequest request(tdbb, irq_l_index_name, IRQ_REQUESTS);

@@ -148,11 +148,11 @@ def blob_input_client(config, client):
     for sql in ('SELECT CAST($1 AS BLOB SUB_TYPE TEXT)', 'SELECT CAST($1 AS BLOB SUB_TYPE 2)',
                 'SELECT CAST($1 AS VARCHAR(20) CHARACTER SET "OCTETS")'):
         params('unsupported input',sql,[b'a'],error='0A000')
-    params('SQL bytea cast excluded','SELECT $1::bytea',[b'a'],error='42601')
+    params('SQL bytea cast','SELECT $1::bytea',[b'a'],rows=[[r'\x61']])
     prepare('insert',INSERT,inputs=(23,17,1043))
     identifier = 0
     for input_format in (0,1):
-        for size in (0,1,32765,32766,40444,65533):
+        for size in (0,1,32765,32766,40444,65533,65534,150001):
             value = payload(size)
             wire = b'\\x'+value.hex().encode() if input_format == 0 else value
             identifier += 1
@@ -160,8 +160,6 @@ def blob_input_client(config, client):
                    formats=[0,input_format,0],prepared=True,result_format=input_format,
                    rows=[[(value.hex() if input_format else '\\x'+value.hex())]],tag='INSERT 0 1')
             persisted[identifier] = value
-        wire = payload(65534) if input_format else b'\\x'+payload(65534).hex().encode()
-        params(f'reject 65534/{input_format}',INSERT,['900',wire,'too large'],formats=[0,input_format,0],error='0A000')
     for value in (None,b'',bytes(range(256)),bytes.fromhex('005c27ffc080eda080f4908080')):
         identifier += 1
         params('raw bytes/null/empty',INSERT,[str(identifier),value,'bytes'],formats=[0,1,0],
@@ -245,7 +243,7 @@ def blob_input_client(config, client):
     finally:
         disconnected.close()
     native(wait_disconnect=True)
-    report['scope'] = 'Subtype 0 input <=65533 bytes; selected23 and 68/92 fixture synthetic, not original schema/Bind or 1C opening'
+    report['scope'] = 'Subtype 0 input including 150001 bytes via native IBlob; selected23 and 68/92 fixture synthetic, not original schema/Bind or 1C opening'
     return report
 
 
@@ -264,7 +262,7 @@ def blob_input_protocols(h):
         require(before[0] == 0, 'Preflight already has a PG application transaction')
         events = raw.exchange(parse('waiting',INSERT)+describe(b'S','waiting')+packet(b'H'),b'1tT',end=b'T')
         require(events[1][1] == struct.pack('!HIII',3,23,17,1043),'Raw bytea ParameterDescription differs')
-        raw.exchange(bind('unexecuted','waiting',['700',payload(40444),'early'],formats=[0,1,0])+
+        raw.exchange(bind('unexecuted','waiting',['700',payload(150001),'early'],formats=[0,1,0])+
                      describe(b'P','unexecuted')+packet(b'H'),b'2T',end=b'T')
         require(observe('bound') == before, 'Bind changed a table/sequence or started an application transaction')
         raw.exchange(close(b'P','unexecuted')+packet(b'S'),b'3Z')
@@ -279,15 +277,15 @@ def blob_input_protocols(h):
         require(observe('invalid') == before, 'Rejected bytea/output or discarded commands caused effects')
         checks.append('malformed_bytea_raw_encoding_and_unsupported_output_discard_before_execution')
         sql = 'SELECT CAST($1 AS BLOB SUB_TYPE BINARY),42 FROM "PUBLIC"."BIN_ROWS" WHERE "ID" BETWEEN 1 AND 3 ORDER BY "ID"'
-        a,b = payload(65533),b'\xff'
+        a,b = payload(150001),b'\xff'
         raw.exchange(parse('paged',sql)+bind('a','paged',[a],formats=[1],results=[1,0])+
             bind('b','paged',[b'\\377'],results=[0,1])+execute('a',1)+packet(b'H'),b'122Ds',end=b's',rows=[[a,'42']])
         raw.exchange(execute('b',1)+packet(b'H'),b'Ds',end=b's',rows=[['\\xff',struct.pack('!i',42)]])
         raw.exchange(execute('a')+packet(b'H'),b'DDC',end=b'C',rows=[[a,'42'],[a,'42']],tag='SELECT 3')
         raw.exchange(execute('b')+packet(b'S'),b'DDCZ',rows=[['\\xff',struct.pack('!i',42)]]*2,tag='SELECT 3')
         checks.append('independent_short_long_portals_mixed_formats_suspend_resume')
-        raw.exchange(bind('once','waiting',['702',payload(40444),'once'],formats=[0,1,0],results=[1])+
-                     execute('once')+packet(b'H'),b'2DC',end=b'C',rows=[[payload(40444)]],tag='INSERT 0 1')
+        raw.exchange(bind('once','waiting',['702',payload(150001),'once'],formats=[0,1,0],results=[1])+
+                     execute('once')+packet(b'H'),b'2DC',end=b'C',rows=[[payload(150001)]],tag='INSERT 0 1')
         raw.exchange(execute('once')+packet(b'S'),b'CZ',tag='INSERT 0 1')
         after = observe('once')
         require(after == [0,before[1]+1,before[2]+1], 'A completed portal executed DML twice')
@@ -295,9 +293,9 @@ def blob_input_protocols(h):
         # Static scalar capacities make the actual native layout hit 1 MiB while Bind fits its frame.
         sql = 'SELECT OCTET_LENGTH(CAST($1 AS BLOB)) FROM "SYSTEM"."RDB$DATABASE" WHERE ' + ' AND '.join(
             f'CAST(${i} AS VARCHAR(32760) CHARACTER SET "NONE") IS NOT NULL' for i in range(2,33))
-        raw.exchange(parse('boundary',sql)+bind('fits','boundary',[payload(32888)]+['a']*31,formats=[1]+[0]*31)+
-                     execute('fits')+packet(b'S'),b'12DCZ',rows=[['32888']],tag='SELECT 1')
-        raw.exchange(bind('over','boundary',[payload(32889)]+['a']*31,formats=[1]+[0]*31)+
+        raw.exchange(parse('boundary',sql)+bind('fits','boundary',[payload(32882)]+['a']*31,formats=[1]+[0]*31)+
+                     execute('fits')+packet(b'S'),b'12DCZ',rows=[['32882']],tag='SELECT 1')
+        raw.exchange(bind('over','boundary',[payload(32883)]+['a']*31,formats=[1]+[0]*31)+
                      execute('over')+packet(b'S'),b'EZ',error='0A000')
         checks.append('native_message_exact_1MiB_and_alignment_overflow_before_execute')
         # A 68-BLOB descriptor with short values remains small even with many bound portals.

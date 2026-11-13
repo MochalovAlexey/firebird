@@ -122,6 +122,12 @@ MetadataFromBlr::MetadataFromBlr(unsigned aBlrLength, const unsigned char* aBlr,
 			item->scale = rdr.getByte();
 			break;
 
+		case blr_pg_regnamespace:
+			item->type = SQL_INT64;
+			item->length = sizeof(SINT64);
+			item->subType = 3;
+			break;
+
 		case blr_int64:
 			item->type = SQL_INT64;
 			item->length = sizeof(SINT64);

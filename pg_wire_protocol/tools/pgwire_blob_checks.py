@@ -205,7 +205,7 @@ def blobs_client(config, client):
     params('SELECT CAST($1 AS BLOB SUB_TYPE BINARY)',[None],rows=[[None]],oids=[17])
     params('SELECT CAST($1 AS BLOB SUB_TYPE TEXT)',['data'],error='0A000')
     params('SELECT CAST($1 AS BLOB SUB_TYPE 2)',['data'],error='0A000')
-    query('SELECT 1::bytea',error='42601')
+    query(r"SELECT '\x0100'::bytea",rows=[[r'\x0100']],oids=[17])
     query("SET bytea_output='hex'",error='42601')
     seen([])
     report['scope']='Output-only subtype 0; synthetic selected06 SQL, not original schema/data/Bind or 1C opening'
@@ -260,8 +260,8 @@ def blobs_protocols(h):
         raw.exchange(packet(b'Q',b'SELECT "B" FROM "PUBLIC"."BLOB_ROWS" WHERE "ID" IN (2,11) ORDER BY "ID"\x00'),b'TDEZ',error='0A000',rows=[[encoded(2)]])
         raw.run('SELECT 42',rows=[['42']])
         checks.append('later_row_failure_sends_no_partial_datarow_simple_and_extended')
-        for sql in ('SELECT "BT" FROM "PUBLIC"."BLOB_ROWS"','SELECT "BX" FROM "PUBLIC"."BLOB_ROWS"','SELECT CAST($1 AS BLOB SUB_TYPE TEXT)','SELECT 1::bytea'):
-            error='42601' if sql.endswith('::bytea') else '0A000'
+        for sql in ('SELECT "BT" FROM "PUBLIC"."BLOB_ROWS"','SELECT "BX" FROM "PUBLIC"."BLOB_ROWS"','SELECT CAST($1 AS BLOB SUB_TYPE TEXT)','SELECT 1 +'):
+            error='42601' if sql == 'SELECT 1 +' else '0A000'
             raw.exchange(parse('bad',sql)+parse('discarded','INSERT INTO "PUBLIC"."BLOB_COPY" VALUES(900,NULL)')+
                          bind('discarded','discarded')+execute('discarded')+packet(b'S'),b'EZ',error=error)
             raw.exchange(bind('missing','discarded')+packet(b'S'),b'EZ',error='26000')

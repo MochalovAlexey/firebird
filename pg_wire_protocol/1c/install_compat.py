@@ -18,14 +18,16 @@ SCRIPTS = (
     "sql/install_pg_names.sql",
     "sql/install_relation_visibility.sql",
     "sql/install_temporary_relations.sql",
+    "sql/install_types_and_expressions.sql",
 )
 
 
 def main():
     parser = argparse.ArgumentParser(
         description=__doc__,
-        epilog="Initial installation only. Each SQL file commits separately; "
-               "installation stops on the first error. Not an upgrade or repair tool.")
+        epilog="By default, install a fresh profile: each SQL file commits separately. "
+               "--upgrade-from-app15 applies only the atomic APP-16 migration. "
+               "Installation stops on the first error; existing objects are not repaired.")
     parser.add_argument("-d", "--database", required=True,
                         help="Native Firebird connection string, alias or database file path")
     parser.add_argument("-U", "--user", default=os.environ.get("ISC_USER", "SYSDBA"),
@@ -34,7 +36,10 @@ def main():
                         help="Firebird password (default: inherited ISC_PASSWORD)")
     parser.add_argument("--isql", default="isql",
                         help="Native isql from this Firebird fork (default: isql in PATH)")
+    parser.add_argument("--upgrade-from-app15", action="store_true",
+                        help="Install only the atomic APP-16 migration after native gfix -upgrade")
     args = parser.parse_args()
+    scripts = SCRIPTS[-1:] if args.upgrade_from_app15 else SCRIPTS
     if not args.database or args.database.startswith("-"):
         parser.error("database must be a connection string, alias or file path")
 
@@ -42,7 +47,7 @@ def main():
     if isql is None:
         parser.error(f"native isql executable not found: {args.isql}")
     base = Path(__file__).resolve().parent
-    for name in SCRIPTS:
+    for name in scripts:
         if not (base / name).is_file():
             parser.error(f"SQL file not found: {base / name}")
 
@@ -51,8 +56,8 @@ def main():
     if args.password is not None:
         env["ISC_PASSWORD"] = args.password
 
-    for index, name in enumerate(SCRIPTS, 1):
-        print(f"[{index}/{len(SCRIPTS)}] {name}", flush=True)
+    for index, name in enumerate(scripts, 1):
+        print(f"[{index}/{len(scripts)}] {name}", flush=True)
         # -noautocommit also covers compat.sql, which does not set AUTODDL OFF.
         # Do not enter interactive mode after the input file has been consumed.
         result = subprocess.run(
@@ -64,7 +69,7 @@ def main():
                   "Earlier scripts remain committed.", file=sys.stderr)
             return 1
 
-    print("All PgWire compatibility SQL scripts installed.")
+    print("Requested PgWire compatibility SQL scripts installed.")
     return 0
 
 

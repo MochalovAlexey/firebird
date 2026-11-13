@@ -76,6 +76,7 @@
 #define blr_ex_timestamp_tz	(unsigned char)31
 #define blr_domain_name3	(unsigned char)32
 #define blr_column_name3	(unsigned char)33
+#define blr_pg_regnamespace (unsigned char)34
 
 // first sub parameter for blr_column_name* and blr_domain_name*
 #define blr_domain_type_of	(unsigned char)0

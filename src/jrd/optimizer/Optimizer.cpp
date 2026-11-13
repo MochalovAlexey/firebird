@@ -1561,7 +1561,10 @@ void Optimizer::generateAggregateDistincts(MapNode* map)
 			}
 
 			fb_assert(desc->dsc_dtype < FB_NELEM(sort_dtypes));
-			sort_key->setSkdLength(sort_dtypes[desc->dsc_dtype], desc->dsc_length);
+			sort_key->setSkdLength(desc->isBytea() ? SKD_bytea :
+			(desc->isBlob() && desc->isPgString() ? SKD_pg_string : sort_dtypes[desc->dsc_dtype]), desc->dsc_length);
+			if (sort_key->skd_dtype == SKD_pg_string)
+				sort_key->skd_vary_offset = desc->getTextType();
 
 			if (!sort_key->skd_dtype)
 				ERR_post(Arg::Gds(isc_invalid_sort_datatype) << Arg::Str(DSC_dtype_tostring(desc->dsc_dtype)));
@@ -1644,7 +1647,10 @@ void Optimizer::generateAggregateSort(AggNode* aggNode)
 
 		// Make key for sort key proper
 		fb_assert(desc->dsc_dtype < FB_NELEM(sort_dtypes));
-		sortKey->setSkdLength(sort_dtypes[desc->dsc_dtype], desc->dsc_length);
+		sortKey->setSkdLength(desc->isBytea() ? SKD_bytea :
+			(desc->isBlob() && desc->isPgString() ? SKD_pg_string : sort_dtypes[desc->dsc_dtype]), desc->dsc_length);
+		if (sortKey->skd_dtype == SKD_pg_string)
+			sortKey->skd_vary_offset = desc->getTextType();
 		sortKey->setSkdOffset(prevKey, desc);
 
 		sortKey->skd_flags = SKD_ascending;
@@ -1885,7 +1891,10 @@ SortedStream* Optimizer::generateSort(const StreamList& streams,
 
 		// Make key for sort key proper
 		fb_assert(desc->dsc_dtype < FB_NELEM(sort_dtypes));
-		sort_key->setSkdLength(sort_dtypes[desc->dsc_dtype], desc->dsc_length);
+		sort_key->setSkdLength(desc->isBytea() ? SKD_bytea :
+			(desc->isBlob() && desc->isPgString() ? SKD_pg_string : sort_dtypes[desc->dsc_dtype]), desc->dsc_length);
+		if (sort_key->skd_dtype == SKD_pg_string)
+			sort_key->skd_vary_offset = desc->getTextType();
 		sort_key->setSkdOffset(&sort_key[-1], desc);
 		sort_key->skd_flags = SKD_ascending;
 		if (*direction == ORDER_DESC)

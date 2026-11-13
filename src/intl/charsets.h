@@ -100,6 +100,9 @@ CS_737, CS_775, CS_858, CS_862, CS_864, CS_866, CS_869
 
 #define   CS_GB18030            CSetId(69)	// GB18030
 
+#define   CS_PG_MCHAR           CSetId(70) // UTF8, 1C fixed string semantics
+#define   CS_PG_MVARCHAR        CSetId(71) // UTF8, 1C varying string semantics
+
 #define   CS_dynamic           CSetId(127)	// Pseudo number for runtime charset
 
 #endif /* INTL_CHARSETS_H */

@@ -306,6 +306,21 @@ void QueryExecutor::finishImplicit(bool& ending)
 		ending = true;
 		FbLocalStatus status;
 		transaction->commit(&status);
+		if (status->getState() & IStatus::STATE_ERRORS)
+		{
+			// LTT index construction is deferred until commit. These native
+			// validation errors occur in DFW_perform_work before TRA_commit
+			// makes the transaction durable. Confirm a full rollback before
+			// treating this implicit boundary as recoverable; explicit commit
+			// and all uncertain/cleanup failures retain the fatal policy.
+			const auto diagnostic = diagnose(&status);
+			const auto errors = status->getErrors();
+			const bool indexValidation =
+				(diagnostic.state == "54000" && fb_utils::containsErrorCode(errors, isc_keytoobig)) ||
+				(diagnostic.state == "23505" && fb_utils::containsErrorCode(errors, isc_no_dup));
+			if (!diagnostic.fatal && indexValidation && rollback())
+				ending = false;
+		}
 		check(&status);
 		transaction = nullptr;
 	}

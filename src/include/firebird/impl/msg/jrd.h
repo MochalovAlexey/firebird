@@ -1023,3 +1023,8 @@ FB_IMPL_MSG(JRD, 1020, dsql_agg_return, -204, "42", "000", "RETURN is not allowe
 FB_IMPL_MSG(JRD, 1021, hypfun_args_non_equal_sort_item, -833, "42", "000", "Number of arguments of hypothetical-set aggregate function @1 must match number of sort items in WITHIN GROUP clause")
 FB_IMPL_MSG(JRD, 1022, old_format, -804, "07", "000", "Statement format outdated, need to be reprepared")
 FB_IMPL_MSG(JRD, 1023, user_savepoint, -901, "0A", "000", "Running under user savepoint @1, DDL prohibited")
+FB_IMPL_MSG(JRD, 1024, bytea_invalid_hex, -802, "22", "023", "Invalid hexadecimal bytea input")
+FB_IMPL_MSG(JRD, 1025, bytea_invalid_escape, -802, "22", "P02", "Invalid escape in bytea input")
+FB_IMPL_MSG(JRD, 1026, pg_namespace_syntax, -104, "42", "602", "Invalid regnamespace input syntax")
+FB_IMPL_MSG(JRD, 1027, pg_namespace_missing, -607, "3F", "000", "Schema @1 does not exist")
+FB_IMPL_MSG(JRD, 1028, pg_string_too_long, -802, "XX", "000", "Value too long for mvarchar(@1): @2 characters")

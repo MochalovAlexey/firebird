@@ -363,6 +363,11 @@ static int print_blr_dtype(ctl* control, bool print_object)
 		break;
 	// End date/time/timestamp
 
+	case blr_pg_regnamespace:
+		string = "pg_regnamespace";
+		length = sizeof(ISC_INT64);
+		break;
+
 	case blr_int64:
 		string = "int64";
 		length = sizeof(ISC_INT64);

@@ -26,6 +26,8 @@
  */
 
 #include "firebird.h"
+#include "../jrd/PgString.h"
+#include "../jrd/mov_proto.h"
 #include <string.h>
 
 #include "../jrd/jrd.h"
@@ -777,6 +779,42 @@ int CVT2_blob_compare(const dsc* arg1, const dsc* arg2, DecimalStatus decSt)
 
 	if (arg1->dsc_dtype != dtype_blob)
 		ERR_post(Arg::Gds(isc_wish_list) << Arg::Gds(isc_datnotsup));
+	if (arg1->isMcharBlob() || arg2->isMcharBlob())
+	{
+		const auto left = readPgString(tdbb, arg1);
+		const auto right = readPgString(tdbb, arg2);
+		const auto collation = INTL_texttype_lookup(tdbb, TTypeId(CS_PG_MCHAR));
+		return collation->compare(left.text.length(), reinterpret_cast<const UCHAR*>(left.text.c_str()),
+			right.text.length(), reinterpret_cast<const UCHAR*>(right.text.c_str()));
+	}
+
+	if (arg1->isBytea() || arg2->isBytea())
+	{
+		dsc converted;
+		bid convertedId;
+		if (!arg2->isBlob())
+		{
+			converted.makeBlob(isc_blob_bytea, ttype_binary,
+				reinterpret_cast<ISC_QUAD*>(&convertedId));
+			dsc source = *arg2;
+			MOV_move(tdbb, &source, &converted);
+			arg2 = &converted;
+		}
+		if (memcmp(arg1->dsc_address, arg2->dsc_address, sizeof(ISC_QUAD)) == 0)
+			return 0;
+		AutoBlb first(tdbb, blb::open(tdbb, tdbb->getTransaction(), (bid*) arg1->dsc_address));
+		AutoBlb second(tdbb, blb::open(tdbb, tdbb->getTransaction(), (bid*) arg2->dsc_address));
+		UCHAR left[4096], right[4096];
+		while (true)
+		{
+			const auto a = first.getBlb()->BLB_get_data(tdbb, left, sizeof(left), false);
+			const auto b = second.getBlb()->BLB_get_data(tdbb, right, sizeof(right), false);
+			const int cmp = memcmp(left, right, MIN(a, b));
+			if (cmp) return cmp;
+			if (a != b) return a < b ? -1 : 1;
+			if (!a) return 0;
+		}
+	}
 
 	TTypeId ttype1, ttype2;
 	if (arg1->dsc_sub_type == isc_blob_text)

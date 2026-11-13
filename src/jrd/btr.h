@@ -135,6 +135,8 @@ inline constexpr int idx_sql_time_tz	= 11;
 inline constexpr int idx_timestamp_tz	= 12;
 inline constexpr int idx_bcd			= 13;	// 128-bit Integer support
 
+inline constexpr int idx_bytea           = 14; // Length-sensitive BLOB bytes
+
 // idx_itype space for future expansion
 inline constexpr int idx_first_intl_string	= 64;	// .. MAX (short) Range of computed key strings
 

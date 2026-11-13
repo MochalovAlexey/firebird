@@ -1226,7 +1226,7 @@ static inline constexpr deferred_task task_table[] =
 };
 
 
-USHORT DFW_assign_index_type(thread_db* tdbb, const QualifiedName& name, SSHORT field_type, TTypeId ttype)
+USHORT DFW_assign_index_type(thread_db* tdbb, const QualifiedName& name, SSHORT field_type, TTypeId ttype, SSHORT subType)
 {
 /**************************************
  *
@@ -1240,6 +1240,9 @@ USHORT DFW_assign_index_type(thread_db* tdbb, const QualifiedName& name, SSHORT 
  *
  **************************************/
 	SET_TDBB(tdbb);
+
+	if (field_type == dtype_blob && subType == isc_blob_bytea)
+		return idx_bytea;
 
 	if (field_type == dtype_varying || field_type == dtype_cstring || field_type == dtype_text)
 	{
@@ -4893,6 +4896,11 @@ static bool create_ltt_index(thread_db* tdbb, SSHORT phase, DeferredWork* work, 
 {
 	switch (phase)
 	{
+		case 0:
+			if (work->dfw_ids.isEmpty())
+				return false;
+			break;
+
 		case 1:
 		case 2:
 			return true;
@@ -4916,6 +4924,30 @@ static bool create_ltt_index(thread_db* tdbb, SSHORT phase, DeferredWork* work, 
 	const auto relation = ltt->relation;
 	if (!relation)
 		return false;
+
+	if (phase == 0)
+	{
+		// A failed build may have reserved the instance slot after creating
+		// the base tree. Metadata undo restores nextIndexId, so both physical
+		// slots must be released before that ID can be used again. Also undo
+		// successful builds when a later deferred operation aborts commit.
+		const auto indexId = work->dfw_ids.front();
+		for (const bool basePages : {true, false})
+		{
+			AutoSetRestoreFlag<ULONG> pageSpace(&tdbb->tdbb_flags, TDBB_use_db_page_space, basePages);
+			const auto pages = relation->getPages(tdbb, 0, false);
+			if (pages && pages->rel_index_root)
+			{
+				WIN window(pages->rel_pg_space_id, pages->rel_index_root);
+				CCH_FETCH(tdbb, &window, LCK_write, pag_root);
+				BTR_delete_index(tdbb, &window, indexId, false);
+			}
+		}
+		if (auto* idp = relation->getPermanent()->eraseIndex(tdbb, indexId))
+			idp->commit(tdbb);
+		work->dfw_ids.clear();
+		return false;
+	}
 
 	// Skip inactive indexes
 	if (lttIndex->inactive)
@@ -4953,7 +4985,7 @@ static bool create_ltt_index(thread_db* tdbb, SSHORT phase, DeferredWork* work, 
 					field.desc.dsc_dtype,
 					DTYPE_IS_TEXT(field.desc.dsc_dtype) ?
 						TTypeId(field.charSetId.value_or(CS_NONE), field.collationId.value_or(COLLATE_NONE)) :
-						ttype_none);
+						ttype_none, field.desc.getBlobSubType());
 				idx.idx_rpt[keyPos].idx_itype = idxType;
 
 				found = true;
@@ -4970,6 +5002,7 @@ static bool create_ltt_index(thread_db* tdbb, SSHORT phase, DeferredWork* work, 
 		++keyPos;
 	}
 
+	work->dfw_ids.add(lttIndex->id);
 	{	// scope
 		AutoSetRestoreFlag<ULONG> dbPageSpace(&tdbb->tdbb_flags, TDBB_use_db_page_space, true);
 

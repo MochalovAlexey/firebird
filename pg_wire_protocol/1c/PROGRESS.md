@@ -7,10 +7,15 @@ undo переживает освобождение row-root, сохраняет 
 NO AUTO UNDO/retaining/force. 44 SQL сценария, 38 OO assertions, fault probes,
 transaction и visibility регрессии PASS; [отчёт](../VALIDATION.md#12-ноября-2026-nat-06-native-ltt-metadata-undo).
 Review без замечаний; независимый повтор 44 SQL / 38 OO PASS.
-[APP-15](TEMPORARY_RELATIONS_TASK.md) реализован и оставлен для review без коммита:
+[APP-15](TEMPORARY_RELATIONS_TASK.md) принят в `7799cd3a54`:
 PG TEMP/pg_temp, поиск/права, live catalogs, DML/индексы, PRESERVE/DELETE, namespace
 undo, SQL-09/10 и installer. Полный локальный прогон PASS; результаты в VALIDATION.
-APP-10…14/NAT-06 приняты; архитектурная приёмка APP-15 ещё впереди.
+APP-10…15/NAT-06 приняты; независимый повтор APP-15: 268 libpq / 8408 OO PASS.
+[APP-16](TYPES_AND_EXPRESSIONS_TASK.md) реализован, локальная приёмка PASS;
+изменения ожидают review. Bytea/индексы/large Bind, mchar/mvarchar, BINROWVER/BOOL_OR,
+regnamespace, операции families, installer/restart и регрессии проверены.
+[571 записей матрицы / 10054 native OO assertions и evidence](../VALIDATION.md#12-ноября-2026-app-16-типы-и-выражения).
+Текущая концепция сохраняется; [будущая изоляция](../EXTENSION_POINTS.md) учитывается отдельно.
 Cache crash NAT-05 предшествует APP-14 в нашем fork, происхождение и исправление
 не установлены; называть его доказанным upstream дефектом нельзя.
 Этот файл показывает готовность прикладного сценария; конкретные незавершённые
@@ -30,13 +35,14 @@ Cache crash NAT-05 предшествует APP-14 в нашем fork, прои�
 | Начало сессии | Identity-запрос, фиксированные SET, все семь startup SET | Три настройки намеренно без эффекта; версия/Startup фактического клиента 1С ещё требуют проверки |
 | SQL/исполнение | Simple scripts с остановкой на ошибке; Extended/prepared/portals; typed последовательные `$n`, native postfix casts, literal LIMIT | Общая PG-грамматика и произвольные PG types не реализованы |
 | Транзакции | BEGIN, COMMIT/ROLLBACK, I/T/E, savepoints/recovery, native visibility | Не полная эквивалентность isolation/locks PostgreSQL; advisory locks ещё нет |
-| Binary data | Native BLOB output как bytea; text/binary input через OCTETS и native MOVE | Вход ≤65533 bytes на значение; выход ограничен общим DataRow budget. Это не SQL bytea type/index semantics |
-| Native namespace identity | APP-10 принят: устанавливаемый PGWIRE_COMPAT registry, стабильные IDs, native/libpq, права/concurrency/restart | Native DDL под user savepoint запрещён; PG types и selected04 ещё не реализованы; visibility ограничена APP-14 |
-| Публичные namespace IDs | APP-11 принят: PG_CATALOG.PG_NAMESPACE над APP-10, atomic installer, точные имена/IDs, read-only, text/binary/native/libpq и transaction visibility PASS | BIGINT/VARCHAR, wire20/1043, uppercase labels; нет PG oid/name/regnamespace, nspowner/nspacl и temp namespace; visibility — отдельный APP-14 |
-| Постоянные relations | APP-12 принят: PG_CLASS из RDB$RELATIONS + PG_NAMESPACE, native ID+1, атомарная установка, 228 libpq results и native oracle/права/lifecycle PASS | Только schema-level persistent tables/views, native wire20/1043/20/1043. Reuse ID допустим, restore не проверен; полный catalog/visibility/temp и selected04/10/11 открыты |
-| Имена PG4 / APP-13 | Принят: ASCII lowercase unquoted, точные quoted names, native-safe source, lowercase bootstrap и public-first path; независимые names/strings PASS | Native1/2/3 прежние; ведущий `_`, temp/path/USAGE добавлены APP-15; полные типы/regnamespace ещё не реализованы |
+| Binary data / APP-16 | Настоящий bytea/BLOB10, exact comparisons/indexes; большие text/binary Bind через native IBlob при Execute | Native key budget ограничивает только индексируемое значение; message/portal/DataRow budgets прежние. BLOB/0 и OCTETS сохраняют прежние native сравнения |
+| Типы / APP-16 | Mchar/mvarchar, BINROWVER/BOOL_OR, regnamespace, type identity/source и операции профиля; ODS 14.1 | 214 oracle expressions; 17 исходных families + один отдельно scoped COUNT/IN fixture. Полный pg_type/coercions не реализован; review ожидается |
+| Native namespace identity | APP-10 принят: устанавливаемый PGWIRE_COMPAT registry, стабильные IDs, native/libpq, права/concurrency/restart | Native DDL под user savepoint запрещён; regnamespace/selected04 добавлены APP-16; полный каталог не принят |
+| Публичные namespace IDs | APP-11 принят: PG_CATALOG.PG_NAMESPACE над APP-10, atomic installer, точные имена/IDs, read-only, text/binary/native/libpq и transaction visibility PASS | BIGINT/VARCHAR, wire20/1043, uppercase labels; native oid/name metadata прежние; temp и visibility добавлены APP-14/15, regnamespace — APP-16; nspowner/nspacl отсутствуют |
+| Постоянные relations | APP-12 принят: PG_CLASS из RDB$RELATIONS + PG_NAMESPACE, native ID+1, атомарная установка, 228 libpq results и native oracle/права/lifecycle PASS | Только schema-level persistent tables/views, native wire20/1043/20/1043. Reuse ID допустим, restore не проверен; полный catalog и selected10/11 открыты; temp/visibility/selected04 добавлены последующими этапами |
+| Имена PG4 / APP-13 | Принят: ASCII lowercase unquoted, точные quoted names, native-safe source, lowercase bootstrap и public-first path; независимые names/strings PASS | Native1/2/3 прежние; ведущий `_`, temp/path/USAGE добавлены APP-15; нужные типы/regnamespace добавлены APP-16 |
 | Видимость / APP-14 | pg_table_is_visible через native resolver/SCL; P2 в 11dee63d2a прошёл review, evidence 174 libpq / 60 OO PASS проверено | APP-15 расширяет effective path/USAGE/$user/pg_temp и PG-owned LTT; wire20→16; guards после вычисления аргумента |
-| PG temporary relations / APP-15 | Реализовано, на review: 268 libpq results, raw Close/portal, 8408 OO assertions, installer fresh/upgrade/отказы и native регрессии PASS | PRESERVE/DELETE, свои temp catalogs и native types; без ON COMMIT DROP, regnamespace/serial/custom types и реальной 1С. NAT-07 persistent view без FROM — отдельный сохранённый FAIL |
+| PG temporary relations / APP-15 | Принято в 7799cd3a54: независимые 268 libpq results, raw Close/portal, 8408 OO assertions, installer fresh/upgrade/отказы и native регрессии PASS | PRESERVE/DELETE, свои temp catalogs и native types; без ON COMMIT DROP/serial и реальной 1С; APP-16 добавляет нужные типы/regnamespace. NAT-07 persistent view без FROM — отдельный сохранённый FAIL |
 | Прикладные формы | Чтение конфигурации selected06 и запись selected23 неизменённым SQL; форма 92 parameters, включая 68 BLOB | Синтетические таблицы/данные; реальная схема, конфигурация и исходный Bind 1С не приняты |
 
 ## Где находимся относительно конечной цели
@@ -46,7 +52,7 @@ Cache crash NAT-05 предшествует APP-14 в нашем fork, прои�
 | Обычный libpq-клиент исполняет совместимый SQL в Firebird | Достигнута в описанном профиле |
 | Необходимый базовый обмен параметрами и binary payload | Достигнут ограниченный, проверенный профиль |
 | Каталоги и SQL, необходимые для проверки/открытия базы 1С | Не готовы; APP-01 — ближайший блокер |
-| Реальная подготовленная схема и данные информационной базы | Не приняты; APP-02/APP-05 |
+| Реальная подготовленная схема и данные информационной базы | Не приняты; APP-05 (типы записанного профиля APP-16 проверены) |
 | Открытие существующей информационной базы реальным клиентом 1С | Не принято; успешного сквозного прогона нет |
 | Выполнение и проверка результата теста Гилёва на Firebird | Не принято; успешного сквозного прогона нет |
 
@@ -64,23 +70,23 @@ Cache crash NAT-05 предшествует APP-14 в нашем fork, прои�
 | 01, 02, 03, 09, 21, 22 | Соответствующие операции поддержаны в принятых ограниченных контрактах; в 03 три SET намеренно no-op |
 | 06, 23 | Исходный SQL проверен на синтетической схеме и данных |
 | 19 | Проверен механизм 92 parameters/68 BLOB; исходный запрос на полной исходной схеме не принят |
-| 04, 05 | Не приняты: regnamespace, полный catalog, current_database/collation; APP-14 даёт ограниченную visibility |
-| 07, 17 | Не приняты: SQL bytea literals/casts/comparison и исходная схема; LIMIT сам работает |
-| 08, 18 | Не приняты: BINROWVER, custom strings/SQL types, binary predicates и unquoted имена с начальным `_` |
+| 04, 07, 08, 12, 17, 18, 24 | APP-16: исходный SQL без rewriting, synthetic typed fixtures, строки/tags/metadata и version rollback PASS |
+| 05 | Не принят: полный catalog, current_database/collation |
 | 10, 11 | Не приняты: advisory locks, каталоги и timeout contract |
-| 12, 13, 14, 15, 16, 24 | Не приняты: типы bytea/mvarchar/serial, ANALYZE, fasttrun, binary indexes; native TEMP/pg_temp покрыт APP-15 |
+| 13, 14, 15, 16 | Не приняты: serial/defaults, ANALYZE и fasttrun |
 | 20 | Не принят: исходная register schema/types и полноценная проверка записи |
 
 Нельзя складывать эти строки в процент. В частности, успешные 06/23 не означают
 чтение настоящей конфигурации, а количество проверок codec не показывает долю
 работающего теста Гилёва.
 
-## Ближайший путь: семь крупных этапов до целевого результата
+## Ближайший путь до целевого результата
 
-Оценка на 11 ноября 2026 года: **семь крупных этапов в плане, из них APP-15 передан на review;
-после его приёмки — шесть**. Это рабочая группировка известных задач до успешного
+Оценка на 12 ноября 2026 года: **APP-16 реализован и прошёл локальную приёмку; осталось пять крупных результатов**.
+Изменения APP-16 ожидают пользовательского review.
+Это рабочая группировка известных задач до успешного
 открытия подготовленной информационной базы реальным клиентом 1С и повторяемого
-теста Гилёва на Firebird. Это не обещание ровно семи инструкций/коммитов: новые
+теста Гилёва на Firebird. Это не обещание фиксированного числа инструкций/коммитов: новые
 отказы реального клиента и блокирующие дефекты могут потребовать дополнительных
 итераций. NAT-06 уже потребовал отдельной технической инструкции перед завершением
 первого этапа; семь прикладных результатов остаются теми же. Процент готовности
@@ -88,9 +94,9 @@ Cache crash NAT-05 предшествует APP-14 в нашем fork, прои�
 
 | № | Этап | Проверяемый результат / основные backlog ID |
 |---|---|---|
-| 1 | **Временные таблицы — APP-15** | [Единая инструкция](TEMPORARY_RELATIONS_TASK.md): native LTT, PG TEMP/pg_temp, имена с `_`, DML/индексы, PRESERVE/DELETE, live catalogs/visibility, rollback/savepoints, две сессии и cleanup. Реализован, локальная приёмка PASS; рабочий diff ждёт review. APP-01/04/15, SQL-09/10. |
-| 2 | **Типы и выражения 1С** | bytea/binary IDs с правильными сравнениями и индексами, mchar/mvarchar, BINROWVER, regnamespace и требуемые функции; согласованные SQL metadata/codecs. Необходимые формы параметров/casts и большие input BLOB проверяются по исходным SQL/данным. APP-02/09, нужная часть SQL-03…06. |
-| 3 | **Каталоги и проверки открытия базы** | Неизменённые selected04/05 и остальные нужные catalog queries работают с реальными объектами; определены current_database и collation contract. Простое native имя collation не выдаётся за PostgreSQL LC_COLLATE. APP-01. |
+| 1 | **Временные таблицы — APP-15** | [Единая инструкция](TEMPORARY_RELATIONS_TASK.md): native LTT, PG TEMP/pg_temp, имена с `_`, DML/индексы, PRESERVE/DELETE, live catalogs/visibility, rollback/savepoints, две сессии и cleanup. Принят в 7799cd3a54; независимая приёмка PASS. APP-01/04/15, SQL-09/10. |
+| 2 | **Типы и выражения 1С** | [APP-16: реализация и приёмка](TYPES_AND_EXPRESSIONS_TASK.md). bytea/binary IDs с правильными сравнениями и индексами, mchar/mvarchar, BINROWVER, regnamespace и требуемые функции; согласованные SQL metadata/codecs. Приёмка исходного SQL на синтетических данных PASS, review ожидается. APP-02/09, нужная часть SQL-03…06. |
+| 3 | **Каталоги и проверки открытия базы** | Selected04 уже проверен в APP-16; selected05 и остальные нужные catalog queries работают с реальными объектами; определены current_database и collation contract. Простое native имя collation не выдаётся за PostgreSQL LC_COLLATE. APP-01. |
 | 4 | **Блокировки и служебные операции нагрузки** | Shared/exclusive advisory locks с правильным lifetime и конфликтами; serial/defaults, необходимые ANALYZE/fasttrun и оставшиеся операции временных объектов имеют проверенные эффекты. APP-03/04, нужная часть SES-07. |
 | 5 | **Подготовка настоящей информационной базы** | Исходная схема, конфигурация и данные размещены в отдельной Firebird БД; чтение и DML проверены на настоящей структуре/типах. Синтетические fixtures заменены прикладными данными для приёмки. APP-05. |
 | 6 | **Успешное открытие базы клиентом 1С** | Реальный процесс 1С подключается и открывает информационную базу, читает конфигурацию; подтверждены фактическая libpq, Startup/Bind/formats. Устранены обнаруженные обязательные блокеры. APP-06, промежуточная приёмка. |

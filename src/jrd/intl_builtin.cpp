@@ -1644,7 +1644,8 @@ INTL_BOOL INTL_builtin_lookup_charset(charset* cs, const ASCII* charset_name, co
 		func = cs_unicode_ucs2_init;
 	else if (strcmp(charset_name, "OCTETS") == 0 || strcmp(charset_name, "BINARY") == 0)
 		func = cs_binary_init;
-	else if (strcmp(charset_name, "UTF8") == 0 || strcmp(charset_name, "UTF-8") == 0)
+	else if (strcmp(charset_name, "UTF8") == 0 || strcmp(charset_name, "UTF-8") == 0 ||
+		strcmp(charset_name, "PG_MCHAR") == 0 || strcmp(charset_name, "PG_MVARCHAR") == 0)
 		func = cs_utf8_init;
 	else if (strcmp(charset_name, "UTF16") == 0 || strcmp(charset_name, "UTF-16") == 0)
 		func = cs_utf16_init;
@@ -1687,7 +1688,8 @@ INTL_BOOL INTL_builtin_lookup_texttype_status(
 	{
 		func = ttype_utf8_init;
 	}
-	else if ((strcmp(charset_name, "UTF8") == 0 && strcmp(texttype_name, "UNICODE") == 0))
+	else if ((strcmp(charset_name, "UTF8") == 0 && strcmp(texttype_name, "UNICODE") == 0) ||
+		strcmp(texttype_name, "PG_MCHAR") == 0 || strcmp(texttype_name, "PG_MVARCHAR") == 0)
 		func = ttype_unicode8_init;
 	else if (strcmp(texttype_name, "UTF16") == 0 ||
 		(strcmp(charset_name, "UTF16") == 0 && strcmp(texttype_name, "UCS_BASIC") == 0))
@@ -1738,7 +1740,8 @@ ULONG INTL_builtin_setup_attributes(const ASCII* textTypeName, const ASCII* char
 	// currently a nightmare.
 	// It should declare an array to be used in others places instead of use
 	// the preprocessor, but this is a task for another day.
-	if (strstr(textTypeName, "UNICODE") && strcmp(textTypeName, "UNICODE_FSS") != 0)
+	if ((strstr(textTypeName, "UNICODE") && strcmp(textTypeName, "UNICODE_FSS") != 0) ||
+		strcmp(textTypeName, "PG_MCHAR") == 0 || strcmp(textTypeName, "PG_MVARCHAR") == 0)
 	{
 		Firebird::AutoPtr<charset> cs(FB_NEW charset);
 		memset(cs, 0, sizeof(*cs));

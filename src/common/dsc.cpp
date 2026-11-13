@@ -1431,6 +1431,10 @@ bool DSC_make_descriptor(DSC* desc,
 		desc->dsc_dtype = dtype_long;
 		break;
 
+	case blr_pg_regnamespace:
+		desc->dsc_sub_type = 3;
+		desc->dsc_scale = 0;
+		[[fallthrough]];
 	case blr_int64:
 		desc->dsc_length = sizeof(SINT64);
 		desc->dsc_dtype = dtype_int64;

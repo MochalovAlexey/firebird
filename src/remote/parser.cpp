@@ -259,6 +259,12 @@ static rem_fmt* parse_format(const UCHAR*& blr, size_t& blr_length)
 			desc->dsc_scale = *blr++;
 			break;
 
+		case blr_pg_regnamespace:
+			desc->dsc_dtype = dtype_int64;
+			desc->dsc_length = sizeof(SINT64);
+			desc->dsc_sub_type = 3;
+			break;
+
 		case blr_int64:
 			if (blr_length-- == 0)
 				return NULL;

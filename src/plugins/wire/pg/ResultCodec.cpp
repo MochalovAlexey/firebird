@@ -13,6 +13,7 @@
 
 #include "firebird.h"
 #include "ResultCodec.h"
+#include "StringCodec.h"
 #include "FloatCodec.h"
 #include "NumericCodec.h"
 #include "TemporalCodec.h"
@@ -175,17 +176,48 @@ ResultCodec::ResultCodec(IMessageMetadata* logicalMetadata,
 		switch (type)
 		{
 		case SQL_BLOB:
-			if (subtype || scale)
+		{
+			const auto charset = CSetId(logicalMetadata->getCharSet(&status, i));
+			check(&status);
+			if (((subtype && subtype != isc_blob_bytea && subtype != isc_blob_pg_mchar) && !(subtype == isc_blob_text &&
+				(charset == CS_PG_MCHAR || charset == CS_PG_MVARCHAR))) || scale)
 				throw ProtocolError("0A000", "BLOB result subtype or modifiers are not supported");
 			if (capacity != sizeof(ISC_QUAD))
 				invalidMetadata();
-			column.oid = 17;
+			column.oid = subtype == isc_blob_pg_mchar || charset == CS_PG_MCHAR ? MCHAR_OID :
+				charset == CS_PG_MVARCHAR ? MVARCHAR_OID : 17;
+			if (subtype == isc_blob_pg_mchar)
+			{
+				// The engine exposes UTF8 text; its value typmod header never enters wire data.
+				builder->setSubType(&status, i, isc_blob_text);
+				check(&status);
+				builder->setCharSet(&status, i, CS_UTF8);
+				check(&status);
+			}
 			column.typeSize = -1;
 			break;
+		}
 		case SQL_SHORT:
 		case SQL_LONG:
 		case SQL_INT64:
 		case SQL_INT128:
+			if (type == SQL_INT64 && subtype == 3 && !scale && capacity == sizeof(ISC_INT64))
+			{
+				column.oid = 4089;
+				column.typeSize = 4;
+				if (!column.format)
+				{
+					builder->setType(&status, i, SQL_VARYING);
+					check(&status);
+					builder->setSubType(&status, i, 0);
+					check(&status);
+					builder->setLength(&status, i, 256);
+					check(&status);
+					builder->setCharSet(&status, i, CS_UTF8);
+					check(&status);
+				}
+				break;
+			}
 			if (subtype < 0 || subtype > 2 || scale < (type == SQL_INT128 ? -38 : -18) || scale > 0)
 				throw ProtocolError("0A000", "Exact numeric result metadata is not supported");
 			physicalSize = type == SQL_SHORT ? sizeof(ISC_SHORT) :
@@ -229,13 +261,17 @@ ResultCodec::ResultCodec(IMessageMetadata* logicalMetadata,
 			// Some metadata implementations retain the collation in the high byte.
 			const auto charset = CSetId(textType);
 			if (textType > std::numeric_limits<ISC_USHORT>::max() ||
-				(charset != CS_UTF8 && charset != CS_NONE && charset != CS_ASCII))
+				(charset != CS_UTF8 && charset != CS_NONE && charset != CS_ASCII &&
+				charset != CS_PG_MCHAR && charset != CS_PG_MVARCHAR))
 			{
 				throw ProtocolError("0A000", "Result character set is not supported");
 			}
 			if (capacity > MAX_VARYING)
 				throw ProtocolError("0A000", "Text result exceeds supported limits");
-			column.oid = type == SQL_TEXT ? 1042 : 1043;
+			column.oid = charset == CS_PG_MCHAR ? MCHAR_OID : charset == CS_PG_MVARCHAR ? MVARCHAR_OID :
+				type == SQL_TEXT ? 1042 : 1043;
+			if (profileString(column.oid))
+				column.typeModifier = capacity / 4;
 			column.typeSize = -1;
 			if (type == SQL_TEXT)
 			{
@@ -263,8 +299,10 @@ ResultCodec::ResultCodec(IMessageMetadata* logicalMetadata,
 		check(&status);
 		column.name = alias ? alias : "";
 		validateText(column.name);
+		const bool namespaceText = column.oid == 4089 && !column.format;
 		descriptions.push_back(std::move(column));
-		fields.push_back({type == SQL_TEXT ? SQL_VARYING : type, capacity, 0, 0, scale});
+		fields.push_back({type == SQL_TEXT || namespaceText ? SQL_VARYING : type,
+			namespaceText ? 256 : capacity, 0, 0, scale});
 	}
 
 	metadata.assignRefNoIncr(builder->getMetadata(&status));
@@ -331,6 +369,14 @@ std::vector<std::optional<std::string>> ResultCodec::decode(const void* buffer, 
 		switch (field.type)
 		{
 		case SQL_BLOB:
+			if (profileString(descriptions[i].oid))
+			{
+				auto readBudget = remaining;
+				auto text = readBlob(attachment, transaction, readValue<ISC_QUAD>(address), true, readBudget);
+				validateText(text);
+				append(binary ? stringToBinary(text) : text);
+				break;
+			}
 			result.emplace_back(readBlob(attachment, transaction, readValue<ISC_QUAD>(address), binary, remaining));
 			break;
 		case SQL_SHORT:
@@ -342,6 +388,14 @@ std::vector<std::optional<std::string>> ResultCodec::decode(const void* buffer, 
 				std::to_string(readValue<ISC_LONG>(address)));
 			break;
 		case SQL_INT64:
+			if (descriptions[i].oid == 4089)
+			{
+				const auto value = readValue<ISC_INT64>(address);
+				if (value < 0 || value > std::numeric_limits<std::uint32_t>::max())
+					throw ProtocolError("22003", "Regnamespace result is out of range");
+				append(binaryInteger(static_cast<std::uint32_t>(value)));
+				break;
+			}
 			append(binary ? binaryInteger(readValue<ISC_INT64>(address)) :
 				std::to_string(readValue<ISC_INT64>(address)));
 			break;
@@ -370,8 +424,13 @@ std::vector<std::optional<std::string>> ResultCodec::decode(const void* buffer, 
 				throw ProtocolError("XX000", "Invalid engine varying result length");
 			const std::string_view text(reinterpret_cast<const char*>(address + sizeof(ISC_USHORT)), size);
 			validateText(text);
-			consume(remaining, size);
-			result.emplace_back(text);
+			if (binary && profileString(descriptions[i].oid))
+				append(stringToBinary(text));
+			else
+			{
+				consume(remaining, size);
+				result.emplace_back(text);
+			}
 			break;
 		}
 		default:

@@ -1,16 +1,27 @@
 # План реализации wire-плагинов и PgWire
 
-## APP-15: реализация для review, 12.11.2026
+## APP-16: реализация типов и выражений 1С, 12.11.2026
 
 Выполнен весь согласованный профиль [APP-15](1c/TEMPORARY_RELATIONS_TASK.md):
 PG TEMP, namespace/IDs, общий relation resolver, live provider/каталоги, undo,
 установщик и интеграционная матрица. Принятые NAT-06/P2 переиспользованы.
 [Контракт](COMPATIBILITY.md#app-15-временные-отношения), [отчёт](VALIDATION.md).
-Изменения не закоммичены. Следующий крупный результат — типы и данные 1С:
-binary IDs с индексами, требуемые строки, serial/default lifecycle и настоящий
-namespace cast. Порядок уточнять по целому прикладному сценарию; не делать
-специальный AST для selected04. ON COMMIT DROP, locks, полные каталоги и реальная
-1С/Гилёв остаются в BACKLOG. До review APP-15 не считать архитектурно принятым.
+Ревизия `7799cd3a54` принята: review без блокирующих замечаний, независимые
+268 libpq / 8408 OO, raw и installer PASS.
+
+[APP-16](1c/TYPES_AND_EXPRESSIONS_TASK.md) реализован: bytea/casts, exact binary
+comparisons/indexes и large Bind, mchar/mvarchar, BINROWVER/BOOL_OR и regnamespace.
+Полная локальная приёмка PASS: 571 записей основной матрицы, 214 oracle expressions,
+17 неизменённых operation families и отдельный COUNT/IN fixture, 10054 native OO
+assertions, fresh/APP-15 upgrade/restart и регрессии. Изменения ожидают review;
+[результаты](VALIDATION.md#12-ноября-2026-app-16-типы-и-выражения).
+ODS 14.1 нужен для новых type/index capabilities, новый OO API не добавлен.
+Осталось пять крупных результатов: каталоги открытия, locks/служебные операции,
+настоящая база, открытие клиентом 1С и Гилёв. Следующие этапы не начаты.
+
+По решению пользователя текущая концепция сохраняется. Новые и существующие
+места зависимости от протокола/диалекта учитывать в [EXTENSION_POINTS](EXTENSION_POINTS.md);
+рефакторинг их выделения сейчас не выполнять.
 
 ## Review APP-14 и план цельного этапа APP-15, 11.11.2026
 
@@ -36,11 +47,11 @@ native LTT → PG TEMP/pg_temp и имена с `_` → DML/индексы/тр�
 явным ограничением. Одна инструкция и итоговое review, без отдельных этапов на helper/view.
 Regnamespace не заменять специальным условием для одного запроса: он входит в
 следующий крупный сценарий типов/данных 1С. APP-01/02/03/04/06 и selected04/12/13
-пока не закрыты. APP-15 реализован 12.11, см. актуальный статус выше.
+пока не закрыты. APP-15 принят 12.11, см. актуальный статус выше.
 
 Рабочая оценка до подтверждённого открытия подготовленной базы 1С и повторяемого
-Гилёва — **семь крупных этапов, из которых APP-15 передан на review**. Последовательность и критерии
-результата зафиксированы в [PROGRESS](1c/PROGRESS.md#ближайший-путь-семь-крупных-этапов-до-целевого-результата).
+Гилёва — **пять оставшихся крупных результатов после локальной приёмки APP-16**. Последовательность и критерии
+результата зафиксированы в [PROGRESS](1c/PROGRESS.md#ближайший-путь-до-целевого-результата).
 Это группировка известных работ; реальные блокеры могут потребовать дополнительных
 итераций. Полная wire/platform приёмка учитывается отдельно от локального сценария.
 
@@ -52,7 +63,11 @@ Regnamespace не заменять специальным условием дл�
 объединять связанные engine/plugin/SQL изменения вокруг законченного сценария,
 с внутренними проверяемыми частями и одним итоговым review. Не выделять каждый
 view/helper в самостоятельный этап и не выполнять весь roadmap сразу.
-Коммиты по-прежнему создаёт пользователь после проверки.
+Каждая инструкция должна завершаться конкретной новой работающей возможностью
+и её приёмкой. Исследование, выбор контрактов и прототипы входят внутрь реализации;
+не выделять их в самостоятельную сдачу вместо функционального этапа. Отсутствие
+готового native механизма требует минимального корректного расширения, а не
+автоматической остановки после исследования. Коммиты создаёт пользователь после проверки.
 
 База — `master` Firebird 6, ветка `pg_wire_protocol`: [BASELINE.md](BASELINE.md). Обязательные границы задают [ARCHITECTURE.md](ARCHITECTURE.md) и [CODEX_CONTEXT.md](CODEX_CONTEXT.md); возможности и проверки — [COMPATIBILITY.md](COMPATIBILITY.md), [TEST_PLAN.md](TEST_PLAN.md).
 
@@ -70,9 +85,9 @@ view/helper в самостоятельный этап и не выполнят�
 
 Реализован [LIMIT с целочисленным литералом](1c/LIMIT_TASK.md): PG-only SELECT clause создаёт существующий RowsClause и использует штатное исполнение ограничения строк. Первый срез — count 0…2147483647 без OFFSET/ALL/NULL/count-параметров, с сохранением областей ORDER/UNION/subqueries и прежнего root guard. Production ограничен Parser.cpp/h и parse.y; конфликтов осталось 158/11. Ревизия `ccd81f6473` проверена без замечаний, повторная приёмка — в VALIDATION; SQL-01 закрыт, SQL-02 остаётся открытым.
 
-Реализован [binary BLOB output → bytea](1c/BINARY_BLOB_OUTPUT_TASK.md), APP-07 как часть APP-02: ResultCodec читает содержимое subtype 0 через штатный IBlob и передаёт text hex или raw binary с OID 17. Используется текущая transaction и существующий предел DataRow; engine/parser/API/зависимости не расширяются. Проверена выдача BinaryData в неизменной форме запроса selected06 на синтетической PUBLIC.PARAMS. Ревизия `5478a589d8` прошла review и повторную целевую приёмку; APP-07 закрыт. SQL bytea type/casts и каталоги остаются отдельными задачами; APP-02/SQL-06 не закрыты. Для APP-01 сначала нужны решения namespace IDs/имён/locale, записанные в BACKLOG.
+Исторический срез APP-07 (расширен APP-16, см. начало файла): реализован [binary BLOB output → bytea](1c/BINARY_BLOB_OUTPUT_TASK.md), APP-07 как часть APP-02: ResultCodec читает содержимое subtype 0 через штатный IBlob и передаёт text hex или raw binary с OID 17. Используется текущая transaction и существующий предел DataRow; engine/parser/API/зависимости не расширяются. Проверена выдача BinaryData в неизменной форме запроса selected06 на синтетической PUBLIC.PARAMS. Ревизия `5478a589d8` прошла review и повторную целевую приёмку; APP-07 закрыт. SQL bytea type/casts и каталоги остаются отдельными задачами; APP-02/SQL-06 не закрыты. Для APP-01 сначала нужны решения namespace IDs/имён/locale, записанные в BACKLOG.
 
-Реализован [binary BLOB input](1c/BINARY_BLOB_INPUT_TASK.md), APP-08: InputCodec декодирует text hex/escape или binary bytea и формирует physical VARCHAR OCTETS по фактическим длинам Bind. Штатный MOVE создаёт BLOB при Execute в текущей transaction; новый lifecycle в плагине и изменения engine/API не требуются. Native OO probe подтвердил точные bytes до 65533 и mixed message с 68 BLOB. Этот предел относится к каждому входному значению, большие входные BLOB остаются APP-09. Приёмка — исходная форма selected23 на синтетической схеме, libpq/raw и native readback. Ревизия `c27a3a4c5a` прошла review без замечаний и независимую приёмку на свежей сборке; APP-08 закрыт.
+Исторический срез APP-08 (расширен APP-16): реализован [binary BLOB input](1c/BINARY_BLOB_INPUT_TASK.md), APP-08: InputCodec декодирует text hex/escape или binary bytea и формирует physical VARCHAR OCTETS по фактическим длинам Bind. Штатный MOVE создаёт BLOB при Execute в текущей transaction; новый lifecycle в плагине и изменения engine/API не требуются. Native OO probe подтвердил точные bytes до 65533 и mixed message с 68 BLOB. Этот предел относится к каждому входному значению, большие входные BLOB остаются APP-09. Приёмка — исходная форма selected23 на синтетической схеме, libpq/raw и native readback. Ревизия `c27a3a4c5a` прошла review без замечаний и независимую приёмку на свежей сборке; APP-08 закрыт.
 
 Реализован [APP-10: private namespace registry](1c/NAMESPACE_REGISTRY_TASK.md), первая часть каталогов APP-01. В отдельной schema выбранной базы обычные SQL table/allocator/view и DDL trigger поддерживают стабильные IDs native schemas; C++/parser/API не меняются. Одноразовый installer атомарен и отказывается при существующей служебной schema. Ревизия `5bbdaa763d` прошла review без замечаний и независимую native/libpq приёмку с concurrency/restart; APP-10 закрыт. Сохранён native запрет DDL под user savepoint (0A000), проверены refusal/recovery и полный rollback. Положительный undo schema DDL через ROLLBACK TO не заявляется.
 

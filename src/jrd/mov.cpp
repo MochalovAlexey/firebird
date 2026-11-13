@@ -27,6 +27,8 @@
  */
 
 #include "firebird.h"
+#include "../jrd/PgNamespace.h"
+#include "../jrd/PgString.h"
 #include "../common/gdsassert.h"
 #include "../common/classes/VaryStr.h"
 #include "../jrd/jrd.h"
@@ -386,6 +388,29 @@ ULONG MOV_make_string2(Jrd::thread_db* tdbb,
  *
  **************************************/
 
+	if (desc->isMcharBlob())
+	{
+		const auto value = Jrd::readPgString(tdbb, desc);
+		const auto charset = CSetId(ttype);
+		const bool utf8 = charset == CS_UTF8 || charset == CS_PG_MCHAR || charset == CS_PG_MVARCHAR ||
+			charset == CS_NONE || charset == CS_BINARY;
+		const auto capacity = utf8 ? value.text.length() :
+			value.text.length() * INTL_charset_lookup(tdbb, charset)->maxBytesPerChar();
+		*address = buffer.getBuffer(capacity);
+		ULONG size;
+		if (utf8)
+		{
+			size = value.text.length();
+			memcpy(*address, value.text.c_str(), size);
+		}
+		else
+			size = INTL_convert_bytes(tdbb, charset, *address, capacity, CS_UTF8,
+				reinterpret_cast<const UCHAR*>(value.text.c_str()), value.text.length(), ERR_post);
+		if (limit && size > MAX_COLUMN_SIZE)
+			ERR_post(Arg::Gds(isc_arith_except) << Arg::Gds(isc_blob_truncation));
+		return size;
+	}
+
 	if (desc->isBlob())
 	{
 		// fake descriptor
@@ -438,6 +463,37 @@ Firebird::string MOV_make_string2(Jrd::thread_db* tdbb, const dsc* desc, TTypeId
 }
 
 
+// Profile strings use the existing UTF8 storage and ICU comparison machinery.
+// Their coercion rules differ: fixed strings truncate on assignment, varying
+// strings only on an explicit cast. Native CHAR/VARCHAR keep their old rules.
+bool MOV_pg_string(Jrd::thread_db* tdbb, dsc* from, dsc* to, bool explicitCast)
+{
+	if (!to->isPgString() || !to->isText())
+		return false;
+	auto value = MOV_make_string2(tdbb, from, ttype_utf8, false);
+	const unsigned limit = to->getStringLength() / 4;
+	unsigned characters = 0;
+	unsigned cut = value.length();
+	for (unsigned i = 0; i < value.length(); ++i)
+	{
+		if ((static_cast<UCHAR>(value[i]) & 0xc0) != 0x80)
+		{
+			if (characters == limit) cut = i;
+			++characters;
+		}
+	}
+	if (characters > limit)
+	{
+		if (!explicitCast && to->getCharSet() == CS_PG_MVARCHAR)
+			ERR_post(Arg::Gds(isc_pg_string_too_long) << Arg::Num(limit) << Arg::Num(characters));
+		value.resize(cut);
+	}
+	dsc source;
+	source.makeText(value.length(), ttype_utf8, reinterpret_cast<UCHAR*>(value.begin()));
+	CVT_move_common(&source, to, tdbb->getAttachment()->att_dec_status, &Jrd::EngineCallbacks::instance);
+	return true;
+}
+
 void MOV_move(Jrd::thread_db* tdbb, /*const*/ dsc* from, dsc* to, bool trustedSource)
 {
 /**************************************
@@ -450,6 +506,9 @@ void MOV_move(Jrd::thread_db* tdbb, /*const*/ dsc* from, dsc* to, bool trustedSo
  *	Move (and possible convert) something to something else.
  *
  **************************************/
+
+	if (Jrd::movePgNamespace(tdbb, from, to) || MOV_pg_string(tdbb, from, to))
+		return;
 
 	if (DTYPE_IS_BLOB_OR_QUAD(from->dsc_dtype) || DTYPE_IS_BLOB_OR_QUAD(to->dsc_dtype))
 		Jrd::blb::move(tdbb, from, to);
@@ -508,6 +567,24 @@ DescPrinter::DescPrinter(thread_db* tdbb, const dsc* desc, FB_SIZE_T mLen, TType
 		return;
 	}
 
+	if (desc->isBytea())
+	{
+		AutoBlb blob(tdbb, blb::open(tdbb, tdbb->getTransaction(), (bid*) desc->dsc_address));
+		const auto length = blob.getBlb()->blb_length;
+		const auto limit = maxLen > 5 ? (maxLen - 5) / 2 : 0;
+		HalfStaticArray<UCHAR, BUFFER_SMALL> bytes;
+		const auto count = blob.getBlb()->BLB_get_data(tdbb,
+			bytes.getBuffer(MIN(length, limit)), MIN(length, limit), false);
+		value = "x'";
+		constexpr char hex[] = "0123456789ABCDEF";
+		for (unsigned i = 0; i < count; ++i)
+		{
+			value += hex[bytes[i] >> 4];
+			value += hex[bytes[i] & 15];
+		}
+		value += length > count ? "..." : "'";
+		return;
+	}
 	fb_assert(!desc->isBlob());
 
 	const bool isBinary = (desc->isText() && desc->getCharSet() == CS_BINARY);

@@ -25,6 +25,8 @@
  */
 
 #include "firebird.h"
+#include "../jrd/blb.h"
+#include "../jrd/blb_proto.h"
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>
@@ -46,6 +48,7 @@
 #include "../jrd/cch.h"
 #include "../jrd/sort.h"
 #include "../jrd/met.h"
+#include "../jrd/LocalTemporaryTable.h"
 #include "../jrd/Statement.h"
 #include "../jrd/val.h"
 #include "../common/gdsassert.h"
@@ -683,6 +686,27 @@ dsc* IndexExpression::evaluate(Record* record) const
 
 // IndexKey class
 
+static bool hasByteaSegment(const index_desc& index)
+{
+	for (unsigned i = 0; i < index.idx_count; ++i)
+		if (index.idx_rpt[i].idx_itype == idx_bytea)
+			return true;
+	return false;
+}
+
+static bool removedByteaLttIndex(thread_db* tdbb, Cached::Relation* relation, const index_desc& index)
+{
+	if (!relation->isLTT() || !hasByteaSegment(index))
+		return false;
+	const auto ltt = tdbb->getAttachment()->att_local_temporary_tables.get(relation->getName());
+	if (!ltt)
+		return false;
+	for (const auto& item : (*ltt)->indexes)
+		if (item.id == index.idx_id && !item.inactive)
+			return false;
+	return true;
+}
+
 idx_e IndexKey::compose(Record* record, bool skipNewFormat)
 {
 	// Compute a key from a record and an index descriptor.
@@ -799,6 +823,8 @@ idx_e IndexKey::compose(Record* record, bool skipNewFormat)
 				}
 
 				compress(m_tdbb, desc_ptr, 0, &temp, tail->idx_itype, descending, m_keyType, nullptr);
+				if (temp.key_length >= maxKeyLength)
+					return idx_e_keytoobig;
 
 				const UCHAR* q = temp.key_data;
 				for (USHORT l = temp.key_length; l; --l, --stuff_count)
@@ -2068,7 +2094,22 @@ btree_page* BTR_find_page(thread_db* tdbb,
 	if (!BTR_description(tdbb, retrieval->getPermRelation(), rpage, idx, retrieval->irb_index))
 	{
 		CCH_RELEASE(tdbb, window);
+		if (hasByteaSegment(retrieval->irb_desc))
+			ERR_post(Arg::Gds(isc_old_format));
 		IBERROR(260);	// msg 260 index unexpectedly deleted
+	}
+
+	// A dropped bytea index no longer limits new values. A retained native
+	// handle must reprepare instead of reading an index that no longer receives
+	// those values. Cursors already opened retain their native read snapshot.
+	if (removedByteaLttIndex(tdbb, retrieval->getPermRelation(), *idx) ||
+		(hasByteaSegment(retrieval->irb_desc) &&
+		(idx->idx_state == Ods::irt_drop ||
+		 (idx->idx_state == Ods::irt_commit &&
+		  rpage->irt_rpt[retrieval->irb_index].getTransaction() == tdbb->getTransaction()->tra_number))))
+	{
+		CCH_RELEASE(tdbb, window);
+		ERR_post(Arg::Gds(isc_old_format));
 	}
 
 	btree_page* page = (btree_page*) CCH_HANDOFF(tdbb, window, idx->idx_root, LCK_read, pag_index);
@@ -2330,6 +2371,12 @@ USHORT BTR_key_length(thread_db* tdbb, jrd_rel* relation, index_desc* idx)
  *
  **************************************/
 	SET_TDBB(tdbb);
+
+	// Bytea has no declared storage limit. Reserve the native key budget and
+	// reject oversized actual keys atomically in the ordinary insertion path.
+	for (unsigned i = 0; i < idx->idx_count; ++i)
+		if (idx->idx_rpt[i].idx_itype == idx_bytea)
+			return tdbb->getDatabase()->getMaxIndexKeyLength() - 1;
 
 	// hvlad: in ODS11 key of descending index can be prefixed with
 	//		  one byte value. See comments in compress
@@ -2660,6 +2707,8 @@ idx_e BTR_make_key(thread_db* tdbb,
 				(n == count - 1 ?
 					keyType : ((idx->idx_flags & idx_unique) ? INTL_KEY_UNIQUE : INTL_KEY_SORT)),
 				forceInclude);
+			if (temp.key_length >= maxKeyLength)
+				return idx_e_keytoobig;
 
 			if (!(temp.key_flags & key_empty))
 				is_key_empty = false;
@@ -3142,7 +3191,23 @@ bool BTR_next_index(thread_db* tdbb, Cached::Relation* relation, jrd_tra* transa
 			}
 
 			if (BTR_description(tdbb, relation, root, idx, id))
+			{
+				// Native LTT metadata undo retains the tree until transaction end;
+				// the attachment's live index list is already changed by DROP.
+				if (removedByteaLttIndex(tdbb, relation, *idx))
+					continue;
+				// Unbounded bytea must lose its key-size restriction with DROP,
+				// even while native OAT/old handles keep the retired tree alive.
+				// Keep normal maintenance while another transaction's DROP is
+				// uncommitted; our own DROP is undone together with our writes.
+				if (hasByteaSegment(*idx) && (idx->idx_state == Ods::irt_drop ||
+					(idx->idx_state == Ods::irt_commit && transaction &&
+					 root->irt_rpt[id].getTransaction() == transaction->tra_number)))
+				{
+					continue;
+				}
 				return true;
+			}
 		}
 
 		CCH_RELEASE(tdbb, window);
@@ -3911,6 +3976,41 @@ static void compress(thread_db* tdbb,
 			key->key_length = 0; // ASC NULLs are stored with no data
 
 		fb_assert(!key->key_next);
+		return;
+	}
+
+	if (itype == idx_bytea)
+	{
+		dsc converted;
+		bid id;
+		if (!desc->isBlob())
+		{
+			converted.makeBlob(isc_blob_bytea, ttype_binary, reinterpret_cast<ISC_QUAD*>(&id));
+			dsc source = *desc;
+			MOV_move(tdbb, &source, &converted);
+			desc = &converted;
+		}
+		AutoBlb blob(tdbb, blb::open(tdbb, tdbb->getTransaction(), (bid*) desc->dsc_address));
+		const auto length = blob.getBlb()->blb_length;
+		const auto budget = tdbb->getDatabase()->getMaxIndexKeyLength();
+		// Nonzero nibbles and a terminator preserve all zero tails and the order
+		// of proper prefixes, including in descending/composite native keys.
+		if (length > (budget - 2) / 2)
+		{
+			key->key_length = budget;
+			return;
+		}
+		UCHAR bytes[MAX_KEY];
+		const auto count = blob.getBlb()->BLB_get_data(tdbb, bytes, length, false);
+		UCHAR* p = key->key_data;
+		for (unsigned i = 0; i < count; ++i)
+		{
+			*p++ = 2 + (bytes[i] >> 4);
+			*p++ = 2 + (bytes[i] & 15);
+		}
+		*p++ = 1;
+		key->key_length = p - key->key_data;
+		if (length) key->key_flags &= ~key_empty;
 		return;
 	}
 

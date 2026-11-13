@@ -3220,11 +3220,15 @@ DmlNode* MaxMinAggNode::parse(thread_db* tdbb, MemoryPool& pool, CompilerScratch
 void MaxMinAggNode::make(DsqlCompilerScratch* dsqlScratch, dsc* desc)
 {
 	DsqlDescMaker::fromNode(dsqlScratch, desc, arg, true);
+	if (desc->isPgString())
+		desc->makeBlob(desc->getCharSet() == CS_PG_MCHAR ? isc_blob_pg_mchar : isc_blob_text, desc->getTextType());
 }
 
 void MaxMinAggNode::getDesc(thread_db* tdbb, CompilerScratch* csb, dsc* desc)
 {
 	arg->getDesc(tdbb, csb, desc);
+	if (desc->isPgString())
+		desc->makeBlob(desc->getCharSet() == CS_PG_MCHAR ? isc_blob_pg_mchar : isc_blob_text, desc->getTextType());
 }
 
 ValueExprNode* MaxMinAggNode::copy(thread_db* tdbb, NodeCopier& copier) const

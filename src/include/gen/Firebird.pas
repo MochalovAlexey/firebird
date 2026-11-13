@@ -4785,7 +4785,9 @@ const
 	isc_blob_tra = byte(7);
 	isc_blob_extfile = byte(8);
 	isc_blob_debug_info = byte(9);
-	isc_blob_max_predefined_subtype = byte(10);
+	isc_blob_bytea = byte(10);
+	isc_blob_pg_mchar = byte(11);
+	isc_blob_max_predefined_subtype = byte(12);
 	fb_text_subtype_text = byte(0);
 	fb_text_subtype_binary = byte(1);
 	fb_shut_confirmation = byte(1);
@@ -6200,6 +6202,11 @@ const
 	 isc_hypfun_args_non_equal_sort_item = 335545341;
 	 isc_old_format = 335545342;
 	 isc_user_savepoint = 335545343;
+	 isc_bytea_invalid_hex = 335545344;
+	 isc_bytea_invalid_escape = 335545345;
+	 isc_pg_namespace_syntax = 335545346;
+	 isc_pg_namespace_missing = 335545347;
+	 isc_pg_string_too_long = 335545348;
 	 isc_gfix_db_name = 335740929;
 	 isc_gfix_invalid_sw = 335740930;
 	 isc_gfix_incmp_sw = 335740932;

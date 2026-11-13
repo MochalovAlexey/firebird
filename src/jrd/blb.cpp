@@ -36,6 +36,9 @@
  */
 
 #include "firebird.h"
+#include "../jrd/PgString.h"
+#include "../common/Bytea.h"
+#include <string>
 #include "memory_routines.h"
 #include <string.h>
 
@@ -1020,6 +1023,34 @@ void blb::move(thread_db* tdbb, dsc* from_desc, dsc* to_desc,
  *
  **************************************/
 	SET_TDBB(tdbb);
+
+	if (from_desc->isMcharBlob() != to_desc->isMcharBlob())
+	{
+		auto value = readPgString(tdbb, from_desc);
+		if (to_desc->isMcharBlob() && from_desc->getCharSet() != CS_PG_MCHAR)
+		{
+			value.text.rtrim(" ");
+			value.typmod = -1;
+		}
+		if (to_desc->isMcharBlob() || (to_desc->isBlob() && to_desc->getBlobSubType() == isc_blob_text))
+		{
+			bid id;
+			dsc converted = *to_desc;
+			converted.dsc_address = reinterpret_cast<UCHAR*>(&id);
+			writePgString(tdbb, value, &converted);
+			move(tdbb, &converted, to_desc, relation, record, fieldId, bulk);
+			return;
+		}
+		if (to_desc->isText())
+		{
+			if (value.text.length() > MAX_COLUMN_SIZE)
+				ERR_post(Arg::Gds(isc_arith_except) << Arg::Gds(isc_blob_truncation));
+			dsc converted;
+			converted.makeText(value.text.length(), ttype_utf8, reinterpret_cast<UCHAR*>(value.text.begin()));
+			MOV_move(tdbb, &converted, to_desc);
+			return;
+		}
+	}
 
 	if (to_desc->dsc_dtype == dtype_array)
 	{
@@ -2674,7 +2705,19 @@ static void move_from_string(thread_db* tdbb, const dsc* from_desc, dsc* to_desc
 	UCHAR* fromstr = NULL;
 
 	MoveBuffer buffer;
-	const int length = MOV_make_string2(tdbb, from_desc, charSet, &fromstr, buffer);
+	int length = MOV_make_string2(tdbb, from_desc, charSet, &fromstr, buffer);
+	std::string decoded;
+	if (to_desc->isBytea() && charSet != CS_BINARY)
+	{
+		decodeBytea(std::string_view(reinterpret_cast<const char*>(fromstr), length),
+			[&](unsigned char byte) { decoded.push_back(byte); },
+			[](bool hex) { ERR_post(Arg::Gds(hex ? isc_bytea_invalid_hex : isc_bytea_invalid_escape)); });
+		fromstr = reinterpret_cast<UCHAR*>(decoded.data());
+		length = decoded.size();
+	}
+	if (to_desc->getCharSet() == CS_PG_MCHAR && from_desc->getCharSet() != CS_PG_MCHAR)
+		while (length && fromstr[length - 1] == ' ') --length;
+
 	const auto toCharSet = to_desc->getCharSet();
 
 	if ((charSet == CS_NONE || charSet == CS_BINARY || charSet == toCharSet) &&
@@ -2690,7 +2733,7 @@ static void move_from_string(thread_db* tdbb, const dsc* from_desc, dsc* to_desc
 
 	UCharBuffer bpb;
 
-	if (!(from_desc->isText() && from_desc->getCharSet() == CS_BINARY))
+	if (!to_desc->isBytea() && !(from_desc->isText() && from_desc->getCharSet() == CS_BINARY))
 		BLB_gen_bpb_from_descs(from_desc, to_desc, bpb);
 
 	bid temp_bid;

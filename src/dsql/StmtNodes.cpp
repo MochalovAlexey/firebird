@@ -2348,7 +2348,7 @@ void DeclareLocalTableNode::getIndexDescription(thread_db* tdbb, FB_SIZE_T index
 
 		idx->idx_rpt[i].idx_field = fieldId;
 		idx->idx_rpt[i].idx_itype = DFW_assign_index_type(tdbb, QualifiedName(index.name), desc.dsc_dtype,
-			desc.isText() ? desc.getTextType() : ttype_none);
+			desc.isText() ? desc.getTextType() : ttype_none, desc.getBlobSubType());
 	}
 }
 

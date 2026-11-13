@@ -746,6 +746,7 @@ using namespace Firebird;
 %token <metaNamePtr> LOCK_TIMEOUT
 %token <uintVal> NUMBERED_PARAMETER
 %token DOUBLE_COLON
+%token <metaNamePtr> PG_SUBSTR
 %token <metaNamePtr> INT8
 %token LIMIT
 
@@ -2827,9 +2828,15 @@ data_type_or_domain
 	: data_type
 	| symbol_domain_name
 		{
-			$$ = newNode<dsql_fld>();
-			$$->typeOfName = *$1;
+			$$ = makePgType(*$1);
+			if ($$) markPgType($$, YYPOSNARG(1), YYPOSNARG(1));
+			if (!$$)
+			{
+				$$ = newNode<dsql_fld>();
+				$$->typeOfName = *$1;
+			}
 		}
+	| pg_bounded_type
 	;
 
 %type <qualifiedNamePtr> collate_clause
@@ -5694,10 +5701,16 @@ domain_type
 		}
 	| symbol_domain_name
 		{
-			$$ = newNode<dsql_fld>();
-			$$->typeOfName = *$1;
-			$$->fullDomain = true;
+			$$ = makePgType(*$1);
+			if ($$) markPgType($$, YYPOSNARG(1), YYPOSNARG(1));
+			if (!$$)
+			{
+				$$ = newNode<dsql_fld>();
+				$$->typeOfName = *$1;
+				$$->fullDomain = true;
+			}
 		}
+	| pg_bounded_type
 	;
 
 %type <legacyField> non_array_type
@@ -5776,6 +5789,14 @@ non_charset_simple_type
 	| date_time_type
 	| BIGINT
 		{ $$ = makeBigIntField(); }
+	| BIGINT SUB_TYPE signed_short_integer
+		{
+			// Native spelling for the persisted OID-alias descriptor.
+			if ($3 != 3) yyabandon(YYPOSNARG(3), -104, isc_token_err);
+			$$ = makeBigIntField();
+			$$->subType = 3;
+			$$->flags |= FLD_has_sub;
+		}
 	| INT128
 		{
 			$$ = newNode<dsql_fld>();
@@ -9914,6 +9935,16 @@ substring_function
 
 			$$ = newNode<SubstringNode>($3, subtractNode, $6);
 		}
+	| PG_SUBSTR '(' value ',' value ',' value ')'
+		{
+			$$ = newNode<SubstringNode>($3,
+				newNode<ArithmeticNode>(blr_subtract, true, $5, MAKE_const_slong(1)), $7);
+			// Canonical metadata source must parse in native dialects as well.
+			markPgSyntax(YYPOSNARG(1), YYPOSNARG(1), "SUBSTRING");
+			markPgSyntax(YYPOSNARG(4), YYPOSNARG(4), " FROM ");
+			markPgSyntax(YYPOSNARG(6), YYPOSNARG(6), " FOR ");
+		}
+
 	| SUBSTRING '(' value SIMILAR value ESCAPE value ')'
 		{ $$ = newNode<SubstringSimilarNode>($3, $5, $7); }
 	;
@@ -10038,11 +10069,26 @@ named_argument
 		{ $$ = newNode<NonPooledPair<MetaName*, ValueExprNode*>>($1, $3); }
 	;
 
+%type <legacyField> pg_bounded_type
+pg_bounded_type
+	: symbol_domain_name '(' pos_short_integer ')'
+		{
+			$$ = makePgType(*$1, $3);
+			if ($$) markPgType($$, YYPOSNARG(1), YYPOSNARG(4));
+			if (!$$) yyabandon(YYPOSNARG(1), -104, isc_token_err);
+		}
+	;
+
 %type <legacyField> postfix_cast_type
 postfix_cast_type
 	: non_array_type
-	| INT8
-		{ $$ = makeBigIntField(); }
+	| symbol_domain_name
+		{
+			$$ = makePgType(*$1);
+			if ($$) markPgType($$, YYPOSNARG(1), YYPOSNARG(1));
+			if (!$$) yyabandon(YYPOSNARG(1), -104, isc_token_err);
+		}
+	| pg_bounded_type
 	;
 
 %type <valueExprNode> cast_specification

@@ -36,6 +36,8 @@ public:
 	const std::vector<std::uint32_t>& parameterTypes() const noexcept { return types; }
 	std::vector<unsigned char> encode(const std::vector<std::optional<std::string>>& values = {},
 		const std::vector<std::int16_t>& formats = {});
+	// Bind owns bytes only. Native BLOBs are created once, immediately before Execute.
+	void materialize(IAttachment*, ITransaction*, std::vector<unsigned char>&);
 
 private:
 	struct Field
@@ -48,9 +50,9 @@ private:
 
 	RefPtr<IMessageMetadata> bindMetadata;
 	unsigned length = 0;
-	bool hasBlobs = false;
 	std::vector<std::uint32_t> types;
 	std::vector<Field> fields;
+	std::vector<std::optional<std::string>> blobs;
 };
 
 } // namespace Firebird::PgWire

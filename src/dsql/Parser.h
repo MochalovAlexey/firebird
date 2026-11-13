@@ -127,6 +127,7 @@ private:
 		bool escaped = false;
 		bool introducerAllowed = false;
 		bool identifier = false;
+		Firebird::string* replacement = nullptr;
 		unsigned pos;
 		unsigned length;
 		IntlString* str;
@@ -404,6 +405,7 @@ private:
 	Firebird::string transformedString;
 	Firebird::GenericMap<Firebird::NonPooled<IntlString*, StrMark> > strMarks;
 	Firebird::SortedArray<StrMark> identifierMarks;
+	Firebird::SortedArray<StrMark> syntaxMarks;
 	bool stmt_ambiguous;
 	DsqlStatement* parsedStatement = nullptr;
 	StmtNode* parsedDmlNode = nullptr;
@@ -413,6 +415,10 @@ private:
 	bool pgLimit = false;
 
 	dsql_fld* makeBigIntField();
+	dsql_fld* makePgType(const QualifiedName&, unsigned length = 0);
+	dsql_fld* makePgStringField(bool fixed, unsigned length);
+	void markPgType(dsql_fld*, const Position&, const Position&);
+	void markPgSyntax(const Position&, const Position&, const Firebird::string&);
 
 	// Parser feedback for lexer
 	QualifiedName* introducerCharSetName = nullptr;

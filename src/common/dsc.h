@@ -144,6 +144,26 @@ typedef struct dsc
 		return dsc_dtype == dtype_blob || dsc_dtype == dtype_quad;
 	}
 
+	bool isBytea() const noexcept
+	{
+		return dsc_dtype == dtype_blob && dsc_sub_type == isc_blob_bytea;
+	}
+
+	bool isPgString() const noexcept
+	{
+		return getCharSet() == CS_PG_MCHAR || getCharSet() == CS_PG_MVARCHAR;
+	}
+
+	bool isMcharBlob() const noexcept
+	{
+		return dsc_dtype == dtype_blob && dsc_sub_type == isc_blob_pg_mchar;
+	}
+
+	bool isRegNamespace() const noexcept
+	{
+		return dsc_dtype == dtype_int64 && dsc_sub_type == 3 && dsc_scale == 0;
+	}
+
 	bool isBoolean() const noexcept
 	{
 		return dsc_dtype == dtype_boolean;
@@ -259,6 +279,8 @@ typedef struct dsc
 
 	CSetId getCharSet() const noexcept
 	{
+		if (isMcharBlob())
+			return CS_PG_MCHAR;
 		if (isText())
 			return CSetId(dsc_sub_type);
 
@@ -278,6 +300,8 @@ typedef struct dsc
 
 	TTypeId getTextType() const noexcept
 	{
+		if (isMcharBlob())
+			return TTypeId(CS_PG_MCHAR);
 		if (isText())
 			return TTypeId(dsc_sub_type);
 
@@ -573,6 +597,9 @@ struct alt_dsc
 
 inline bool DSC_EQUIV(const dsc* d1, const dsc* d2, bool check_collate) noexcept
 {
+	if (d1->isBytea() != d2->isBytea() || d1->isMcharBlob() != d2->isMcharBlob() ||
+		d1->isRegNamespace() != d2->isRegNamespace())
+		return false;
 	if (((alt_dsc*) d1)->dsc_combined_type == ((alt_dsc*) d2)->dsc_combined_type)
 	{
 		if ((d1->dsc_dtype >= dtype_text && d1->dsc_dtype <= dtype_varying) ||

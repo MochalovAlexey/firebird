@@ -731,7 +731,9 @@
 #define isc_blob_tra                      7
 #define isc_blob_extfile                  8
 #define isc_blob_debug_info               9
-#define isc_blob_max_predefined_subtype   10
+#define isc_blob_bytea                   10
+#define isc_blob_pg_mchar                11
+#define isc_blob_max_predefined_subtype   12
 
 /* the range 20-30 is reserved for dBASE and Paradox types */
 

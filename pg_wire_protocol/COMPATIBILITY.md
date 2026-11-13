@@ -1,9 +1,85 @@
 # Матрица совместимости PostgreSQL wire plugin
 
+## APP-16: типы и выражения 1С
+
+Production-реализация над принятой APP-15; результаты приёмки и границы —
+в [VALIDATION](VALIDATION.md). DB/DPB остаётся native dialect 3; PG4 задаётся на Prepare.
+Разбор, conversions, сравнение и выполнение принадлежат движку; SQL/PSQL устанавливает
+прикладные функции, PgWire отвечает за OID/formats и lifetime параметров.
+
+| SQL тип | Native storage / descriptor | PG metadata и форматы |
+|---|---|---|
+| bytea, pg_catalog.bytea | BLOB subtype 10, полные bytes и длина | OID 17, size/mod -1; text hex/escape input, hex output; binary raw bytes |
+| mchar(n), public.mchar(n) | CHAR UTF8 charset 70 (PG_MCHAR), n Unicode codepoints | OID 0x00fb0001, typmod n, size -1; UTF8 text / UTF16LE binary |
+| mvarchar(n), public.mvarchar(n) | VARCHAR UTF8 charset 71 (PG_MVARCHAR) | OID 0x00fb0002, typmod n, size -1; UTF8 text / UTF16LE binary |
+| bare mchar / mvarchar | BLOB subtype 11 / text BLOB charset 71 | Тот же соответствующий OID, typmod -1; mchar value содержит исходный typmod, влияющий на SUBSTR |
+| regnamespace, pg_catalog.regnamespace | INT64 subtype 3, scale 0; uint32 range; BLR 34 | OID 4089, size 4/mod -1; имя или decimal text / 4 bytes network order |
+
+Custom OIDs принадлежат этому профилю и не копируют динамические OIDs расширения
+Postgres Pro. Полный pg_type не реализован. Identity сохраняется через поле,
+параметр, CAST, CASE/COALESCE/UNION, функции, поддержанный stored source и native
+reprepare. Канонический source использует native BLOB/charset, BIGINT SUB_TYPE 3
+и SUBSTRING(... FROM ... FOR ...) для PG SUBSTR.
+Прежние ограничения roots для postfix/$n/LIMIT и NAT-07 не снимаются.
+
+Bytea сравнивается по всем bytes, затем по длине: `01`, `0100`, `010000` различны.
+Native sorter читает BLOB content, включая merge runs/DISTINCT/GROUP/MIN/MAX;
+B-tree использует точный порядок bytes без prefix/hash замены. Поддержаны обычные,
+UNIQUE, descending и составные индексы persistent/LTT. Фактический ключ ограничен
+native page budget: на проверенной 8 KiB странице single bytea в 1023 bytes проходит,
+1024 даёт 54000; для compound действует общий бюджет. Это не предел типа: unindexed
+payload и Bind больше 65533 поддержаны. DROP снимает ограничение ключа; старый native
+план удалённого bytea индекса получает 07000 и требует Prepare заново.
+
+Bind хранит проверенные decoded bytes, создаёт IBlob только при Execute в текущей
+application transaction, отменяет открытые handles при partial write failure.
+Frame/message/portal/DataRow budgets прежние. Обычный BLOB/0 сохраняет native
+padding-сравнения и прежние wire bytea formats; CHAR/VARCHAR/OCTETS native1/2/3
+не получают новую семантику автоматически.
+
+Строки используют native ICU CI/PAD collation: case-insensitive, accent-sensitive,
+trailing spaces не различаются при сравнении/UNIQUE. Mchar assignment и explicit
+cast обрезают до n codepoints, mvarchar assignment отвергает превышение (XX000,
+как oracle), explicit cast обрезает. Mchar SUBSTR сохраняет исходный value typmod;
+concatenation сбрасывает его. LIKE проверяет полный padded вариант и вариант без
+конечных пробелов, сохраняя pattern; поддержан трёхаргументный SUBSTR. Binary
+формат mchar 2.3 игнорирует последний нечётный byte, invalid UTF16 отвергается.
+Это проверенный профиль операций, не все PostgreSQL coercions/arrays/collations.
+
+Regnamespace разрешает имя через живой установленный pg_namespace в текущей
+transaction; missing name → 3F000, malformed → 42602, overflow → 22003. Значение 0
+выводится `-`, неизвестный numeric ID — числом; quotes и keywords экранируются.
+Actual pg_temp_N разрешается, alias pg_temp сам по себе не является именем namespace.
+Нынешние catalog BIGINT/VARCHAR сохраняют свои metadata.
+
+Installer добавляет public.binrowver(integer) и native UDA public.bool_or(boolean)
+с EXECUTE PUBLIC и SQL SECURITY INVOKER. BINROWVER соответствует записанному
+startup strings=off: 4 zero bytes + low int32 big-endian; NULL → NULL. BOOL_OR
+игнорирует NULL, empty/all-NULL → NULL. MIN/MAX/COUNT и остальные операции
+переиспользуют native агрегаты и выражения.
+
+Нужен runtime с ODS 14.1. Для APP-15 сначала штатный `gfix -upgrade`, затем
+`install_compat.py --upgrade-from-app15`; SQL migration атомарна, проверяет APP-15
+provider/charsets и отказывает при коллизиях. Новые базы получают charsets 70/71
+сразу. Старые объекты/IDs/grants сохраняются; прежний runtime явно отвергает новую
+minor ODS. OO vtables и B-tree page layout не расширены. Порядок установки —
+[1c/README](1c/README.md#общая-установка-sql-совместимости).
+
+При implicit commit ошибки native index build keytoobig/no_dup возвращаются как
+54000/23505 лишь после успешного полного rollback. LTT deferred backout удаляет
+base/instance index slots. Explicit commit, неизвестный исход границы и cleanup
+failure сохраняют прежнюю fatal policy. PgWire не реализует отдельный data undo.
+
+За рамками: serial/defaults/selected13, ANALYZE/fasttrun/selected14–16, locks,
+полные pg_database/current_database/collation catalogs, ON COMMIT DROP, реальная
+информационная база и Гилёв. NAT-01…05/NAT-07 не объявлены исправленными.
+
+
 
 ## APP-15: временные отношения
 
-Согласованный этап реализован поверх NAT-06 и оставлен для review. Для существующей
+Этап принят в `7799cd3a54`: review без блокирующих замечаний, независимые
+268 libpq / 8408 OO PASS. Для существующей
 исправной базы APP-14 выполнить владельцем/администратором без конкурентного DDL:
 
 ```sh

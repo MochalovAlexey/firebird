@@ -1101,6 +1101,15 @@ void DdlNode::executeDdlTrigger(thread_db* tdbb, DsqlCompilerScratch* dsqlScratc
 void DdlNode::storeGlobalField(thread_db* tdbb, jrd_tra* transaction, QualifiedName& name,
 	const TypeClause* field, const string& computedSource, const BlrDebugWriter::BlrData& computedValue)
 {
+	if (((field->dtype == dtype_blob && (field->subType == isc_blob_bytea || field->subType == isc_blob_pg_mchar)) ||
+		(field->dtype == dtype_int64 && field->subType == 3) ||
+		field->charSetId == CS_PG_MCHAR || field->charSetId == CS_PG_MVARCHAR) &&
+		tdbb->getDatabase()->getEncodedOdsVersion() < ODS_14_1)
+	{
+		status_exception::raise(Arg::Gds(isc_wish_list) << Arg::Gds(isc_random) <<
+			"Persistent profile types require ODS 14.1; upgrade the database using gfix -upgrade");
+	}
+
 	Attachment* const attachment = transaction->tra_attachment;
 	const MetaString& ownerName = attachment->getEffectiveUserName();
 
@@ -9714,7 +9723,16 @@ bool AlterIndexNode::isPgTemporaryDdl(thread_db* tdbb) const
 
 bool DropIndexNode::isPgTemporaryDdl(thread_db* tdbb) const
 {
-	return pgLttTarget(tdbb, indexName, true);
+	if (pgLttTarget(tdbb, indexName, true))
+		return true;
+	// IF EXISTS on a missing pg_temp index is a no-op, including inside a
+	// savepoint. Keep the ownership guard for an existing foreign object.
+	if (silent && indexName.schema == "PGWIRE_TEMP")
+	{
+		bool systemIndex;
+		return getIndexRelationName(tdbb, indexName, systemIndex, true).object.isEmpty();
+	}
+	return false;
 }
 
 static void checkPgTempName(thread_db* tdbb, const QualifiedName& name)
@@ -13452,7 +13470,7 @@ MetaId StoreIndexNode::create(thread_db* tdbb, jrd_tra* transaction)
 				 FLD.RDB$FIELD_NAME EQ RFR.RDB$FIELD_SOURCE
 		{
 			if (++key_count > idx.idx_count || SEG.RDB$FIELD_POSITION > idx.idx_count ||
-				FLD.RDB$FIELD_TYPE == blr_blob || !FLD.RDB$DIMENSIONS.NULL)
+				(FLD.RDB$FIELD_TYPE == blr_blob && FLD.RDB$FIELD_SUB_TYPE != isc_blob_bytea) || !FLD.RDB$DIMENSIONS.NULL)
 			{
 				if (key_count > idx.idx_count)
 				{
@@ -13498,7 +13516,9 @@ MetaId StoreIndexNode::create(thread_db* tdbb, jrd_tra* transaction)
 
 			const TTypeId text_type(CSetId(FLD.RDB$CHARACTER_SET_ID), collate);
 			idx.idx_rpt[SEG.RDB$FIELD_POSITION].idx_itype =
-				DFW_assign_index_type(tdbb, indexName, gds_cvt_blr_dtype[FLD.RDB$FIELD_TYPE], text_type);
+				DFW_assign_index_type(tdbb, indexName,
+					FLD.RDB$FIELD_TYPE == blr_blob ? dtype_blob : gds_cvt_blr_dtype[FLD.RDB$FIELD_TYPE],
+					text_type, FLD.RDB$FIELD_SUB_TYPE);
 
 			// Initialize selectivity to zero. Otherwise random rubbish makes its way into database
 			idx.idx_rpt[SEG.RDB$FIELD_POSITION].idx_selectivity = 0;
@@ -13716,7 +13736,7 @@ MetaId StoreIndexNode::createExpression(thread_db* tdbb, jrd_tra* transaction)
 			idx.idx_rpt[0].idx_itype =
 				DFW_assign_index_type(tdbb, indexName,
 					idx.idx_expression_desc.dsc_dtype,
-					idx.idx_expression_desc.getTextType());
+					idx.idx_expression_desc.getTextType(), idx.idx_expression_desc.getBlobSubType());
 			idx.idx_rpt[0].idx_selectivity = 0;
 		}
 		catch (const Exception&)
@@ -13932,7 +13952,7 @@ ModifyIndexNode* CreateIndexNode::store(thread_db* tdbb, MemoryPool& p, jrd_tra*
 			{
 				ULONG length = 0;
 
-				if (GF.RDB$FIELD_TYPE == blr_blob)
+				if (GF.RDB$FIELD_TYPE == blr_blob && GF.RDB$FIELD_SUB_TYPE != isc_blob_bytea)
 				{
 					// msg 116 "attempt to index blob field in index %s"
 					status_exception::raise(Arg::PrivateDyn(116) << idxName.toQuotedString());
@@ -14427,7 +14447,7 @@ void CreateIndexNode::defineLocalTempIndex(thread_db* tdbb, DsqlCompilerScratch*
 		}
 
 		// Check if field type is indexable (no blobs or arrays)
-		if (fieldIt->desc.dsc_dtype == dtype_blob)
+		if (fieldIt->desc.dsc_dtype == dtype_blob && !fieldIt->desc.isBytea())
 			status_exception::raise(Arg::Gds(isc_blob_idx_err) << colName.c_str());
 	}
 

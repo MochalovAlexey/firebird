@@ -52,6 +52,7 @@ USHORT	MOV_make_string(Jrd::thread_db*, const dsc*, TTypeId, const char**, vary*
 ULONG	MOV_make_string2(Jrd::thread_db*, const dsc*, TTypeId, UCHAR**, Jrd::MoveBuffer&, bool = true);
 Firebird::string MOV_make_string2(Jrd::thread_db* tdbb, const dsc* desc, TTypeId ttype,
 	bool limit = true);
+bool MOV_pg_string(Jrd::thread_db*, dsc*, dsc*, bool explicitCast = false);
 void	MOV_move(Jrd::thread_db*, /*const*/ dsc*, dsc*, bool trustedSource = false);
 Firebird::Decimal64 MOV_get_dec64(Jrd::thread_db*, const dsc*);
 Firebird::Decimal128 MOV_get_dec128(Jrd::thread_db*, const dsc*);

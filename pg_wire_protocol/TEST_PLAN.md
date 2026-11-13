@@ -1,8 +1,39 @@
 # План приёмки wire plugins и PostgreSQL endpoint
 
+## APP-16: работающие типы и выражения
+
+[Инструкция](1c/TYPES_AND_EXPRESSIONS_TASK.md) реализована; локальный PASS и hashes —
+в [VALIDATION](VALIDATION.md#12-ноября-2026-app-16-типы-и-выражения).
+Основная команда: `tools/pgwire_1c_smoke.py --types --firebird-dir RUNTIME
+--work-dir NEW_TMP --previous-firebird-dir ACCEPTED_APP15_RUNTIME --types-oracle ORACLE_SUMMARY
+--types-oracle-details EXPRESSIONS_SUMMARY --capture-dir EXTERNAL_CAPTURE --timeout 240`.
+Oracle helper `pgwire_types_oracle.py`: полный mode, `--expression-details`,
+`--profile-families-only`, каждый на отдельном private cluster/work directory.
+
+Матрица: неизменённые selected04/07/08/12/17/18/24 и selected06/23 regressions;
+17 original operation families + scoped COUNT/IN fixture; 214 oracle выражений;
+persistent/LTT B-tree exact keys и failed build/retry; большой IBlob Bind/portals/
+partial-write cleanup; stored identity/native remote/restart; fresh и APP-15 ODS
+upgrade/SQL rollback/collisions/grants; native1/2/3 и одновременно native endpoint.
+Типы связаны с физическим descriptor, OID не определяется по имени поля или SQL.
+
+Сохранить отдельные edge cases: zero tails/common 65536-byte prefix; 12000-row
+multi-run sort и bare mchar NULLs; actual key boundary/oversized UPDATE/savepoint;
+DROP+oversized write+rollback; deferred LTT failed CREATE/duplicate/Extended Sync/retry;
+retained old native bitmap/navigation plans; non-owner native LTT BLOB0 INSERT…SELECT;
+nested SUBSTR view source → native SUBSTRING reprepare → restart.
+Нельзя выключать cache или переставлять падающий SQL для получения PASS.
+
+Регрессии: APP-07/08/15, names/strings/BEGIN, native transaction suite и девять unit
+executables. Историческое APP-08 ожидание 65534→0A000 заменено positive large Bind;
+APP-07 ожидание syntax error bytea cast заменено positive cast и независимой syntax
+error/discard проверкой. Прежние budgets и ordinary BLOB/0 semantics сохраняются.
+Известные NAT-01…05/07 не закрываются этой матрицей. Точки переноса —
+[EXTENSION_POINTS](EXTENSION_POINTS.md).
+
 ## APP-15: полный согласованный профиль
 
-Реализация и локальная приёмка выполнены; рабочий diff ждёт review. Повторяемая
+Принято в `7799cd3a54`: независимые 268 libpq / 8408 OO, raw и installer PASS. Повторяемая
 команда — `tools/pgwire_1c_smoke.py --temporary --firebird-dir RUNTIME
 --previous-firebird-dir ACCEPTED_NAT06_RUNTIME --work-dir NEW_TMP_DIR --timeout 300`.
 Продолжает существующий harness: `pgwire_temporary_checks.py`, raw ExtendedClient
@@ -176,6 +207,9 @@ hooks/repair, backup/restore/migration, public catalogs/oid/regnamespace/name
 mapping/visibility не заявляются; APP-01/APP-06/selected04 остаются открытыми.
 
 ## Подэтап 1С: bytea input через VARCHAR OCTETS
+
+Историческая APP-08 матрица. APP-16 заменяет physical VARCHAR на IBlob при Execute;
+65534 и больше теперь positive cases. Актуальные команды/результаты — в начале файла.
 
 `pgwire_1c_smoke.py --blob-input` / `pgwire_blob_input_checks.py` используют прежний
 libpq/raw/native harness. У существующего `pgwire_blob_fixture.cpp` добавлен режим

@@ -147,6 +147,91 @@ DsqlStatement* Parser::parse()
 }
 
 
+dsql_fld* Parser::makePgType(const QualifiedName& name, unsigned length)
+{
+	if (!pgDialect || name.package.hasData())
+		return nullptr;
+	if ((name.schema.isEmpty() || name.schema == "public") &&
+		(name.object == "mchar" || name.object == "mvarchar"))
+		return makePgStringField(name.object == "mchar", length);
+	if (length || (name.schema.hasData() && name.schema != "pg_catalog"))
+		return nullptr;
+	if (name.object == "int8")
+		return makeBigIntField();
+	if (name.object == "bytea")
+	{
+		auto field = newNode<dsql_fld>();
+		field->dtype = dtype_blob;
+		field->length = sizeof(ISC_QUAD);
+		field->subType = isc_blob_bytea;
+		field->flags |= FLD_has_sub;
+		return field;
+	}
+	if (name.object == "regnamespace")
+	{
+		auto field = makeBigIntField();
+		field->subType = 3;
+		field->flags |= FLD_has_sub;
+		return field;
+	}
+	return nullptr;
+}
+
+dsql_fld* Parser::makePgStringField(bool fixed, unsigned length)
+{
+	auto field = newNode<dsql_fld>();
+	field->dtype = length ? (fixed ? dtype_text : dtype_varying) : dtype_blob;
+	field->charLength = length;
+	field->length = length ? 0 : sizeof(ISC_QUAD);
+	field->charSet = QualifiedName(fixed ? "PG_MCHAR" : "PG_MVARCHAR", SYSTEM_SCHEMA);
+	field->flags |= FLD_has_chset;
+	if (length)
+		field->flags |= FLD_has_len;
+	else
+	{
+		field->subType = fixed ? isc_blob_pg_mchar : isc_blob_text;
+		field->flags |= FLD_has_sub;
+		if (fixed)
+		{
+			field->charSet = QualifiedName();
+			field->flags &= ~FLD_has_chset;
+		}
+	}
+	return field;
+}
+
+// Store profile type spellings in the native syntax used by metadata reprepare.
+// Only grammar-confirmed types are replaced; an ordinary identifier named bytea
+// or mchar remains an identifier.
+void Parser::markPgType(dsql_fld* field, const Position& first, const Position& last)
+{
+	string replacement;
+	if (field->dtype == dtype_blob)
+	{
+		replacement.printf("BLOB SUB_TYPE %d", field->subType);
+		if (field->charSet.hasData())
+			replacement += " CHARACTER SET " + field->charSet.toQuotedString();
+	}
+	else if (field->dtype == dtype_int64)
+		replacement = field->subType == 3 ? "BIGINT SUB_TYPE 3" : "BIGINT";
+	else
+	{
+		replacement.printf("%s(%u) CHARACTER SET ",
+			field->dtype == dtype_text ? "CHAR" : "VARCHAR", field->charLength);
+		replacement += field->charSet.toQuotedString();
+	}
+	markPgSyntax(first, last, replacement);
+}
+
+void Parser::markPgSyntax(const Position& first, const Position& last, const string& replacement)
+{
+	StrMark mark;
+	mark.pos = first.firstPos - lex.start;
+	mark.length = last.lastPos - first.firstPos;
+	mark.replacement = newString(replacement);
+	syntaxMarks.add(mark);
+}
+
 dsql_fld* Parser::makeBigIntField()
 {
 	auto field = newNode<dsql_fld>();
@@ -215,9 +300,17 @@ void Parser::transformString(const char* start, unsigned length, string& dest)
 		if ((mark.introduced || mark.escaped) && mark.pos >= fromBegin && mark.pos + mark.length <= fromBegin + length)
 			introducedMarks.add(mark);
 	}
-	for (const auto& mark : identifierMarks)
+	for (const auto& mark : syntaxMarks)
 	{
 		if (mark.pos >= fromBegin && mark.pos + mark.length <= fromBegin + length)
+			introducedMarks.add(mark);
+	}
+	for (const auto& mark : identifierMarks)
+	{
+		bool covered = false;
+		for (const auto& syntaxMark : syntaxMarks)
+			covered |= mark.pos >= syntaxMark.pos && mark.pos < syntaxMark.pos + syntaxMark.length;
+		if (!covered && mark.pos >= fromBegin && mark.pos + mark.length <= fromBegin + length)
 			introducedMarks.add(mark);
 	}
 
@@ -228,6 +321,12 @@ void Parser::transformString(const char* start, unsigned length, string& dest)
 		const char* s = lex.start + mark.pos;
 		fb_assert(s >= pos);
 		buffer.add(pos, s - pos);
+		if (mark.replacement)
+		{
+			buffer.add(mark.replacement->c_str(), mark.replacement->length());
+			pos = s + mark.length;
+			continue;
+		}
 		if (mark.identifier)
 		{
 			buffer.add('"');
@@ -1521,6 +1620,7 @@ int Parser::yylexAux()
 		lex.line_start_bk = lex.line_start;
 		lex.lines_bk = lex.lines;
 		// LIMIT is reserved only in PG; INT8 remains a non-reserved postfix type alias.
+		if (pgDialect && str == "SUBSTR") return TOK_PG_SUBSTR;
 		if (pgDialect && str == "OIDS")
 			return TOK_OIDS;
 		if (pgDialect && str == "LIMIT")

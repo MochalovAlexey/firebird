@@ -109,6 +109,8 @@ const IntlManager::CharSetDefinition IntlManager::defaultCharSets[] =
 	{"ASCII", CS_ASCII, 1},
 	{"UNICODE_FSS", CS_UNICODE_FSS, 3},
 	{"UTF8", CS_UTF8, 4},
+	{"PG_MCHAR", CS_PG_MCHAR, 4},
+	{"PG_MVARCHAR", CS_PG_MVARCHAR, 4},
 #ifdef FB_NEW_INTL_ALLOW_NOT_READY
 	{"UTF16", CS_UTF16, 4},
 	{"UTF32", CS_UTF32, 4},
@@ -246,6 +248,10 @@ const IntlManager::CollationDefinition IntlManager::defaultCollations[] =
 	{CS_ASCII, CollId(0), "ASCII", NULL, TEXTTYPE_ATTR_PAD_SPACE, NULL},
 	{CS_UNICODE_FSS, CollId(0), "UNICODE_FSS", NULL, TEXTTYPE_ATTR_PAD_SPACE, NULL},
 	{CS_UTF8, CollId(0), "UTF8", NULL, TEXTTYPE_ATTR_PAD_SPACE, NULL},
+	{CS_PG_MCHAR, CollId(0), "PG_MCHAR", NULL,
+		TEXTTYPE_ATTR_PAD_SPACE | TEXTTYPE_ATTR_CASE_INSENSITIVE, NULL},
+	{CS_PG_MVARCHAR, CollId(0), "PG_MVARCHAR", NULL,
+		TEXTTYPE_ATTR_PAD_SPACE | TEXTTYPE_ATTR_CASE_INSENSITIVE, NULL},
 	{CS_UTF8, CollId(1), "UCS_BASIC", NULL, TEXTTYPE_ATTR_PAD_SPACE, NULL},
 	{CS_UTF8, CollId(2), "UNICODE", NULL, TEXTTYPE_ATTR_PAD_SPACE, NULL},
 	{CS_UTF8, CollId(3), "UNICODE_CI", "UNICODE",
@@ -590,6 +596,10 @@ bool IntlManager::initialize()
 		"UNICODE_FSS", "", "UNICODE_FSS", builtinConfig);
 	registerCharSetCollation(QualifiedMetaString("UTF8", SYSTEM_SCHEMA),
 		"UTF8", "", "UTF8", builtinConfig);
+	registerCharSetCollation(QualifiedMetaString("PG_MCHAR", SYSTEM_SCHEMA),
+		"PG_MCHAR", "", "PG_MCHAR", builtinConfig);
+	registerCharSetCollation(QualifiedMetaString("PG_MVARCHAR", SYSTEM_SCHEMA),
+		"PG_MVARCHAR", "", "PG_MVARCHAR", builtinConfig);
 	registerCharSetCollation(QualifiedMetaString("UTF8", SYSTEM_SCHEMA),
 		"UCS_BASIC", "", "UCS_BASIC", builtinConfig);
 	registerCharSetCollation(QualifiedMetaString("UTF8", SYSTEM_SCHEMA),

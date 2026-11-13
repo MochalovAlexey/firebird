@@ -19,6 +19,7 @@
  */
 
 #include "firebird.h"
+#include "../jrd/PgString.h"
 #include <cmath>
 #include <math.h>
 #include <ctype.h>
@@ -3598,6 +3599,11 @@ bool CastNode::setParameterType(DsqlCompilerScratch* /*dsqlScratch*/,
 		{
 			parameter->par_node = source;
 			DsqlDescMaker::fromField(&parameter->par_desc, dsqlField);
+			// An explicit profile cast applies its typmod after receiving the
+			// parameter; a bounded input message would truncate/reject it first.
+			if (parameter->par_desc.isPgString() && parameter->par_desc.isText())
+				parameter->par_desc.makeBlob(parameter->par_desc.getCharSet() == CS_PG_MCHAR ?
+					isc_blob_pg_mchar : isc_blob_text, parameter->par_desc.getTextType());
 			if (!dsqlField->fullDomain)
 				parameter->par_desc.setNullable(true);
 			return true;
@@ -3839,7 +3845,7 @@ dsc* CastNode::perform(thread_db* tdbb, impure_value* impure, dsc* value,
 			}
 		}
 	}
-	else
+	else if (!MOV_pg_string(tdbb, value, &impure->vlu_desc, true))
 		MOV_move(tdbb, value, &impure->vlu_desc);
 
 	if (impure->vlu_desc.dsc_dtype == dtype_text)
@@ -4200,6 +4206,16 @@ dsc* ConcatenateNode::execute(thread_db* tdbb, Request* request) const
 	}
 
 	DataTypeUtil(tdbb).makeConcatenate(&desc, value1, value2);
+	if (desc.isPgString())
+	{
+		auto value = readPgString(tdbb, value1);
+		value.text += readPgString(tdbb, value2).text;
+		value.typmod = -1;
+		desc.dsc_address = reinterpret_cast<UCHAR*>(&impure->vlu_misc.vlu_bid);
+		writePgString(tdbb, value, &desc);
+		EVL_make_value(tdbb, &desc, impure);
+		return &impure->vlu_desc;
+	}
 
 	// Both values are present; build the concatenation
 
@@ -9753,7 +9769,8 @@ bool ParameterNode::setParameterType(DsqlCompilerScratch* dsqlScratch,
 		if (tdbb->getCharSet() != CS_NONE && tdbb->getCharSet() != CS_BINARY)
 		{
 			const auto fromCharSet = dsqlParameter->par_desc.getCharSet();
-			const auto toCharSet = (fromCharSet == CS_NONE || fromCharSet == CS_BINARY) ?
+			const auto toCharSet = (fromCharSet == CS_NONE || fromCharSet == CS_BINARY ||
+				dsqlParameter->par_desc.isPgString()) ?
 				fromCharSet : tdbb->getCharSet();
 
 			if (dsqlParameter->par_desc.dsc_dtype <= dtype_any_text)
@@ -12006,6 +12023,27 @@ dsc* SubstringNode::perform(thread_db* tdbb, impure_value* impure, const dsc* va
 
 	dsc desc;
 	DataTypeUtil(tdbb).makeSubstr(&desc, valueDsc, startDsc, lengthDsc);
+	if (valueDsc->isPgString())
+	{
+		auto value = readPgString(tdbb, valueDsc);
+		auto charset = INTL_charset_lookup(tdbb, CS_UTF8);
+		string part;
+		const auto size = charset->substring(value.text.length(),
+			reinterpret_cast<const UCHAR*>(value.text.c_str()), value.text.length(),
+			reinterpret_cast<UCHAR*>(part.getBuffer(value.text.length())), start, length);
+		part.resize(size);
+		if (valueDsc->getCharSet() == CS_PG_MCHAR && value.typmod >= 0)
+		{
+			unsigned chars = 0;
+			for (const auto c : part) chars += (static_cast<UCHAR>(c) & 0xc0) != 0x80;
+			if (chars < unsigned(value.typmod)) part.append(value.typmod - chars, ' ');
+		}
+		value.text = part;
+		desc.dsc_address = reinterpret_cast<UCHAR*>(&impure->vlu_misc.vlu_bid);
+		writePgString(tdbb, value, &desc);
+		EVL_make_value(tdbb, &desc, impure);
+		return &impure->vlu_desc;
+	}
 
 	if (desc.isText() && length > MAX_STR_SIZE)
 		length = MAX_STR_SIZE;

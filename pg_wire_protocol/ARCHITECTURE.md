@@ -1,5 +1,19 @@
 # Архитектура подключаемых сетевых протоколов
 
+APP-16 добавляет semantic identity через существующие native descriptors:
+BLOB subtypes 10/11, UTF8 charsets 70/71 и INT64 subtype 3 (regnamespace BLR 34).
+Движок выполняет conversions, comparison, B-tree и content-aware native sort;
+плагин хранит bytes Bind до Execute и обменивается данными через IBlob в application
+transaction. BINROWVER/BOOL_OR устанавливаются SQL/PSQL. ODS 14.1 отделяет новые
+storage/index capabilities от старого runtime; OO vtables прежние. Контракт и
+migration — [COMPATIBILITY](COMPATIBILITY.md#app-16-типы-и-выражения-1с), точки
+будущего выделения — EXT-12…19 в [EXTENSION_POINTS](EXTENSION_POINTS.md).
+
+12 ноября 2026: пользователь сохраняет текущую концепцию. Места зависимости
+от конкретного протокола/диалекта/СУБД учитываются в
+[EXTENSION_POINTS](EXTENSION_POINTS.md) для будущей изоляции. Обновлять реестр
+при новых доработках; сейчас не вводить новый plugin API или рефакторинг выделения.
+
 Дополнительные wire-протоколы реализуются динамическими плагинами внутри процесса `firebird`. Первый плагин — PostgreSQL. Общая серверная инфраструктура управляет TCP listeners, соединениями и workers; плагин реализует конкретный протокол и обращается к локальному движку через интерфейсы Firebird. Родной frontend сохраняет свой путь запуска, настройки, XDR и обработку запросов.
 
 Документ определяет host/plugin contract и границы SQL. Предыдущая P5-ревизия прошла целевую Linux/Super loopback приёмку: I/T/E, native transaction/session controls и recovery. В P6 сборка, unit tests и host/startup/Simple Query/transaction/lifecycle/native регрессии прошли. **Известное ограничение native baseline: READ COMMITTED READ CONSISTENCY + AUTO COMMIT не входит в подтверждённую совместимость; SNAPSHOT AUTO COMMIT проверен.** Целевой P6/M1 Linux/Super принят с известными native ограничениями. Shutdown во время ON CONNECT остаётся отдельным исключением: native Debug assertion воспроизводится также без wire endpoints. P7 Extended Query прошёл целевую Linux/Super приёмку: 16 групп. P8 codecs прошли целевую Linux/Super приёмку: восемь групп. P9/M2 принят для Linux/Super и совместимого SQL; следующий этап — P10, TLS и cancellation. Результаты и границы покрытия — в [VALIDATION.md](VALIDATION.md). TLS, Windows и другие server modes требуют отдельной реализации и приёмки.

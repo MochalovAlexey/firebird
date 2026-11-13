@@ -1,0 +1,60 @@
+-- APP-16. Run once after the APP-15 profile, as database owner.
+-- Native ODS upgrade (gfix -upgrade) precedes this atomic profile migration.
+-- Function definitions below are native PSQL equivalents, not captured SQL.
+SET BAIL ON;
+SET AUTODDL OFF;
+
+CREATE EXCEPTION PGWIRE_COMPAT.TYPES_INSTALL_ERROR
+    'APP-16 requires the APP-15 profile, ODS 14.1 and its native character sets';
+SET TERM ^;
+EXECUTE BLOCK AS
+BEGIN
+    IF (NOT EXISTS (SELECT 1 FROM SYSTEM.MON$DATABASE
+                    WHERE MON$ODS_MAJOR = 14 AND MON$ODS_MINOR >= 1) OR
+        NOT EXISTS (SELECT 1 FROM SYSTEM.RDB$CHARACTER_SETS
+                    WHERE RDB$CHARACTER_SET_ID = 70 AND RDB$CHARACTER_SET_NAME = 'PG_MCHAR') OR
+        NOT EXISTS (SELECT 1 FROM SYSTEM.RDB$CHARACTER_SETS
+                    WHERE RDB$CHARACTER_SET_ID = 71 AND RDB$CHARACTER_SET_NAME = 'PG_MVARCHAR') OR
+        NOT EXISTS (SELECT 1 FROM SYSTEM.RDB$PROCEDURES
+                    WHERE RDB$SCHEMA_NAME = 'PGWIRE_COMPAT' AND RDB$PROCEDURE_NAME = 'TEMP_ROWS_V1'
+                      AND RDB$ENGINE_NAME = 'SYSTEM' AND RDB$ENTRYPOINT = 'PGWIRE_TEMP_ROWS_V1') OR
+        NOT EXISTS (SELECT 1 FROM SYSTEM.RDB$FUNCTIONS
+                    WHERE RDB$SCHEMA_NAME = 'pg_catalog' AND RDB$FUNCTION_NAME = 'pg_my_temp_schema')) THEN
+        EXCEPTION PGWIRE_COMPAT.TYPES_INSTALL_ERROR;
+END^
+
+-- The recorded startup selects standard_conforming_strings=off. The exact
+-- external oracle function under that mode returns these eight bytes, also
+-- for negative int32 inputs (SET_BYTE retains the low eight bits of MOD).
+CREATE FUNCTION "public"."binrowver"(P1 INTEGER)
+RETURNS BLOB SUB_TYPE 10
+DETERMINISTIC
+SQL SECURITY INVOKER
+AS
+BEGIN
+    RETURN CAST(x'00000000' ||
+        ASCII_CHAR(BIN_AND(BIN_SHR(P1, 24), 255)) ||
+        ASCII_CHAR(BIN_AND(BIN_SHR(P1, 16), 255)) ||
+        ASCII_CHAR(BIN_AND(BIN_SHR(P1, 8), 255)) ||
+        ASCII_CHAR(BIN_AND(P1, 255)) AS BLOB SUB_TYPE 10);
+END^
+
+CREATE AGGREGATE FUNCTION "public"."bool_or"(INPUT_VALUE BOOLEAN)
+RETURNS BOOLEAN
+SQL SECURITY INVOKER
+AS
+DECLARE RESULT_VALUE BOOLEAN;
+BEGIN
+    ON START DO RESULT_VALUE = NULL;
+    ON ACCUMULATE DO
+    BEGIN
+        IF (INPUT_VALUE IS NOT NULL) THEN
+            RESULT_VALUE = COALESCE(RESULT_VALUE, FALSE) OR INPUT_VALUE;
+    END
+    ON GROUP DO RETURN RESULT_VALUE;
+END^
+SET TERM ;^
+GRANT EXECUTE ON FUNCTION "public"."binrowver" TO PUBLIC;
+GRANT EXECUTE ON FUNCTION "public"."bool_or" TO PUBLIC;
+DROP EXCEPTION PGWIRE_COMPAT.TYPES_INSTALL_ERROR;
+COMMIT;

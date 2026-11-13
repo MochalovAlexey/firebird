@@ -3202,6 +3202,11 @@ static int blr_print_dtype(gds_ctl* control)
 		length = 4;
 		break;
 
+	case blr_pg_regnamespace:
+		string = "pg_regnamespace";
+		length = 8;
+		break;
+
 	case blr_int64:
 		string = "int64";
 		length = 8;

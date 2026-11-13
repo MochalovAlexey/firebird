@@ -10,7 +10,8 @@ guessed Bind values. No captured SQL, parameter DETAIL or result data is saved.
 --casts checks PG postfix syntax with native CastNode semantics.
 --limits checks literal SELECT limits through native RowsClause.
 --blobs checks native binary BLOB output as bytea.
---blob-input checks bounded bytea parameters via native VARCHAR OCTETS.
+--blob-input checks bytea parameters, large values and native IBlob lifetime.
+--types checks APP-16 types, recorded expressions, installation and restart.
 --namespaces checks the optional native schema identity registry.
 --namespace-catalog checks its public PG_NAMESPACE projection with native types.
 --class-catalog checks persistent schema-level tables/views in PG_CLASS.
@@ -356,9 +357,16 @@ def client_child():
     config = json.load(sys.stdin)
     connection = None
     try:
-        connection = Libpq(config)
+        if config.get('types'):
+            from pgwire_types_oracle import TypeLibpq
+            connection = TypeLibpq(config)
+        else:
+            connection = Libpq(config)
         output = {'libpq_version': connection.pq.PQlibVersion(), 'cases': []}
-        if config.get('temporary'):
+        if config.get('types'):
+            from pgwire_types_checks import types_client
+            output['types'] = types_client(config, connection)
+        elif config.get('temporary'):
             from pgwire_temporary_checks import temporary_client
             output['temporary'] = temporary_client(config, connection)
         elif config.get('visibility'):
@@ -621,8 +629,8 @@ class OneCHarness(StartupHarness):
             ready.close()
         self.native_probe('native_before')
         config = {'port':pg,'password':self.password,'baseline':args.baseline,'settings':args.settings,'strings':args.strings,
-                  'begin':args.begin, 'parameters':args.parameters, 'casts':args.casts, 'limits':args.limits, 'blobs':args.blobs, 'blob_input':args.blob_input, 'namespaces':args.namespaces, 'namespace_catalog':args.namespace_catalog, 'class_catalog':args.class_catalog, 'pg_names':args.pg_names, 'visibility':args.visibility, 'temporary':args.temporary,
-                  'capture_dir':str(args.capture_dir),'libpq':args.libpq, 'native_port':native,
+                  'begin':args.begin, 'parameters':args.parameters, 'casts':args.casts, 'limits':args.limits, 'blobs':args.blobs, 'blob_input':args.blob_input, 'namespaces':args.namespaces, 'namespace_catalog':args.namespace_catalog, 'class_catalog':args.class_catalog, 'pg_names':args.pg_names, 'visibility':args.visibility, 'temporary':args.temporary, 'types':args.types,
+                  'capture_dir':str(args.capture_dir),'types_oracle':str(args.types_oracle) if args.types_oracle else None,'types_oracle_details':str(args.types_oracle_details) if args.types_oracle_details else None,'libpq':args.libpq, 'native_port':native,
                   'runtime':str(self.runtime),'work':str(self.work),'timeout':self.timeout}
         client_env = {key:value for key,value in self.env.items() if not key.startswith('PG')}
         result = subprocess.run([sys.executable,'-B',str(Path(__file__).resolve()),'--child'],
@@ -639,6 +647,9 @@ class OneCHarness(StartupHarness):
             from pgwire_temporary_checks import temporary_api, temporary_protocols
             self.summary['temporary_protocols'] = temporary_protocols(self)
             self.summary['temporary_api'] = temporary_api(self)
+        elif args.types:
+            from pgwire_types_checks import types_restart
+            self.summary['types_restart'] = types_restart(self)
         elif args.namespace_catalog or args.class_catalog or args.pg_names:
             pass  # This mode's native/libpq checks run in the child; APP-10 owns restart coverage.
         elif args.namespaces:
@@ -706,14 +717,17 @@ def main():
     mode.add_argument('--parameters',action='store_true',help='test consecutive numbered parameters')
     mode.add_argument('--casts',action='store_true',help='test PG postfix casts through native CastNode')
     mode.add_argument('--limits',action='store_true',help='test PG literal SELECT limits through native RowsClause')
+    mode.add_argument('--types',action='store_true',help='test APP-16 types and expressions')
     mode.add_argument('--temporary',action='store_true',help='test PG temporary relations and catalogs')
     mode.add_argument('--visibility',action='store_true',help='test persistent relation visibility')
+    parser.add_argument('--types-oracle',type=Path,help='APP-16 original selected-query oracle summary')
+    parser.add_argument('--types-oracle-details',type=Path,help='APP-16 expression oracle summary for expected rows and metadata')
     parser.add_argument('--previous-firebird-dir',type=Path,help='accepted previous runtime for visibility/temporary upgrade checks')
     mode.add_argument('--pg-names',action='store_true',help='test PG naming, native-safe sources and lowercase bootstrap')
     mode.add_argument('--class-catalog',action='store_true',help='test persistent schema-level PG_CLASS rows with native types')
     mode.add_argument('--namespace-catalog',action='store_true',help='test public namespace view with native BIGINT/VARCHAR types')
     mode.add_argument('--namespaces',action='store_true',help='test optional native schema identity registry')
-    mode.add_argument('--blob-input',action='store_true',help='test bounded bytea input via native VARCHAR OCTETS')
+    mode.add_argument('--blob-input',action='store_true',help='test bytea input, large values and native IBlob lifetime')
     mode.add_argument('--blobs',action='store_true',help='test native binary BLOB output as bytea')
     parser.add_argument('--libpq')
     parser.add_argument('--timeout',type=float,default=60)
@@ -735,8 +749,8 @@ def main():
     work.mkdir(mode=0o700)
     harness = OneCHarness(source,work.resolve(),args.timeout)
     harness.summary.pop('passed')
-    harness.summary.update(completed=False, mode='temporary' if args.temporary else 'visibility' if args.visibility else 'pg_names' if args.pg_names else 'class_catalog' if args.class_catalog else 'namespace_catalog' if args.namespace_catalog else 'namespaces' if args.namespaces else 'blob_input' if args.blob_input else 'blobs' if args.blobs else 'limits' if args.limits else 'casts' if args.casts else 'parameters' if args.parameters else 'begin' if args.begin else 'strings' if args.strings else 'settings' if args.settings else 'baseline' if args.baseline else 'select_without_from',
-        stage='PG temporary relations and catalogs' if args.temporary else 'Persistent relation visibility' if args.visibility else 'PG identifiers and native-safe stored SQL' if args.pg_names else 'Persistent relation catalog with native IDs and types' if args.class_catalog else 'Public namespace projection with native types' if args.namespace_catalog else 'Native schema identity registry' if args.namespaces else 'Bytea input via native VARCHAR OCTETS' if args.blob_input else 'Binary BLOB output as bytea' if args.blobs else 'PG literal SELECT limits' if args.limits else 'PG postfix casts' if args.casts else 'Consecutive numbered parameters' if args.parameters else 'PG BEGIN / native transactions' if args.begin else 'standard_conforming_strings / revision 2' if args.strings else
+    harness.summary.update(completed=False, mode='types' if args.types else 'temporary' if args.temporary else 'visibility' if args.visibility else 'pg_names' if args.pg_names else 'class_catalog' if args.class_catalog else 'namespace_catalog' if args.namespace_catalog else 'namespaces' if args.namespaces else 'blob_input' if args.blob_input else 'blobs' if args.blobs else 'limits' if args.limits else 'casts' if args.casts else 'parameters' if args.parameters else 'begin' if args.begin else 'strings' if args.strings else 'settings' if args.settings else 'baseline' if args.baseline else 'select_without_from',
+        stage='1C types and expressions' if args.types else 'PG temporary relations and catalogs' if args.temporary else 'Persistent relation visibility' if args.visibility else 'PG identifiers and native-safe stored SQL' if args.pg_names else 'Persistent relation catalog with native IDs and types' if args.class_catalog else 'Public namespace projection with native types' if args.namespace_catalog else 'Native schema identity registry' if args.namespaces else 'Bytea input via native VARCHAR OCTETS' if args.blob_input else 'Binary BLOB output as bytea' if args.blobs else 'PG literal SELECT limits' if args.limits else 'PG postfix casts' if args.casts else 'Consecutive numbered parameters' if args.parameters else 'PG BEGIN / native transactions' if args.begin else 'standard_conforming_strings / revision 2' if args.strings else
             'Fixed profiles and syntax-only startup settings' if args.settings else '1C observations / first engine slice',
         capture_dir=str(args.capture_dir), workers=6,
         module_sha256=hashlib.sha256((source/'plugins/libPgWire.so').read_bytes()).hexdigest(),
@@ -748,7 +762,10 @@ def main():
         ['git','diff','HEAD','--','src'],cwd=repo)).hexdigest()
     try:
         harness.prepare()
-        if args.temporary:
+        if args.types:
+            from pgwire_types_checks import types_fixture
+            types_fixture(harness,args.previous_firebird_dir)
+        elif args.temporary:
             from pgwire_temporary_checks import temporary_fixture
             temporary_fixture(harness,args.previous_firebird_dir)
         elif args.visibility:

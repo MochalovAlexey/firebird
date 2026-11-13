@@ -222,7 +222,7 @@ void verifyMetadataRejection()
 		{SQL_BLOB, 8, 0, 1}, {SQL_BLOB, 8, 0, 2}, {SQL_BLOB, 8, 1},
 		{SQL_DEC16, 8}, {SQL_INT128, 16, -39, 1},
 		{SQL_DOUBLE, 8, -2, 1}, {SQL_TYPE_DATE, 4, -1},
-		{SQL_INT64, 8, -19, 1}, {SQL_INT64, 8, 1, 1}, {SQL_INT64, 8, 0, 3},
+		{SQL_INT64, 8, -19, 1}, {SQL_INT64, 8, 1, 1}, {SQL_LONG, 4, 0, 3},
 		{SQL_BOOLEAN, 1, -1}, {SQL_BOOLEAN, 1, 0, 1},
 		{SQL_TEXT, 16, 0, 0, 1}, {SQL_TEXT, 16, 0, 0, 21},
 		{SQL_VARYING, 16, -1, 0, 4}, {SQL_VARYING, 65534, 0, 0, 4}

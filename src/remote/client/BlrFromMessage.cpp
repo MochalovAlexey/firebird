@@ -219,8 +219,13 @@ void BlrFromMessage::buildBlr(IMessageMetadata* metadata)
 				break;
 
 			case SQL_INT64:
-				appendUChar(blr_int64);
-				appendUChar(scale);
+				if (subType == 3 && !scale)
+					appendUChar(blr_pg_regnamespace);
+				else
+				{
+					appendUChar(blr_int64);
+					appendUChar(scale);
+				}
 				dtype = dtype_int64;
 				break;
 
