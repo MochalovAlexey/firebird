@@ -452,7 +452,8 @@ RelationPages* RelationPermanent::getAttPages(thread_db* tdbb, RelationPages::In
 	return pages;
 }
 
-bool RelationPermanent::delPages(thread_db* tdbb, RelationPages::InstanceId inst_id, RelationPages* aPages)
+bool RelationPermanent::delPages(thread_db* tdbb, RelationPages::InstanceId inst_id,
+	RelationPages* aPages, bool onlyIfUnused)
 {
 	RelationPages* pages = aPages ? aPages :
 		(rel_flags & REL_temp_frame ? getAttPages(tdbb, inst_id) : getPages(tdbb, inst_id, false));
@@ -464,7 +465,7 @@ bool RelationPermanent::delPages(thread_db* tdbb, RelationPages::InstanceId inst
 
 	fb_assert(pages->useCount > 0);
 
-	if (--pages->useCount)
+	if (!onlyIfUnused && --pages->useCount)
 		return false;
 
 #ifdef VIO_DEBUG
@@ -479,6 +480,15 @@ bool RelationPermanent::delPages(thread_db* tdbb, RelationPages::InstanceId inst
 
 	{ // mutex scope
 		MutexLockGuard g(rel_pages_mutex, FB_FUNCTION);
+
+		if (onlyIfUnused)
+		{
+			// Page snapshots acquire references under the same mutex. A truncate
+			// caller needs refusal without releasing its owning instance reference.
+			if (pages->useCount != 1)
+				return false;
+			--pages->useCount;
+		}
 
 		FB_SIZE_T pos;
 #ifdef DEV_BUILD

@@ -30,6 +30,7 @@
 #include "../common/dsc.h"
 #include "../common/classes/alloc.h"
 #include "../common/classes/objects_array.h"
+#include "../common/classes/RefCounted.h"
 #include <optional>
 
 namespace Jrd
@@ -39,6 +40,20 @@ namespace Jrd
 	class LocalTemporaryTable
 	{
 	public:
+		// Identity values are attachment-local and nontransactional, like sequence
+		// values. Metadata undo copies share this state instead of rewinding it.
+		class Identity : public Firebird::RefCounted
+		{
+		public:
+			Identity(SINT64 start, SLONG increment)
+				: value(start), step(increment)
+			{}
+
+			SINT64 value;
+			SLONG step;
+			bool first = true;
+		};
+
 		class Field
 		{
 		public:
@@ -59,6 +74,8 @@ namespace Jrd
 				  charLength(other.charLength),
 				  precision(other.precision),
 				  notNullFlag(other.notNullFlag),
+				  identityType(other.identityType),
+				  identity(other.identity),
 				  desc(other.desc)
 			{
 			}
@@ -74,6 +91,8 @@ namespace Jrd
 			USHORT charLength = 0;
 			USHORT precision = 0;
 			bool notNullFlag = false;
+			std::optional<IdentityType> identityType;
+			Firebird::RefPtr<Identity> identity;
 			dsc desc;
 		};
 

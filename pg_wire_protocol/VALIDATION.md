@@ -4653,3 +4653,113 @@ python3 -B pg_wire_protocol/tools/pgwire_extended_query_smoke.py \
 ```
 
 Без последнего аргумента запускается прежний C/raw profile; отсутствие Psycopg 3 нельзя выдавать за его PASS. Для установки отдельного окружения и ожидаемых driver limits см. MANUAL_TESTING. Новые timer/pause tests не добавлялись. Известные native ON CONNECT shutdown и READ CONSISTENCY + AUTO COMMIT исключения сохраняются, не исправлялись и специально не перепроверялись. Windows/другие server modes, pipeline, TLS/CancelRequest и полноценный `$n`/BEGIN application profile остаются вне этой приёмки.
+
+
+## APP-17: каталоги, serial и полная APP-16 регрессия — 13 ноября 2026
+
+Это результаты отдельных проверок совместимости и регрессии. Они не объявляют
+успешное открытие реальной базы клиентом 1С: прикладная приёмка фиксируется отдельно.
+Все проверки ниже использовали собственные runtime/security/database в `/tmp`;
+основной runtime импорта `/tmp/pgwire-1c-launch/runtime` не затрагивался.
+
+| Проверка | Результат | Evidence |
+|---|---|---|
+| Каталоги и установщик | PASS: 46 записей SQL-матрицы, fresh/APP-16 upgrade полного установщика, optional native RU collation, atomic failure/collision/repeat, неизменные namespace IDs, два обычных libpq подключения, Simple/Extended и binary result | `/tmp/pgwire-database-catalog-06/summary.json` |
+| Фактические startup запросы 1С | PASS: текущая БД/locale, отсутствие PG tablespaces, наличие mchar и соответствие реальным wire OID, версии профилей mchar/fasttrun, настоящий pg_proc; отсутствующий callable mchartypmod_in возвращает пустой результат | Тот же catalog summary |
+| serial/serial4 и native LTT identity | PASS: 50 записей SQL-матрицы плюс native START/INCREMENT, ALWAYS и int64 overflow; original selected13, omitted/DEFAULT/explicit/NULL, два независимых attachment, nontransactional counter, failed INSERT, savepoint/full rollback, rename/drop undo, prepared handles через ALTER/DROP/recreate, POSITION и surviving field после DROP | `/tmp/pgwire-serial-04/summary.json` |
+| Native LTT field ID | На исходном APP-16 LTT `(A INTEGER, B INTEGER NOT NULL)` после `DROP A` отвергал `INSERT(B) VALUES(3)` с 23000. После исправления индексации по стабильному ID — строки B=2,3, exit 0; PgWire/serial не требуются | `/tmp/pgwire-native-field-id-before-not-null.log`, `/tmp/pgwire-native-field-id-after-not-null.log`; reproducer `tools/ltt_field_id_regression.sql` |
+| Полная APP-16 матрица после новых core changes | PASS: 583 записи = все прежние 571 + 12 проверок пустого binary/text mchar/mvarchar; удалённых прежних checks нет. 214 oracle expressions совпали по rows/OID/mod/size | `/tmp/app17-app16-regression-final/summary.json`, `types-progress.json` |
+| Native OO API / restart | PASS: 10054 assertions, native dialects 1/2/3, physical metadata, сохранение typed indexes/value typmod после reopen/restart | `types_restart`, `/tmp/app17-app16-regression-final/types_api.log` |
+| ODS/profile upgrade | PASS: исходный APP-15 runtime, ODS14.0 → gfix14.1 → SQL upgrade; данные, grants, namespace IDs сохранены; injected failure, collision/repeat и отказ старого engine проверены. Fresh общий установщик теперь включает 12 SQL files | `types_install`, `types_upgrade*.log`, `types_fresh_install.log` |
+
+Catalog/serial проверены на Engine14 SHA256
+`b94081bf7d778b104df9ea8c1cc7a8eddca24e5d43cfd990bbf54e6836f41231`.
+Полная APP-16 регрессия проверена на последующей сборке 7, включая исправление
+обработки ошибок irreversible temporary-page cleanup:
+
+- Engine14: `a3eddfee9c33c94ffab24ee830f671c0e6633806c14cae5ece17337004e7badf`;
+- PgWire: `1b4c78d6197fae266a6561fb57babcd4ea9ec1e1bc5dd90235859261cbfeb9b5`;
+- HEAD: `19e749ebac6eb8794a3544627bfb1e143eb28849` плюс рабочие изменения;
+- manifest изменённых tracked и новых code/test/installer files:
+  `/tmp/app17-app16-regression-final/changed-source-manifest.json`,
+  SHA256 `935228b39b0ac5a33d03df3b5fb7898d3ef4b7335c1f755c414f2616c5982f86`. Он включает новые production helpers, которых нет в обычном `git diff`.
+
+Во всех указанных завершённых runs серверы остановлены штатно, exit 0,
+`forced_kill=false`. Полная регрессия включает второй запуск сервера и проверку
+отсутствия оставшихся attachments. Existing oracle из Postgres Pro 18.6/mchar 2.3
+переиспользован; новая эталонная СУБД для этого повтора не создавалась.
+
+```sh
+python3 -B pg_wire_protocol/tools/pgwire_1c_smoke.py \
+  --firebird-dir /tmp/gen/Debug/firebird \
+  --work-dir /tmp/app17-app16-regression-final --types \
+  --previous-firebird-dir /tmp/app16-review-78e193be68/previous-runtime \
+  --types-oracle /tmp/app16-oracle-03/summary.json \
+  --types-oracle-details /tmp/app16-oracle-expressions-02/summary.json \
+  --capture-dir /home/aleksey/dev/1c/captures/20261109T105635Z --timeout 240
+```
+
+Для повтора нужен новый `--work-dir`. Фокусные команды каталогов и serial:
+`tools/pgwire_database_checks.py` и `tools/pgwire_serial_checks.py` с теми же
+`--firebird-dir`, `--capture-dir` и отдельными новыми work directories.
+
+Границы сохранены: native ICU ru_RU отличается от PostgreSQL libc ru_RU по
+порядку смешанных Latin/Cyrillic, punctuation/composed accents; проверка
+`/tmp/pgwire-collation-comparison.json` использовала синтетические строки и
+read-only reference query. Каталоги отражают установленный профиль, а не всю
+систему PostgreSQL. Версии mchar 2.3/fasttrun 2.0 обозначают проверенный native
+профиль, не загруженные PostgreSQL библиотеки; `ALTER/CREATE EXTENSION` не
+подменены фиктивным успехом. Полные sequence APIs, int32 CYCLE и расширенные
+ALTER identity остаются вне serial-профиля. Точные ограничения:
+[DATABASE_CATALOG](1c/DATABASE_CATALOG.md), [SERIAL_IDENTITY](1c/SERIAL_IDENTITY.md),
+[TEMP_SERVICES](1c/TEMP_SERVICES.md).
+
+
+## APP-17: advisory locks, statement timeout и temporary services — 13 ноября 2026
+
+Реальные эффекты проверены на отдельных runtime/базах с настоящим libpq и
+native OO API. Прикладной импорт и рабочая база 1С не использовались.
+Финальная обычная сборка: Engine14 SHA256
+`a3eddfee9c33c94ffab24ee830f671c0e6633806c14cae5ece17337004e7badf`,
+PgWire `1b4c78d6197fae266a6561fb57babcd4ea9ec1e1bc5dd90235859261cbfeb9b5`.
+
+| Проверка | Результат | Evidence |
+|---|---|---|
+| Транзакционные advisory locks | PASS: shared/shared, exclusive conflicts, полные signed bigint keys, повторное получение, commit/rollback/retaining/release/disconnect; два native transaction одного attachment конфликтуют независимо | `/tmp/app17-advisory-final-timeout/summary.json`, `native-api.log` |
+| Savepoint и E | PASS: rollback возвращает shared после exclusive upgrade; RELEASE переносит undo в родительский уровень; ошибка снимает только текущий PG scope, outer recovery сохраняется; protocol-only duplicate prepared name также снимает locks до ROLLBACK | Тот же advisory summary |
+| statement_timeout | PASS: TO/=, точные миллисекунды через существующий IAttachment::getStatementTimeout; 0/DEFAULT снимают override; invalid/quoted-unit/SET LOCAL отвергаются без изменения прежнего значения; COMMIT/ROLLBACK сохраняют настройку; dialects 1/2/3 отвергают PG alias, native syntax/identifier сохранены; реальное ожидание конфликтующей блокировки заканчивается 57014 и E | Тот же advisory summary и native-api.log |
+| Temporary services | PASS: fasttrun сохраняет очищенное состояние через full/savepoint rollback, индексы пересоздаются, serial не сбрасывается; ALTER/DROP/recreate и разные metadata versions, NO AUTO UNDO, последующая ошибка, session isolation, quoted names/PG folding/NULL/missing/persistent guards | `/tmp/app17-temp-services-final/summary.json` |
+| Native ANALYZE effect | PASS: существующий EXPLAIN.CARDINALITY после обновления статистики текущего LTT изменился с 1021 на 1.0210000484948978; это не проверка одного completion tag | Тот же services summary |
+| Native safety guards | PASS: partially consumed active cursor и второй native transaction отвергают truncate с 55006 до изменения данных; native dialects 1/2/3 не принимают ANALYZE, имя ANALYZE разрешено; original selected14/15/16 выполняются без переписывания на synthetic tables | Тот же services summary, native-api.log |
+| Existing NAT-06 на финальной сборке | PASS: все 44 native SQL случая и 38 native OO assertions, включая row/metadata/version undo и retaining | `/tmp/app17-native-ltt-regression-final/summary.json`, `/tmp/app17-native-ltt-regression-01/native-api-final.json` |
+
+Все обычные серверы остановлены штатно, exit 0, без forced kill. Приватный
+Postgres Pro 18.6 oracle подтвердил irreversible truncate, NULL, persistent-table
+rejection и продолжение serial 1,2 → truncate/rollback → 3; потребление 4,5 через
+rollback → 6: `/tmp/app17-services-oracle-02/summary.json`. Проверка активного
+курсора на отдельном oracle завершилась PANIC pinned block; native guard 55006
+намеренно не повторяет это поведение.
+
+Отдельно проверены исключительные пути cleanup. Копии только двух исходников
+в `/tmp/app17-temp-faults` с точечными fault injections собраны в отдельный
+Engine14; production flags и shared build objects не менялись. Manifest/hash и
+команды: `/tmp/app17-temp-faults/build.json`. Все три проверки PASS в
+`/tmp/app17-temp-faults/run/summary.json`:
+
+- ошибка после удаления native pages закрывает только повреждённый attachment;
+- ошибка освобождения undo повторена на трёх savepoint уровнях: все три уровня
+  обработаны, старые actions отключены, attachment закрыт без stale-row replay;
+- ошибка после создания нового instance очищает partial instance; ROLLBACK TO,
+  пустая таблица, новый INSERT/индекс и продолжение serial работают.
+
+После ошибок fresh sessions и native connection работоспособны, persistent
+writes не зафиксированы, fault-сервер остановлен штатно с exit 0. Скрипты
+reproduction: `/tmp/build_pgwire_temp_faults.py`, `/tmp/probe_pgwire_temp_faults.py`.
+
+Ограничения: lock/fasttrun wrappers возвращают INTEGER 0/OID23 вместо PG void;
+нет session/try/two-int locks. statement_timeout имеет native attachment lifetime,
+не transactional GUC; SET LOCAL и quoted units не поддержаны, zero/DEFAULT
+оставляют в силе server policy. ANALYZE/fasttrun обслуживают только свои PG LTT,
+без PG histograms/whole-database ANALYZE. Точки последующей изоляции EXT-21 и
+EXT-23; точные профили: [ADVISORY_LOCKS](1c/ADVISORY_LOCKS.md) и
+[TEMP_SERVICES](1c/TEMP_SERVICES.md).

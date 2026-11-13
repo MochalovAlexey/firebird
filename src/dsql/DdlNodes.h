@@ -2162,6 +2162,33 @@ public:
 };
 
 
+class AnalyzeNode final : public DdlNode
+{
+public:
+	AnalyzeNode(MemoryPool& pool, const QualifiedName& value)
+		: DdlNode(pool), name(pool, value)
+	{}
+	Firebird::string internalPrint(NodePrinter&) const override;
+	void checkPermission(thread_db*) override;
+	void execute(thread_db*, DsqlCompilerScratch*, jrd_tra*) override;
+	bool isPgTemporaryDdl(thread_db*) const override;
+	bool disallowedInReadOnlyDatabase() const override { return false; }
+	bool mustBeReplicated() const override { return false; }
+	DdlNode* dsqlPass(DsqlCompilerScratch* scratch) override
+	{
+		scratch->qualifyExistingName(name, obj_relation);
+		return DdlNode::dsqlPass(scratch);
+	}
+protected:
+	void putErrorPrefix(Firebird::Arg::StatusVector& status) override
+	{
+		status << Firebird::Arg::Gds(isc_dsql_alter_table_failed) << name.toQuotedString();
+	}
+private:
+	QualifiedName name;
+};
+
+
 class SetStatisticsNode final : public DdlNode
 {
 public:

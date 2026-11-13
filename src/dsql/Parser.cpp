@@ -1606,6 +1606,7 @@ int Parser::yylexAux()
 				keyVer->keyword != TOK_ENABLE_MERGEJOIN &&
 				keyVer->keyword != TOK_ESCAPE_STRING_WARNING &&
 				keyVer->keyword != TOK_LOCK_TIMEOUT &&
+				keyVer->keyword != TOK_STATEMENT_TIMEOUT &&
 				keyVer->keyword != TOK_STANDARD_CONFORMING_STRINGS)))
 		{
 			yylval.metaNamePtr = keyVer->str;

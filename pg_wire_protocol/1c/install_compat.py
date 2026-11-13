@@ -19,6 +19,10 @@ SCRIPTS = (
     "sql/install_relation_visibility.sql",
     "sql/install_temporary_relations.sql",
     "sql/install_types_and_expressions.sql",
+    "sql/install_database_catalog.sql",
+    "sql/install_advisory_locks.sql",
+    "sql/install_type_catalog.sql",
+    "sql/install_temp_services.sql",
 )
 
 
@@ -26,7 +30,8 @@ def main():
     parser = argparse.ArgumentParser(
         description=__doc__,
         epilog="By default, install a fresh profile: each SQL file commits separately. "
-               "--upgrade-from-app15 applies only the atomic APP-16 migration. "
+               "--upgrade-from-app15 starts with the APP-16 migration; "
+               "--upgrade-from-app16 installs catalogs, advisory locks and temporary-table services. "
                "Installation stops on the first error; existing objects are not repaired.")
     parser.add_argument("-d", "--database", required=True,
                         help="Native Firebird connection string, alias or database file path")
@@ -36,10 +41,19 @@ def main():
                         help="Firebird password (default: inherited ISC_PASSWORD)")
     parser.add_argument("--isql", default="isql",
                         help="Native isql from this Firebird fork (default: isql in PATH)")
-    parser.add_argument("--upgrade-from-app15", action="store_true",
-                        help="Install only the atomic APP-16 migration after native gfix -upgrade")
+    upgrade = parser.add_mutually_exclusive_group()
+    upgrade.add_argument("--upgrade-from-app15", action="store_true",
+                         help="Upgrade APP-15 after native gfix -upgrade")
+    upgrade.add_argument("--upgrade-from-app16", action="store_true",
+                         help="Install catalogs, advisory locks and temporary-table services on APP-16")
+    parser.add_argument("--locale", choices=("ru_RU.UTF-8",),
+                        help="Configure native ICU ru_RU as the default UTF8 collation before "
+                             "importing application tables (existing columns keep their collation)")
     args = parser.parse_args()
-    scripts = SCRIPTS[-1:] if args.upgrade_from_app15 else SCRIPTS
+    scripts = SCRIPTS[7:] if args.upgrade_from_app15 else SCRIPTS[8:] if args.upgrade_from_app16 else SCRIPTS
+    if args.locale:
+        scripts = list(scripts)
+        scripts.insert(scripts.index("sql/install_database_catalog.sql"), "sql/configure_ru_collation.sql")
     if not args.database or args.database.startswith("-"):
         parser.error("database must be a connection string, alias or file path")
 

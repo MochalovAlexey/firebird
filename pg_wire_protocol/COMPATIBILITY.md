@@ -685,3 +685,20 @@ EMPTY определяется ограниченным lexer только дл�
 `server_version` в ParameterStatus — проверяемое обещание для ветвления клиента, не версия движка и не общее обещание SQL совместимости. Значение из исторического probe проверяется на каждом заявленном клиентском профиле.
 
 `tests/test_pgwire_acceptance.py` мигрирован под текущий контракт; 58 cases прошли live в P6 harness. ON CONNECT shutdown остаётся отдельно исключённым native дефектом с фактическим FAIL reproducer; целевой P6/M1 принят без его исправления. Отчёт `VALIDATION.md` указывает реально исполненные checks, версии и принятый milestone; driver-only probe доказательством Firebird integration не служит.
+
+## Прикладные каталоги и службы 1С — 13 ноября 2026
+
+Установочный профиль расширен обычными SQL views/functions; существующий native
+metadata/API контракт сохраняется. [DATABASE_CATALOG](1c/DATABASE_CATALOG.md)
+описывает реальные строки pg_database/pg_tablespace/pg_type/pg_proc и сведения о
+поддержанных расширениях; полноценного PostgreSQL extension loader нет.
+[ADVISORY_LOCKS](1c/ADVISORY_LOCKS.md) описывает transaction/savepoint lifetime,
+немедленный abort текущего PG scope и native семантику statement_timeout.
+[SERIAL_IDENTITY](1c/SERIAL_IDENTITY.md) описывает serial/serial4 через identity,
+включая native LTT и неоткатываемые значения счётчиков.
+[TEMP_SERVICES](1c/TEMP_SERVICES.md) фиксирует реальные эффекты ANALYZE/fasttrun,
+ограничение PG-owned LTT и отказ при активном использовании страниц.
+
+Проверки синтетических запросов и native API не заменяют успешного открытия
+настоящей базы клиентом 1С. Состояние этого результата ведётся в
+[PROGRESS](1c/PROGRESS.md), остаток задач — в [BACKLOG](BACKLOG.md).

@@ -964,6 +964,8 @@ public:
 
 public:
 	GeneratorItem generator;
+	USHORT localRelationId = 0;
+	USHORT localFieldId = 0;
 	NestConst<ValueExprNode> arg;
 	SLONG step;
 	const bool dialect1;

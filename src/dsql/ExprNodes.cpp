@@ -35,6 +35,7 @@
 #include "firebird/impl/blr.h"
 #include "../jrd/tra.h"
 #include "../jrd/met.h"
+#include "../jrd/LocalTemporaryTable.h"
 #include "../jrd/Function.h"
 #include "../jrd/SysFunction.h"
 #include "../jrd/recsrc/RecordSource.h"
@@ -7227,6 +7228,8 @@ ValueExprNode* GenIdNode::dsqlPass(DsqlCompilerScratch* dsqlScratch)
 	node->generator = generator;
 	node->step = step;
 	node->sysGen = sysGen;
+	node->localRelationId = localRelationId;
+	node->localFieldId = localFieldId;
 	return node;
 }
 
@@ -7305,6 +7308,8 @@ ValueExprNode* GenIdNode::copy(thread_db* tdbb, NodeCopier& copier) const
 	node->generator = generator;
 	node->step = step;
 	node->sysGen = sysGen;
+	node->localRelationId = localRelationId;
+	node->localFieldId = localFieldId;
 	return node;
 }
 
@@ -7319,6 +7324,7 @@ bool GenIdNode::dsqlMatch(DsqlCompilerScratch* dsqlScratch, const ExprNode* othe
 	// I'm not sure if I should include "implicit" in the comparison, but it means different BLR code
 	// and nullable v/s not nullable.
 	return dialect1 == o->dialect1 && generator.name == o->generator.name &&
+		localRelationId == o->localRelationId && localFieldId == o->localFieldId &&
 		implicit == o->implicit;
 }
 
@@ -7333,6 +7339,7 @@ bool GenIdNode::sameAs(const ExprNode* other, bool ignoreStreams) const
 	// I'm not sure if I should include "implicit" in the comparison, but it means different BLR code
 	// and nullable v/s not nullable.
 	return dialect1 == otherNode->dialect1 && generator.id == otherNode->generator.id &&
+		localRelationId == otherNode->localRelationId && localFieldId == otherNode->localFieldId &&
 		implicit == otherNode->implicit;
 }
 
@@ -7383,7 +7390,31 @@ dsc* GenIdNode::execute(thread_db* tdbb, Request* request) const
 			status_exception::raise(Arg::Gds(isc_cant_modify_sysobj) << "generator" << generator.name.toQuotedString());
 	}
 
-	const SINT64 new_val = DPM_gen_id(tdbb, generator.id, false, change);
+	SINT64 new_val;
+	if (localRelationId)
+	{
+		const auto entry = tdbb->getAttachment()->att_local_temporary_tables.get(generator.name);
+		if (!entry || (*entry)->relationId != localRelationId)
+			ERR_post(Arg::Gds(isc_dsql_table_not_found) << generator.name.toQuotedString());
+		const auto ltt = *entry;
+		auto& fields = ltt->hasPendingChanges ? ltt->pendingFields : ltt->fields;
+		auto field = std::find_if(fields.begin(), fields.end(),
+			[this](const auto& value) { return value.id == localFieldId; });
+		if (field == fields.end() || !field->identity)
+			ERR_post(Arg::Gds(isc_random) << "Local identity column no longer exists");
+		const auto identity = field->identity.getPtr();
+		if (!identity->first)
+		{
+			if ((identity->step > 0 && identity->value > MAX_SINT64 - identity->step) ||
+				(identity->step < 0 && identity->value < MIN_SINT64 - identity->step))
+				ERR_post(Arg::Gds(isc_arith_except) << Arg::Gds(isc_exception_integer_overflow));
+			identity->value += identity->step;
+		}
+		identity->first = false;
+		new_val = identity->value;
+	}
+	else
+		new_val = DPM_gen_id(tdbb, generator.id, false, change);
 
 	if (dialect1)
 		impure->make_long((SLONG) new_val);

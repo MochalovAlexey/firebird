@@ -221,6 +221,7 @@ bool sessionCommand(Prefix& prefix, const Token& second)
 		second.is("LC_MESSAGES") || second.is("CLIENT_ENCODING") ||
 		second.is("ESCAPE_STRING_WARNING") || second.is("CLIENT_MIN_MESSAGES") ||
 		second.is("ENABLE_MERGEJOIN") || second.is("CPU_OPERATOR_COST") || second.is("LOCK_TIMEOUT") ||
+		second.is("STATEMENT_TIMEOUT") ||
 		second.is("STANDARD_CONFORMING_STRINGS"))
 		return true;
 	if (second.is("TRUSTED"))
@@ -396,6 +397,8 @@ SqlInfo inspectSql(std::string_view sql, bool standardStrings)
 		info.only = prefix.next().is("ONLY");
 		return info;
 	}
+	if (first.is("ANALYZE"))
+		return command("ANALYZE");
 	if (first.is("SET"))
 	{
 		const auto second = prefix.next();

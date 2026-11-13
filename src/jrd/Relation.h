@@ -909,7 +909,8 @@ public:
 	RelationPages* getPages(thread_db* tdbb, RelationPages::InstanceId instanceId = MAX_TRA_NUMBER, bool allocPages = true);
 	void	fillPages(thread_db* tdbb);
 	RelationPages* getAttPages(thread_db* tdbb, RelationPages::InstanceId inst_id);
-	bool	delPages(thread_db* tdbb, RelationPages::InstanceId inst_id = MAX_TRA_NUMBER, RelationPages* aPages = NULL);
+	bool	delPages(thread_db* tdbb, RelationPages::InstanceId inst_id = MAX_TRA_NUMBER,
+		RelationPages* aPages = NULL, bool onlyIfUnused = false);
 	void	freePages(thread_db* tdbb);
 	void	retainPages(thread_db* tdbb, TraNumber oldNumber, TraNumber newNumber);
 	void	cleanUp() noexcept;

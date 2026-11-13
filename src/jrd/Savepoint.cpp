@@ -18,6 +18,7 @@
  */
 
 #include "firebird.h"
+#include <exception>
 #include "../common/gdsassert.h"
 #include "../jrd/Attachment.h"
 #include "../jrd/tra.h"
@@ -582,22 +583,45 @@ void Savepoint::cleanupTempData()
 }
 
 
-void Savepoint::discardTempFrameActions(const jrd_rel* relation, FB_UINT64 tempInstanceId)
+void Savepoint::discardTempFrameActions(const jrd_rel* relation, FB_UINT64 tempInstanceId, bool allVersions)
 {
+	std::exception_ptr error;
 	for (auto actionPtr = &m_actions; *actionPtr;)
 	{
 		const auto action = *actionPtr;
 
-		if (action->vct_relation == relation && action->vct_temp_instance_id == tempInstanceId)
+		if ((action->vct_relation == relation || (allVersions &&
+			action->vct_relation->getPermanent() == relation->getPermanent())) &&
+			action->vct_temp_instance_id == tempInstanceId)
 		{
-			action->discard(m_transaction);
+			if (!allVersions)
+				action->discard(m_transaction);
 			*actionPtr = action->vct_next;
 			action->vct_next = m_freeActions;
 			m_freeActions = action;
+			if (allVersions)
+			{
+				// Irreversible page cleanup must detach every affected action even
+				// if returning undo space fails. Never expose stale undo to reuse.
+				try
+				{
+					action->discard(m_transaction);
+				}
+				catch (...)
+				{
+					if (!error)
+						error = std::current_exception();
+					RecordBitmap::reset(action->vct_records);
+					delete action->vct_undo;
+					action->vct_undo = nullptr;
+				}
+			}
 		}
 		else
 			actionPtr = &action->vct_next;
 	}
+	if (error)
+		std::rethrow_exception(error);
 }
 
 Savepoint* Savepoint::rollback(thread_db* tdbb, Savepoint* prior, bool preserveLocks)
@@ -632,6 +656,7 @@ Savepoint* Savepoint::rollback(thread_db* tdbb, Savepoint* prior, bool preserveL
 			m_freeActions = action;
 		}
 
+		m_transaction->rollbackAdvisoryLocks(tdbb, m_number);
 		m_lttActions.rollback(tdbb, m_transaction);
 		if (m_pgTempNamespace)
 		{
@@ -717,6 +742,8 @@ Savepoint* Savepoint::rollforward(thread_db* tdbb, Savepoint* prior)
 			action->vct_next = m_freeActions;
 			m_freeActions = action;
 		}
+
+		m_transaction->mergeAdvisoryLocks(m_number, m_next ? m_next->m_number : 0);
 
 		// Keep the complete reverse chronology, including across row-root release.
 		if (m_next)

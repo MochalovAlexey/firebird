@@ -268,6 +268,7 @@ public:
 			{
 			case LCK_tra:
 			case LCK_record_gc:
+			case LCK_advisory:
 				m_tdbb->tdbb_flags &= ~TDBB_wait_cancel_disable;
 				if (att)
 					att->att_wait_owner_handle = lock->lck_owner_handle;
@@ -605,6 +606,7 @@ static lck_owner_t get_owner_type(enum lck_t lock_type)
 	case LCK_alter_database:
 	case LCK_dsql_statement_cache:
 	case LCK_profiler_listener:
+	case LCK_advisory:
 		owner_type = LCK_OWNER_attachment;
 		break;
 

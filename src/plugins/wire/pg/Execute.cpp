@@ -191,6 +191,19 @@ bool QueryExecutor::fail(Protocol& protocol, const Diagnostic& diagnostic, bool 
 	{
 		try
 		{
+			if (state == 'T' && transaction)
+			{
+				// Release the failed PG scope's advisory locks even for protocol-only
+				// errors. Keep the native transaction/savepoints for recovery.
+				FbLocalStatus status;
+				const char* sql = "EXECUTE BLOCK AS DECLARE n INTEGER; BEGIN "
+					"n = RDB$PG_ADVISORY_LOCK(0, 0); END";
+				const auto current = attachment->execute(&status, transaction, 0, sql,
+					SQL_DIALECT_V6, nullptr, nullptr, nullptr, nullptr);
+				check(&status);
+				if (current != transaction)
+					throw ProtocolError("XX000", "Advisory lock abort changed the transaction");
+			}
 			if (state != 'E' && stringsAtStart)
 			{
 				restoreStrings(stringSavepoints.empty() ? *stringsAtStart : stringSavepoints.back().value);

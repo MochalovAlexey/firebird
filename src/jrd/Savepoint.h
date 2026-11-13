@@ -285,7 +285,7 @@ namespace Jrd
 		}
 
 		void cleanupTempData();
-		void discardTempFrameActions(const jrd_rel* relation, FB_UINT64 tempInstanceId);
+		void discardTempFrameActions(const jrd_rel* relation, FB_UINT64 tempInstanceId, bool allVersions = false);
 
 		Savepoint* rollback(thread_db* tdbb, Savepoint* prior = NULL, bool preserveLocks = false);
 		Savepoint* rollforward(thread_db* tdbb, Savepoint* prior = NULL);

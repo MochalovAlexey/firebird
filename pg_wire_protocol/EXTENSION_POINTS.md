@@ -69,3 +69,29 @@ backout и checkBlob собственной LTT без persistent security class
 APP-16 дополняет EXT-02/11 строками EXT-12…19. Эти места не являются публичным
 API расширения типов. Учёт будущей изоляции не заменяет функциональную сдачу
 [этапа типов](1c/TYPES_AND_EXPRESSIONS_TASK.md).
+
+## Каталог текущей базы
+
+EXT-20 также включает `pg_tablespace` (реально пустое пространство имён PG
+tablespaces в Firebird) и [install_type_catalog.sql](1c/sql/install_type_catalog.sql).
+Каталог типов отражает пять реальных alias из `Parser::makePgType` и wire OID
+кодеков; `pg_type_is_visible` сохраняет их текущее независимое от search_path
+разрешение. При выделении диалекта синхронно менять resolver, каталог и OID;
+не подменять ими каталог всех native domains.
+
+| ID | Символы | Состояние и контракт / проверка при переносе |
+|---|---|---|
+| EXT-20 | [install_database_catalog.sql](1c/sql/install_database_catalog.sql): current_database, pg_database, PGWIRE_COMPAT.DATABASE_COLLATION; [configure_ru_collation.sql](1c/sql/configure_ru_collation.sql) | SQL-слой проецирует canonical DB_NAME и реальный default UTF8 collation конкретной БД. Native metadata остаётся владельцем состояния; wire не хранит имя/locale отдельно. Сохранить atomic install, запрет перезаписи чужих объектов, обычные grants, явную ошибку для неподдержанной collation и независимость PG_MCHAR/PG_MVARCHAR. ICU ru_RU и libc ru_RU не считаются эквивалентными; границы описаны в [DATABASE_CATALOG](1c/DATABASE_CATALOG.md). |
+| EXT-22 | [parse.y](../src/dsql/parse.y): column_def serial/serial4 → native identity | Специфично только отображение PG-объявления столбца в существующий identity AST. Native LTT identity (LocalTemporaryTable::Identity, GenIdNode) — переиспользуемая возможность, без PG полей/BLR/API. Сохранить default/explicit NULL, nontransactional counter, attachment isolation и metadata undo. Полная PG sequence/CYCLE семантика остаётся вне [профиля](1c/SERIAL_IDENTITY.md). |
+
+## Транзакционные advisory locks
+
+| ID | Символы | Состояние и контракт / проверка при переносе |
+|---|---|---|
+| EXT-21 | [tra.cpp](../src/jrd/tra.cpp): acquireAdvisoryLock/rollbackAdvisoryLocks/mergeAdvisoryLocks/releaseAdvisoryLocks; [SysFunction.cpp](../src/jrd/SysFunction.cpp): RDB$PG_ADVISORY_LOCK; [Execute.cpp](../src/plugins/wire/pg/Execute.cpp): fail | Native lock manager и native savepoint numbers владеют блокировками и undo; PG wrappers выбирают shared/exclusive, wire сообщает переход текущего логического блока в E. Будущая граница должна сохранить межсоединительные конфликты, native multi-transaction isolation, downgrade/rollback/release savepoint, retaining/cleanup и protocol-only error. INTEGER0 вместо PG void — явное ограничение профиля, не новый persisted datatype или ABI. |
+
+## Служебные операции PG temporary tables
+
+| ID | Символы | Состояние и контракт / проверка при переносе |
+|---|---|---|
+| EXT-23 | [PgTempOperations](../src/jrd/PgTempOperations.cpp), AnalyzeNode, RDB$PG_FASTTRUNCATE; QualifiedMetaString lowercase policy | PG policy ограничена собственными LTT attachment; native resolver, IDX_statistics, page instances и undo остаются владельцами операций. Функции возвращают INTEGER0 вместо void. Будущая изоляция должна сохранить необратимую очистку относительно rollback, непрерывность serial, обновление именно текущего index root, native defaults и guarded cursor/second-TX rejection. Опции delPages.onlyIfUnused и discardTempFrameActions.allVersions включаются только явно; обычные native callers сохраняют прежнее поведение. |

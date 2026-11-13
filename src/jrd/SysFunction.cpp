@@ -35,6 +35,7 @@
 #include "../common/classes/Hash.h"
 #include "../common/classes/Uuid.h"
 #include "../jrd/SysFunction.h"
+#include "../jrd/PgTempOperations.h"
 #include "../jrd/DataTypeUtil.h"
 #include "../include/fb_blk.h"
 #include "../jrd/exe.h"
@@ -5459,6 +5460,65 @@ dsc* evlNormDec(thread_db* tdbb, const SysFunction* function, const NestValueArr
 }
 
 
+void setParamsPgFastTruncate(DataTypeUtilBase*, const SysFunction*, int, dsc** args)
+{
+	if (args[0]->isUnknown())
+		args[0]->makeVarying(2 * MAX_SQL_IDENTIFIER_LEN + 5, ttype_metadata);
+}
+
+
+dsc* evlPgFastTruncate(thread_db* tdbb, const SysFunction*, const NestValueArray& args,
+	impure_value* impure)
+{
+	const auto request = tdbb->getRequest();
+	const auto value = EVL_expr(tdbb, request, args[0]);
+	if (!value)
+		return nullptr;
+	const auto name = MOV_make_string2(tdbb, value, ttype_metadata);
+	const auto charset = INTL_charset_lookup(tdbb, CS_METADATA);
+	if (!charset->wellFormed(name.length(), (const UCHAR*) name.c_str(), nullptr) ||
+		memchr(name.c_str(), 0, name.length()))
+		(Arg::Gds(isc_invalid_name) << name << Arg::SqlState("22023")).raise();
+	truncatePgTempTable(tdbb, request->req_transaction, QualifiedName::parseSchemaObject(name, true));
+	impure->vlu_misc.vlu_long = 0;
+	impure->vlu_desc.makeLong(0, &impure->vlu_misc.vlu_long);
+	return &impure->vlu_desc;
+}
+
+
+// The SQL compatibility package exposes shared/exclusive xact lock wrappers.
+// Mode zero is reserved for PgWire's failed-block notification, including errors
+// which happen entirely in the protocol layer. No row/savepoint data is undone.
+dsc* evlPgAdvisoryLock(thread_db* tdbb, const SysFunction*, const NestValueArray& args,
+	impure_value* impure)
+{
+	const auto request = tdbb->getRequest();
+	const auto key = EVL_expr(tdbb, request, args[0]);
+	const auto keyValue = key ? MOV_get_int64(tdbb, key, 0) : 0;
+	const auto mode = EVL_expr(tdbb, request, args[1]);
+	if (!mode)
+		return nullptr;
+	const auto modeValue = MOV_get_long(tdbb, mode, 0);
+	const auto transaction = request->req_transaction;
+	if (modeValue == 0)
+		transaction->abortAdvisoryLocks(tdbb);
+	else if (modeValue == 1 || modeValue == 2)
+	{
+		if (!key)
+			return nullptr;
+		transaction->acquireAdvisoryLock(tdbb, keyValue, modeValue == 1);
+	}
+	else
+	{
+		(Arg::Gds(isc_invalid_name) << "Invalid advisory lock mode" <<
+			Arg::SqlState("22023")).raise();
+	}
+	impure->vlu_misc.vlu_long = 0;
+	impure->vlu_desc.makeLong(0, &impure->vlu_misc.vlu_long);
+	return &impure->vlu_desc;
+}
+
+
 // Exact object-name lookup for the explicitly configured PG visibility profile.
 // PG catalog identities and relation kinds belong to the installed SQL wrapper.
 void setParamsPgRelationId(DataTypeUtilBase*, const SysFunction*, int, dsc** args)
@@ -7106,6 +7166,8 @@ const SysFunction SysFunction::functions[] =
 		{"RAND", 0, 0, 0, NULL, makeDoubleResult, evlRand, NULL},
 		{RDB_GET_CONTEXT, 2, 2, DETERMINISTIC, setParamsGetSetContext, makeGetSetContext, evlGetContext, NULL},
 		{"RDB$GET_TRANSACTION_CN", 1, 1, 0, setParamsInt64, makeGetTranCN, evlGetTranCN, NULL},
+		{"RDB$PG_FASTTRUNCATE", 1, 1, 0, setParamsPgFastTruncate, makeLongResult, evlPgFastTruncate, NULL},
+		{"RDB$PG_ADVISORY_LOCK", 2, 2, 0, setParamsInt64, makeLongResult, evlPgAdvisoryLock, NULL},
 		{"RDB$PG_RELATION_ID", 1, 1, 0, setParamsPgRelationId, makePgRelationId, evlPgRelationId, NULL},
 		{"RDB$ROLE_IN_USE", 1, 1, DETERMINISTIC, setParamsAsciiVal, makeBooleanResult, evlRoleInUse, NULL},
 		{RDB_RESET_CONTEXT, 1, 1, 0, setParamsResetContext, makeLongResult, evlResetContext, NULL},

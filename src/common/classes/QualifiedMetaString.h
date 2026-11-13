@@ -89,7 +89,8 @@ public:
 	}
 
 public:
-	static void parseSchemaObjectListNoSep(const string& str, ObjectsArray<BaseQualifiedName<T>>& list)
+	static void parseSchemaObjectListNoSep(const string& str, ObjectsArray<BaseQualifiedName<T>>& list,
+		bool lowerCase = false)
 	{
 		const auto isQuoted = [](const string& name) -> bool
 		{
@@ -130,8 +131,8 @@ public:
 			{
 				if (!((c >= 'A' && c <= 'Z') ||
 					  (c >= 'a' && c <= 'z') ||
-					  c == '{' ||
-					  c == '}' ||
+					  (!lowerCase && (c == '{' || c == '}')) ||
+					  (lowerCase && (c == '_' || static_cast<UCHAR>(c) >= 128)) ||
 					  (!first && c >= '0' && c <= '9') ||
 					  (!first && c == '$') ||
 					  (!first && c == '_')))
@@ -241,7 +242,8 @@ public:
 				{
 					validateUnquotedIdentifier(schema);
 
-					std::transform(schema.begin(), schema.end(), schema.begin(), ::toupper);
+					std::transform(schema.begin(), schema.end(), schema.begin(),
+						[lowerCase](UCHAR c) { return lowerCase ? (c >= 'A' && c <= 'Z' ? c + 32 : c) : ::toupper(c); });
 					result.schema = schema;
 				}
 			}
@@ -256,7 +258,8 @@ public:
 			{
 				validateUnquotedIdentifier(object);
 
-				std::transform(object.begin(), object.end(), object.begin(), ::toupper);
+				std::transform(object.begin(), object.end(), object.begin(),
+					[lowerCase](UCHAR c) { return lowerCase ? (c >= 'A' && c <= 'Z' ? c + 32 : c) : ::toupper(c); });
 				result.object = object;
 			}
 
@@ -267,10 +270,10 @@ public:
 		} while (i < str.size());
 	}
 
-	static BaseQualifiedName<T> parseSchemaObject(const string& str)
+	static BaseQualifiedName<T> parseSchemaObject(const string& str, bool lowerCase = false)
 	{
 		ObjectsArray<BaseQualifiedName<T>> list;
-		parseSchemaObjectListNoSep(str, list);
+		parseSchemaObjectListNoSep(str, list, lowerCase);
 
 		if (list.getCount() != 1)
 			(Arg::Gds(isc_invalid_name) << str).raise();

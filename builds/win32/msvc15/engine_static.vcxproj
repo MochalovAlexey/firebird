@@ -161,6 +161,7 @@
     <ClCompile Include="..\..\..\src\jrd\replication\Publisher.cpp" />
     <ClCompile Include="..\..\..\src\jrd\replication\Replicator.cpp" />
     <ClCompile Include="..\..\..\src\jrd\replication\Utils.cpp" />
+    <ClCompile Include="..\..\..\src\jrd\PgTempOperations.cpp" />
     <ClCompile Include="..\..\..\src\jrd\Relation.cpp" />
     <ClCompile Include="..\..\..\src\jrd\ResultSet.cpp" />
     <ClCompile Include="..\..\..\src\jrd\rlck.cpp" />

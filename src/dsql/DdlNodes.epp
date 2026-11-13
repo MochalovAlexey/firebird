@@ -82,6 +82,7 @@
 #include "../jrd/ini.h"
 #include "../jrd/GarbageCollector.h"
 #include "../jrd/ProtectRelations.h"
+#include "../jrd/PgTempOperations.h"
 #include "../dsql/PackageNodes.h"
 
 namespace Jrd {
@@ -7352,12 +7353,6 @@ void RelationNode::validateLttColumnClause(const AddColumnClause* addColumnClaus
 			Arg::Gds(isc_random) << "COMPUTED BY is not allowed for LOCAL TEMPORARY TABLE columns");
 	}
 
-	if (addColumnClause->identityOptions)
-	{
-		status_exception::raise(
-			Arg::Gds(isc_random) << "IDENTITY columns are not allowed for LOCAL TEMPORARY TABLEs");
-	}
-
 	if (addColumnClause->field->dimensions != 0)
 	{
 		status_exception::raise(
@@ -9089,6 +9084,15 @@ void RelationNode::makeLttVersion(thread_db* tdbb, jrd_tra* transaction, LocalTe
 		relField->fld_pos = lttField.position;
 		relField->fld_source_name = lttField.source;
 		relField->fld_flags = lttField.notNullFlag ? FLD_not_null : 0;
+		relField->fld_identity_type = lttField.identityType;
+		relField->fld_default_value = nullptr;
+		if (lttField.identity)
+		{
+			const auto node = FB_NEW_POOL(attPool) GenIdNode(attPool, false, ltt->name, nullptr, true, true);
+			node->localRelationId = ltt->relationId;
+			node->localFieldId = lttField.id;
+			relField->fld_default_value = node;
+		}
 
 		if (lttField.notNullFlag)
 		{
@@ -10401,7 +10405,17 @@ void CreateRelationNode::defineLocalTempTable(thread_db* tdbb, DsqlCompilerScrat
 			lttField.position = position++;
 			lttField.name = field->fld_name;
 			lttField.source = field->typeOfName;
-			lttField.notNullFlag = notNullFlag;
+			lttField.notNullFlag = notNullFlag || addColumnClause->identityOptions;
+			if (const auto options = addColumnClause->identityOptions.getObject())
+			{
+				if (!DTYPE_IS_EXACT(field->dtype) || field->scale != 0)
+					status_exception::raise(Arg::PrivateDyn(273) << field->fld_name.toQuotedString() << name.toQuotedString());
+				if (options->increment.value_or(1) == 0)
+					status_exception::raise(Arg::Gds(isc_dyn_cant_use_zero_inc_ident) << field->fld_name << name.toQuotedString());
+				lttField.identityType = options->type;
+				lttField.identity = FB_NEW_POOL(attPool) LocalTemporaryTable::Identity(
+					options->startValue.value_or(1), options->increment.value_or(1));
+			}
 			lttField.collationId = field->collationId != COLLATE_NONE ? std::optional<CollId>(field->collationId) :
 																		std::nullopt;
 			lttField.charSetId = field->charSetId != CS_NONE ? std::optional<CSetId>(field->charSetId) : std::nullopt;
@@ -11527,6 +11541,9 @@ void AlterRelationNode::alterLocalTempTable(thread_db* tdbb, DsqlCompilerScratch
 				}
 
 				validateLttColumnClause(addColumnClause);
+				if (addColumnClause->identityOptions)
+					status_exception::raise(Arg::Gds(isc_wish_list) << Arg::Gds(isc_random) <<
+						"Adding identity columns to existing local temporary tables is not supported");
 
 				field->resolve(dsqlScratch);
 
@@ -11625,6 +11642,8 @@ void AlterRelationNode::alterLocalTempTable(thread_db* tdbb, DsqlCompilerScratch
 				{
 					if (lttField.name == nullClause->name)
 					{
+						if (lttField.identity && !nullClause->notNullFlag)
+							status_exception::raise(Arg::PrivateDyn(274) << lttField.name << name.toQuotedString());
 						if (nullClause->notNullFlag && !lttField.notNullFlag)
 							checkNotNullFields.add(lttField.id);
 
@@ -11698,6 +11717,8 @@ void AlterRelationNode::alterLocalTempTable(thread_db* tdbb, DsqlCompilerScratch
 				{
 					if (lttField.name == field->fld_name)
 					{
+						if (lttField.identity && (!DTYPE_IS_EXACT(field->dtype) || field->scale != 0))
+							status_exception::raise(Arg::PrivateDyn(273) << field->fld_name << name.toQuotedString());
 						// Validate that the type change is allowed, using the same rules as persistent tables.
 						dyn_fld origDom, newDom;
 
@@ -14731,6 +14752,31 @@ void AlterIndexNode::alterLocalTempIndex(thread_db* tdbb, DsqlCompilerScratch* d
 
 
 //----------------------
+
+
+string AnalyzeNode::internalPrint(NodePrinter& printer) const
+{
+	DdlNode::internalPrint(printer);
+	NODE_PRINT(printer, name);
+	return "AnalyzeNode";
+}
+
+void AnalyzeNode::checkPermission(thread_db* tdbb)
+{
+	// A PG LTT is private to its owning attachment, never a persistent target.
+	getPgTempTable(tdbb, name);
+}
+
+bool AnalyzeNode::isPgTemporaryDdl(thread_db* tdbb) const
+{
+	return pgLttTarget(tdbb, name);
+}
+
+void AnalyzeNode::execute(thread_db* tdbb, DsqlCompilerScratch* scratch, jrd_tra* transaction)
+{
+	analyzePgTempTable(tdbb, transaction, name);
+	scratch->flags |= DsqlCompilerScratch::FLAG_ACTUAL_LTT_DDL;
+}
 
 
 string SetStatisticsNode::internalPrint(NodePrinter& printer) const

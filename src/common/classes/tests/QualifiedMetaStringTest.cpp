@@ -70,6 +70,20 @@ BOOST_DATA_TEST_CASE(ParseSchemaObjectTest, parseSchemaObjectTestData, input, ex
 }
 
 
+BOOST_AUTO_TEST_CASE(ParseSchemaObjectLowerCase)
+{
+	const auto unquoted = QualifiedMetaString::parseSchemaObject("PG_TEMP._T1", true);
+	BOOST_CHECK(unquoted.schema == "pg_temp");
+	BOOST_CHECK(unquoted.object == "_t1");
+	const auto quoted = QualifiedMetaString::parseSchemaObject("\"PG_TEMP\".\"T1\"", true);
+	BOOST_CHECK(quoted.schema == "PG_TEMP");
+	BOOST_CHECK(quoted.object == "T1");
+	const auto native = QualifiedMetaString::parseSchemaObject("pg_temp.t1");
+	BOOST_CHECK(native.schema == "PG_TEMP");
+	BOOST_CHECK(native.object == "T1");
+}
+
+
 const auto parseSchemaObjectErrorTestData = boost::unit_test::data::make({
 	"1Object",
 	"_Object",

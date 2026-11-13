@@ -86,6 +86,119 @@ using namespace Jrd;
 using namespace Ods;
 using namespace Firebird;
 
+// Application locks share the database lock manager, but own no row or metadata
+// resources. Undo tracks only effective acquisitions/upgrades, using native
+// savepoint numbers; repeated acquisitions do not accumulate references.
+namespace Jrd
+{
+struct AdvisoryLock
+{
+	Lock* lock;
+	AdvisoryLock* next;
+};
+
+struct AdvisoryLockUndo
+{
+	Lock* lock;
+	SavNumber savepoint;
+	UCHAR level;
+	AdvisoryLockUndo* next;
+};
+}
+
+void jrd_tra::acquireAdvisoryLock(thread_db* tdbb, SINT64 key, bool shared)
+{
+	auto entry = tra_advisory_locks;
+	while (entry && memcmp(entry->lock->getKeyPtr(), &key, sizeof(key)))
+		entry = entry->next;
+
+	if (!entry)
+	{
+		AutoPtr<AdvisoryLock> newEntry(FB_NEW_POOL(*tra_pool) AdvisoryLock{});
+		newEntry->lock = FB_NEW_RPT(*tra_pool, 0) Lock(tdbb, sizeof(key), LCK_advisory);
+		newEntry->lock->setKey(key);
+		newEntry->next = tra_advisory_locks;
+		tra_advisory_locks = entry = newEntry.release();
+	}
+
+	const UCHAR level = shared ? LCK_SR : LCK_EX;
+	auto lock = entry->lock;
+	if (lock->lck_logical >= level)
+		return;
+
+	AutoPtr<AdvisoryLockUndo> undo(FB_NEW_POOL(*tra_pool) AdvisoryLockUndo{
+		lock, tra_save_point ? tra_save_point->getNumber() : 0,
+		lock->lck_logical, tra_advisory_undo});
+	const bool acquired = lock->lck_logical ?
+		LCK_convert(tdbb, lock, level, getLockWait()) : LCK_lock(tdbb, lock, level, getLockWait());
+	if (!acquired)
+		ERR_punt();
+	tra_advisory_undo = undo.release();
+}
+
+void jrd_tra::rollbackAdvisoryLocks(thread_db* tdbb, SavNumber number)
+{
+	for (auto ptr = &tra_advisory_undo; *ptr;)
+	{
+		auto undo = *ptr;
+		if (undo->savepoint != number)
+		{
+			ptr = &undo->next;
+			continue;
+		}
+		if (undo->level)
+		{
+			// Downgrading cannot conflict with another holder.
+			if (!LCK_convert(tdbb, undo->lock, undo->level, LCK_WAIT))
+				ERR_punt();
+		}
+		else
+			LCK_release(tdbb, undo->lock);
+		*ptr = undo->next;
+		delete undo;
+	}
+}
+
+void jrd_tra::mergeAdvisoryLocks(SavNumber from, SavNumber to)
+{
+	for (auto undo = tra_advisory_undo; undo; undo = undo->next)
+	{
+		if (undo->savepoint == from)
+			undo->savepoint = to;
+	}
+}
+
+void jrd_tra::releaseAdvisoryLocks(thread_db* tdbb)
+{
+	while (tra_advisory_undo)
+	{
+		auto undo = tra_advisory_undo;
+		tra_advisory_undo = undo->next;
+		delete undo;
+	}
+	while (tra_advisory_locks)
+	{
+		auto entry = tra_advisory_locks;
+		LCK_release(tdbb, entry->lock);
+		tra_advisory_locks = entry->next;
+		delete entry->lock;
+		delete entry;
+	}
+}
+
+void jrd_tra::abortAdvisoryLocks(thread_db* tdbb)
+{
+	// PG aborts its current subtransaction immediately, while PgWire keeps the
+	// native transaction alive for ROLLBACK TO. Only application locks are undone.
+	for (auto savepoint = tra_save_point; savepoint; savepoint = savepoint->getNext())
+	{
+		rollbackAdvisoryLocks(tdbb, savepoint->getNumber());
+		if (!savepoint->isSystem())
+			return;
+	}
+	releaseAdvisoryLocks(tdbb);
+}
+
 typedef Firebird::GenericMap<Firebird::Pair<Firebird::NonPooled<USHORT, UCHAR> > > RelationLockTypeMap;
 
 
@@ -474,6 +587,7 @@ void TRA_commit(thread_db* tdbb, jrd_tra* transaction, const bool retaining_flag
 			transaction->tra_attachment->finishPgTempNamespace(false);
 		transaction->tra_pg_temp_namespace_undo = false;
 
+		transaction->releaseAdvisoryLocks(tdbb);
 		trace.finish(ITracePlugin::RESULT_SUCCESS);
 		return;
 	}
@@ -1265,6 +1379,8 @@ void TRA_release_transaction(thread_db* tdbb, jrd_tra* transaction, Jrd::TraceTr
 	MetadataCache::release_temp_tables(tdbb, transaction);
 
 	// Release the locks associated with the transaction
+
+	transaction->releaseAdvisoryLocks(tdbb);
 
 	if (transaction->tra_alter_db_lock)
 		LCK_release(tdbb, transaction->tra_alter_db_lock);
@@ -2679,6 +2795,7 @@ static void retain_context(thread_db* tdbb, jrd_tra* transaction, bool commit, i
 		transaction->tra_pg_temp_namespace_undo = false;
 	}
 
+	transaction->releaseAdvisoryLocks(tdbb);
 	MetadataCache::retain_temp_tables(tdbb, transaction, new_number);
 
 	transaction->tra_number = new_number;

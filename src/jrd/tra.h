@@ -56,6 +56,8 @@ namespace Jrd {
 
 class blb;
 class Lock;
+struct AdvisoryLock;
+struct AdvisoryLockUndo;
 class jrd_rel;
 template <typename T> class vec;
 class Record;
@@ -292,6 +294,8 @@ public:
 	TransactionBitmap*	tra_commit_sub_trans;	// committed sub-transactions
 	Savepoint*	tra_save_point;			// list of savepoints
 	bool tra_pg_temp_namespace_undo = false;
+	AdvisoryLock* tra_advisory_locks = nullptr;
+	AdvisoryLockUndo* tra_advisory_undo = nullptr;
 	LttUndo		tra_ltt_undo;			// metadata undo from levels without a parent
 	Savepoint*	tra_save_free;			// free savepoints
 	SavNumber tra_save_point_number;	// next save point number to use
@@ -349,6 +353,12 @@ public:
 	MemoryPool* getAutonomousPool();
 	void releaseAutonomousPool(MemoryPool* toRelease);
 	jrd_tra* getOuter() noexcept;
+
+	void acquireAdvisoryLock(thread_db*, SINT64 key, bool shared);
+	void releaseAdvisoryLocks(thread_db*);
+	void rollbackAdvisoryLocks(thread_db*, SavNumber);
+	void mergeAdvisoryLocks(SavNumber from, SavNumber to);
+	void abortAdvisoryLocks(thread_db*);
 
 	SSHORT getLockWait() const noexcept
 	{
