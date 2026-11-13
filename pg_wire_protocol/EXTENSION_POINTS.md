@@ -79,6 +79,14 @@ tablespaces в Firebird) и [install_type_catalog.sql](1c/sql/install_type_catal
 разрешение. При выделении диалекта синхронно менять resolver, каталог и OID;
 не подменять ими каталог всех native domains.
 
+В том же SQL-слое находятся [pg_tables](1c/sql/install_tables_catalog.sql) и
+[pg_attribute](1c/sql/install_attribute_catalog.sql). Первая проекция использует
+существующие live relation/namespace providers, вторая — native persistent
+relation/field IDs (+1), а не позиции колонок. При дальнейшем расширении
+temporary columns нужен live provider со стабильными field IDs; MON$ snapshots
+и FIELD_POSITION не обеспечивают этот контракт. Новые core/API точки в этом
+срезе не добавляются.
+
 | ID | Символы | Состояние и контракт / проверка при переносе |
 |---|---|---|
 | EXT-20 | [install_database_catalog.sql](1c/sql/install_database_catalog.sql): current_database, pg_database, PGWIRE_COMPAT.DATABASE_COLLATION; [configure_ru_collation.sql](1c/sql/configure_ru_collation.sql) | SQL-слой проецирует canonical DB_NAME и реальный default UTF8 collation конкретной БД. Native metadata остаётся владельцем состояния; wire не хранит имя/locale отдельно. Сохранить atomic install, запрет перезаписи чужих объектов, обычные grants, явную ошибку для неподдержанной collation и независимость PG_MCHAR/PG_MVARCHAR. ICU ru_RU и libc ru_RU не считаются эквивалентными; границы описаны в [DATABASE_CATALOG](1c/DATABASE_CATALOG.md). |

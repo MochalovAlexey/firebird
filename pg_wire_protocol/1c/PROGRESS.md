@@ -22,7 +22,8 @@ NULL-семантика unique сохранена native partial indexes. Ост
 expression indexes и три циклических sequence defaults; запуск разрешён с явно
 зафиксированным неполным schema profile. Реальный ibsrv уже выполняет запросы
 в Firebird; fulleq, datediff2 и vassn уже приняты его bootstrap-проверками.
-Следующий обнаруженный блокер — format_number; его SQL реализация выполняется.
+format_number и pg_tables/pg_attribute реализованы и проверены. 1С прочитал
+Config/version и перешёл к v8users; следующий блокер — pg_index и видимость индексов.
 Успешное открытие клиентского интерфейса ещё не достигнуто.
 
 Срез на 12 ноября 2026 года: P2 APP-14 в `11dee63d2a` прошёл code review без замечаний;

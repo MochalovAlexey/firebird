@@ -4951,3 +4951,86 @@ Source revision — `3f3474936ab0d01a56f96ebc07624e4dbb23fde2`, tracked source d
 PgWire `1b4c78d6197fae266a6561fb57babcd4ea9ec1e1bc5dd90235859261cbfeb9b5`.
 Проверка использовала отдельный runtime; основной runtime 1С и shared build
 не изменялись. Реальное открытие базы 1С этим повтором не заявляется.
+
+
+## APP-17: native format_number profile — 13 ноября 2026
+
+PASS: `/tmp/app17-number-format-03/summary.json`, все **2925** форматирующих
+запросов совпали с reference values; для каждого результата проверен VARCHAR
+OID1043. Эталон получен чистыми SELECT при
+`default_transaction_read_only=on`, исходная база/функция не менялись:
+`/tmp/app17-number-format-oracle.json`, `.log`,
+`/tmp/pgwire_number_format_oracle.py`.
+
+Матрица покрывает sign/NULL/zero, scale-sensitive поведение исходного RTRIM,
+primary/secondary group lengths (включая NULL, negative и int32 boundary), empty,
+NULL, Unicode, multichar и trailing-space separators. Проверены настоящие
+NUMERIC(31,2)/(31,6)/(38,0)/(38,18) колонки и положительная/отрицательная
+38-digit граница без округления или обрезания.
+
+Extended Query: OID1700 text и настоящий numeric binary проходят через явный
+`CAST($1 AS NUMERIC(p,s))`; bare OID1700 отвергается с 0A000 в обоих форматах.
+Untyped/VARCHAR decimal text также проверен. Invalid/exponent/nonfinite text
+отвергается native exception (existing PgWire mapping XX000). Failed installer
+откатывает функцию, повтор отказывается заменять её; настоящий pg_proc видит
+установленную callable function. Сервер завершён штатно exit0, forced_kill=false.
+
+Выбор VARCHAR input подтверждён отдельным сравнением native representations:
+`/tmp/pgwire-format-number-repr-02/summary.json`. DECFLOAT34 сохраняет часть
+scale cases, но ограничен 34 значащими цифрами и scientific rendering; фиксированная
+NUMERIC(38,18) сигнатура добавляет scale18 к целым и меняет результат source
+RTRIM. Поэтому SQL-only функция не выдаётся за variable-scale PG NUMERIC.
+Floating/scientific SQL literals остаются вне контракта; точные границы и
+пример typed Bind: [NUMBER_FORMAT](1c/NUMBER_FORMAT.md), backlog SQL-12.
+
+SQLSTATE negative-test expectation в первом полном run был уточнён до текущего
+XX000 mapper; production error mapping не менялся. Последующая SQL правка
+сравнения DECSEP добавила проверку длины, поскольку native VARCHAR дополняет
+пробелы, а source сравнение различает '.' и '. '. Финальная матрица содержит
+оба этих случая. Никаких core/API/dependency изменений не потребовалось.
+
+Проверенный Engine14 SHA256
+`178f3aead73459ecb4cd097815ea03982e1cc3b4bb7f82976d21fcffc25312ef`;
+reference function definition `/tmp/app17-format-number-reference.sql`, SHA256
+`95e81b30a8719c4f4ab3b455e8202b111e4ec9a9e7c3508018e4f2d87f28edb8`;
+oracle JSON SHA256
+`815fd38f9b23a8fafa1c5e7e1af99a8b74192d9a5b01d9931304179021be321c`.
+
+
+## 13 ноября 2026: pg_tables и pg_attribute для реального bootstrap 1С
+
+Добавлены только SQL-проекции и targeted проверки, без core/API изменений.
+`pg_tables(schemaname,tablename)` использует существующие live pg_class и
+pg_namespace, фильтрует relkind=r и сохраняет current-attachment PG TEMP rows.
+`pg_attribute(attrelid,attname,attnum,attisdropped)` читает живые native поля
+persistent tables/views. attrelid = relation ID + 1; attnum = FIELD_ID + 1,
+не FIELD_POSITION. Для удалённого поля строки нет; live attisdropped=FALSE.
+Native GTT/unmanaged LTT и временные колонки в pg_attribute не заявляются:
+MON$ предоставляет snapshot/позиции, а не требуемые стабильные field IDs.
+Контракт и wire types: [DATABASE_CATALOG](1c/DATABASE_CATALOG.md).
+
+Приёмка PASS: `/tmp/app17-tables-catalog-03/summary.json`, 75 записей проверок.
+Проверены фактический запрос 1С COUNT четырёх таблиц (0 → 4 → 3 → 4), поиск
+config.partno с INT8/LIMIT, точные имена с пробелами/кавычкой и регистром,
+metadata visibility без разрешения читать чужие данные, tables versus views,
+DDL/rollback и drop/re-add поля, стабильный attnum после ALTER ... POSITION.
+Две libpq-сессии видят только собственные PG TEMP namespaces; DROP/ROLLBACK TO
+и native RESET сохраняют принятые APP-15 правила. Native RESET очищает данные,
+не удаляя definition identity; первоначальное неверное ожидание теста
+исправлено без изменения production behavior.
+
+Для каждого installer проверены injected failure/rollback, repeat refusal,
+PUBLIC SELECT и структурная read-only защита владельца. Native isql подтвердил
+COUNT=4, Extended Query text/binary — тот же int8 результат. Последняя проверка
+native COUNT отдельно сверена с retained `native_opening.log`. Сервер завершён
+exit 0, без forced kill. Основная база 1С/исходный PostgreSQL не использовались.
+
+```sh
+python3 -B pg_wire_protocol/tools/pgwire_tables_checks.py \
+  --firebird-dir /tmp/gen/Debug/firebird \
+  --work-dir /tmp/app17-tables-catalog-03
+```
+
+Оба SQL файла включены в общий `install_compat.py` после application functions.
+Будущее расширение temporary columns записано в существующей точке EXT-20;
+новая metadata API ради этого каталога не добавлялась.

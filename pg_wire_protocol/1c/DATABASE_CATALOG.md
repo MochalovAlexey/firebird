@@ -80,3 +80,42 @@ It covers atomic installation/collision refusal, the general fresh/upgrade
 installer, namespace identity preservation, two ordinary libpq connections,
 Simple/Extended Query, binary results, transaction/reset stability, read-only
 catalog behavior and changes to native default collation.
+
+## Table and column catalogs
+
+`sql/install_tables_catalog.sql` exposes `pg_catalog.pg_tables(schemaname,
+tablename)` through the existing live `pg_class`/`pg_namespace` projections.
+It lists persistent tables and the current attachment's PG temporary tables,
+preserves exact names, and excludes views. Catalog names are available to ordinary
+users independently of their permission to read table data. It inherits the
+existing class profile: native GTTs, unmanaged LTTs, package relations and external
+tables are not included. Native RESET clears temporary data and preserves its
+definition identity, so its catalog row remains until DROP or attachment close.
+
+`sql/install_attribute_catalog.sql` adds `pg_catalog.pg_attribute(attrelid,
+attname,attnum,attisdropped)` for persistent schema-level tables and views.
+Relation IDs use the same native ID + 1 mapping as `pg_class`; `attnum` is the
+stable native field ID + 1, not the changeable column position. A dropped field
+has no live row; the projection does not invent PostgreSQL historical tombstones.
+Live rows have `attisdropped = FALSE`. Field ID allocation/reuse follows Firebird.
+The wire types are BIGINT/20, VARCHAR/1043, INTEGER/23 and BOOLEAN/16 respectively.
+
+Temporary column metadata remains outside this projection. Existing
+`MON$LOCAL_TEMPORARY_TABLE_COLUMNS` has monitoring snapshot semantics and exposes
+positions rather than stable field IDs, so it cannot provide the same live
+contract. No additional engine metadata interface is introduced for this slice.
+Both views are read-only, installed atomically, and included in the general
+installer after the application functions. The accepted 1C queries count the
+four actual `public.config/configsave/params/files` tables and check the live
+`config.partno` field; neither result is a constant or a name-specific response.
+
+```sh
+python3 -B pg_wire_protocol/tools/pgwire_tables_checks.py \
+  --firebird-dir /path/to/completed/firebird \
+  --work-dir /tmp/pgwire-tables-checks
+```
+
+The focused checks cover ordinary-user access, exact quoted names, tables versus
+views, DDL/rollback, column POSITION versus field ID, drop/re-add, two independent
+temporary namespaces, savepoint undo, native RESET and Simple/Extended binary
+results. Each view's failed and repeated installation is also checked.

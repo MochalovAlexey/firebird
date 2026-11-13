@@ -11,6 +11,7 @@ ANALYZE и fasttruncate для PG LTT. Реальная база перенес�
 - [ANALYZE/fasttrun](TEMP_SERVICES.md).
 - [NULL-aware equality / fulleq](FULLEQ.md).
 - [Прикладные функции datediff2/vassn](APPLICATION_FUNCTIONS.md).
+- [format_number](NUMBER_FORMAT.md).
 - [Подготовка информационной базы](PREPARE_INFOBASE.md).
 
 APP-15 принят в `7799cd3a54`, NAT-06 — в `516f55bbb5`. APP-16 добавляет bytea,
@@ -20,7 +21,7 @@ mchar/mvarchar, BINROWVER/BOOL_OR и regnamespace; требуется ODS 14.1.
 
 ## Общая установка SQL совместимости
 
-[install_compat.py](install_compat.py) устанавливает все четырнадцать текущих SQL-скриптов
+[install_compat.py](install_compat.py) устанавливает все семнадцать текущих SQL-скриптов
 в порядке зависимостей на указанную существующую базу. Нужны Python 3 и native
 `isql` из этого fork с поддержкой APP-16 / ODS 14.1; запускать владельцем/администратором
 без конкурентного DDL. Например, через родной сетевой порт Firebird:
@@ -39,7 +40,7 @@ python3 pg_wire_protocol/1c/install_compat.py \
 
 Порядок: namespace registry → compat.sql → namespace catalog → class catalog →
 lowercase PG names → relation visibility → temporary relations → types/expressions → database catalog → advisory locks →
-type catalog → temporary-table services → fulleq → application functions. Каждый файл выполняется native isql
+type catalog → temporary-table services → fulleq → application functions → number formatting → tables catalog → attribute catalog. Каждый файл выполняется native isql
 с BAIL ON, отключённым AUTODDL, UTF8 и client dialect 3. При первой ошибке следующие
 файлы не запускаются; сообщение содержит имя неуспешного шага и ненулевой exit code.
 **Это первоначальная установка, не повторяемая миграция:** повтор полного набора
