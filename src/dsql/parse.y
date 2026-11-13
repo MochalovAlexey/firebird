@@ -7916,6 +7916,22 @@ delete_searched
 			node->dsqlReturning = $9;
 			$$ = node;
 		}
+	| DELETE FROM table_name USING pg_delete_using_list where_clause returning_clause
+		[if (!pgDialect) YYERROR;]
+		{
+			const auto node = newNode<EraseNode>();
+			node->dsqlRelation = $3;
+			node->dsqlUsing = $5;
+			node->dsqlBoolean = $6;
+			node->dsqlReturning = $7;
+			$$ = node;
+		}
+	;
+
+%type <recSourceListNode> pg_delete_using_list
+pg_delete_using_list
+	: table_name	{ $$ = newNode<RecSourceListNode>($1); }
+	| pg_delete_using_list ',' table_name	{ $$ = $1->add($3); }
 	;
 
 %type <stmtNode> delete_positioned

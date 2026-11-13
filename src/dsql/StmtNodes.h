@@ -625,6 +625,7 @@ private:
 
 public:
 	NestConst<RecordSourceNode> dsqlRelation;
+	NestConst<RecSourceListNode> dsqlUsing;
 	NestConst<BoolExprNode> dsqlBoolean;
 	NestConst<PlanNode> dsqlPlan;
 	NestConst<ValueListNode> dsqlOrder;

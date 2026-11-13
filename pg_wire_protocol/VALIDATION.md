@@ -5182,6 +5182,32 @@ Engine14 SHA256 `9f64567ea7b4678acc56e426363b10e62f7c5864474dc18078ac71516f8ce3d
 PgWire `1b4c78d6197fae266a6561fb57babcd4ea9ec1e1bc5dd90235859261cbfeb9b5`.
 Shared build, основной runtime и рабочие базы 1С этой проверкой не менялись.
 
+## APP-18: DELETE USING для фактической очистки Гилёва — 13 ноября 2026
+
+Первый запуск из обычного толстого клиента дошёл до `DELETE FROM _SeqB196 T1
+USING pg_temp.tt7 T2 WHERE T1._Fld195RRef = T2._Fld195RRef` и получил syntax
+error. Предшествующая очистка откатилась; сервер продолжил работать.
+Добавлена ограниченная PG4 grammar с преобразованием в native DELETE/EXISTS,
+без wire rewriting, нового API или ODS. [Контракт и ограничения](1c/DELETE_USING.md).
+
+Финальный focused suite `/tmp/app18-delete-using-05/summary.json`: **38 reference
+cases PASS** плюс exact 1C bytea-запрос, prepared binary input/results, native
+visibility после COMMIT, rollback/savepoints, PSQL/RETURNING/source guards,
+failed-prepare recovery и native dialects 1/2/3. Штатная остановка exit 0.
+Независимый review: **39 cases PASS** в
+`/tmp/app17-delete-using-review-final/summary.json` и
+`/tmp/app17-delete-using-nested-final/summary.json`; routine-source guard PASS
+в `/tmp/app17-delete-using-procedure-final/summary.json`.
+
+Обнаруженный native semijoin assert воспроизведён без USING на прежнем engine
+и исправлен отдельно в `0b67064650`. **14 native assertions PASS**:
+`/tmp/app17-native-semijoin-final/summary.json`; durable SQL и доказательство
+описаны в [NATIVE_SEMIJOIN_FIX](1c/NATIVE_SEMIJOIN_FIX.md).
+Parser conflict baseline не изменился: 165 shift/reduce, 12 reduce/reduce.
+Engine14 SHA256 `cc84d3c9b345688ef9694bdba74aac314bbedb4114b8e1431164d9370143a0a9`.
+Повторный фактический прогон Гилёва на этом engine начат; итог полной нагрузки
+фиксируется отдельно от этих проверок SQL.
+
 
 ## APP-17: persistent index catalog and shared namespace — 13 ноября 2026
 

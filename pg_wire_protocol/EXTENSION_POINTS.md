@@ -117,3 +117,9 @@ temporary columns нужен live provider со стабильными field IDs
 | ID | Точка | Контракт будущего отделения |
 |---|---|---|
 | EXT-25 | Attachment::qualifyPgRelationName; getPgObjectName / RDB$PG_INDEX_ID in SysFunction; install_index_catalog.sql | PG policy chooses one schema across native relation/index kinds before ordinary DSQL or visibility resolves the required kind. Preserve search_path order, USAGE, temp shadowing, exact metadata names, same-schema collision rejection and native dialect behavior. Native MET resolver/cache still own object lookup; SQL owns the >2^32 public BIGINT offset, not a core OID registry. Future isolation must keep ordinary lookup and catalog visibility consistent. |
+
+## DELETE USING
+
+| ID | Точка | Контракт будущего отделения |
+|---|---|---|
+| EXT-26 | parse.y `pg_delete_using_list`; EraseNode::dsqlUsing / dsqlPass | PG4 grammar и политика области имён преобразуются в обычный native DELETE + EXISTS. При вынесении диалекта сохранить однократное удаление при duplicate source, совместную область target/source (ambiguity/aliases), relation-only lookup, native privileges/rollback и явные границы RETURNING/PSQL. Исполнение и optimizer остаются общими; новое BLR/ODS/public API не требуется. Native empty-conjunct semijoin fix — общий дефект, не PG extension point. [Контракт](1c/DELETE_USING.md). |

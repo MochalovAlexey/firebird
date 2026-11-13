@@ -3299,6 +3299,9 @@ StmtNode* EraseNode::dsqlPass(DsqlCompilerScratch* dsqlScratch)
 {
 	NestConst<RelationSourceNode> relation = nodeAs<RelationSourceNode>(dsqlRelation);
 	fb_assert(relation);
+	if (dsqlUsing && dsqlScratch->isPsql())
+		ERRD_post(Arg::Gds(isc_wish_list) << Arg::Gds(isc_random) <<
+			"DELETE USING is not supported in PSQL");
 
 	const auto node = FB_NEW_POOL(dsqlScratch->getPool()) EraseNode(dsqlScratch->getPool());
 	node->dsqlCursorName = dsqlCursorName;
@@ -3347,7 +3350,77 @@ StmtNode* EraseNode::dsqlPass(DsqlCompilerScratch* dsqlScratch)
 		rse->dsqlStreams = FB_NEW_POOL(dsqlScratch->getPool()) RecSourceListNode(dsqlScratch->getPool(), 1);
 		doDsqlPass(dsqlScratch, rse->dsqlStreams->items[0], relation, false);
 
-		if (dsqlBoolean)
+		if (dsqlUsing)
+		{
+			auto& pool = dsqlScratch->getPool();
+			for (auto& source : dsqlUsing->items)
+			{
+				const auto sourceRelation = nodeAs<RelationSourceNode>(source);
+				// Unlike native FROM, this grammar accepts relations, not routines.
+				if (!std::holds_alternative<dsql_rel*>(dsqlScratch->resolveRoutineOrRelation(
+					sourceRelation->dsqlName, {obj_relation})))
+				{
+					ERRD_post(Arg::Gds(isc_sqlerr) << Arg::Num(-204) <<
+						Arg::Gds(isc_dsql_relation_err) << Arg::Gds(isc_random) <<
+						sourceRelation->dsqlName.toQuotedString());
+				}
+			}
+			const auto target = rse->dsqlStreams->items[0]->dsqlContext;
+			const auto targetName = target->ctx_alias.hasData() ?
+				target->ctx_alias.back() : target->ctx_relation->rel_name;
+			if (dsqlReturning)
+			{
+				// A source row is only tested for existence, not retained for RETURNING.
+				// Require explicit target columns instead of changing name resolution.
+				bool supported = dsqlReturning->first->items.hasData();
+				for (const auto item : dsqlReturning->first->items)
+				{
+					const auto field = nodeAs<FieldNode>(item);
+					supported &= field && field->dsqlQualifier.object.hasData() &&
+						PASS1_compare_alias(targetName, field->dsqlQualifier);
+				}
+				if (!supported)
+					ERRD_post(Arg::Gds(isc_wish_list) << Arg::Gds(isc_random) <<
+						"DELETE USING RETURNING requires qualified target columns");
+			}
+
+			const auto query = FB_NEW_POOL(pool) RseNode(pool);
+			query->dsqlFrom = dsqlUsing;
+			query->dsqlSelectList = FB_NEW_POOL(pool) ValueListNode(pool, MAKE_const_slong(1));
+			query->dsqlWhere = dsqlBoolean;
+			const auto select = FB_NEW_POOL(pool) SelectExprNode(pool);
+			select->querySpec = query;
+			const DsqlContextStack::iterator base(*dsqlScratch->context);
+			{
+				// USING and target share a SQL name scope; execution still uses an
+				// ordinary correlated EXISTS, deleting each target row at most once.
+				AutoSetRestore<USHORT> targetScope(&target->ctx_scope_level, dsqlScratch->scopeLevel + 1);
+				const auto usingRse = PASS1_rse(dsqlScratch, select);
+				HalfStaticArray<dsql_ctx*, 8> contexts(pool);
+				contexts.add(target);
+				for (const auto source : usingRse->dsqlStreams->items)
+				{
+					const auto context = source->dsqlContext;
+					const auto name = context->ctx_alias.hasData() ?
+						context->ctx_alias.back() : context->ctx_relation->rel_name;
+					for (const auto other : contexts)
+					{
+						const auto otherName = other->ctx_alias.hasData() ?
+							other->ctx_alias.back() : other->ctx_relation->rel_name;
+						if (name.object == otherName.object &&
+							(context->ctx_alias.hasData() || other->ctx_alias.hasData() || name == otherName))
+						{
+							ERRD_post(Arg::Gds(isc_sqlerr) << Arg::Num(-204) <<
+								Arg::Gds(isc_alias_conflict_err) << name.toQuotedString());
+						}
+					}
+					contexts.add(context);
+				}
+				rse->dsqlWhere = FB_NEW_POOL(pool) RseBoolNode(pool, blr_any, usingRse);
+			}
+			dsqlScratch->context->clear(base);
+		}
+		else if (dsqlBoolean)
 			rse->dsqlWhere = doDsqlPass(dsqlScratch, dsqlBoolean, false);
 
 		if (dsqlPlan)
@@ -3386,6 +3459,7 @@ string EraseNode::internalPrint(NodePrinter& printer) const
 	StmtNode::internalPrint(printer);
 
 	NODE_PRINT(printer, dsqlRelation);
+	NODE_PRINT(printer, dsqlUsing);
 	NODE_PRINT(printer, dsqlBoolean);
 	NODE_PRINT(printer, dsqlPlan);
 	NODE_PRINT(printer, dsqlOrder);
