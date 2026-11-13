@@ -652,6 +652,7 @@ using namespace Firebird;
 %token <metaNamePtr> RDB_PG_FASTTRUNCATE
 %token <metaNamePtr> RDB_PG_ADVISORY_LOCK
 %token <metaNamePtr> RDB_PG_RELATION_ID
+%token <metaNamePtr> RDB_PG_INDEX_ID
 %token <metaNamePtr> RDB_ROLE_IN_USE
 %token <metaNamePtr> RDB_SYSTEM_PRIVILEGE
 %token <metaNamePtr> RESET
@@ -9735,6 +9736,7 @@ system_function_std_syntax
 	| RDB_PG_FASTTRUNCATE
 	| RDB_PG_ADVISORY_LOCK
 	| RDB_PG_RELATION_ID
+	| RDB_PG_INDEX_ID
 	| RDB_RESET_CONTEXT
 	| RDB_ROLE_IN_USE
 	| RDB_SET_CONTEXT
@@ -10849,6 +10851,7 @@ non_reserved_word
 	| RDB_PG_FASTTRUNCATE
 	| RDB_PG_ADVISORY_LOCK
 	| RDB_PG_RELATION_ID
+	| RDB_PG_INDEX_ID
 	| MODE
 	| NATIVE
 	| NORMALIZE_DECFLOAT

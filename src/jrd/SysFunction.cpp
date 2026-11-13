@@ -5535,8 +5535,8 @@ void makePgRelationId(DataTypeUtilBase*, const SysFunction*, dsc* result, int, c
 }
 
 
-dsc* evlPgRelationId(thread_db* tdbb, const SysFunction*, const NestValueArray& args,
-	impure_value* impure)
+bool getPgObjectName(thread_db* tdbb, const SysFunction* function, const NestValueArray& args,
+	QualifiedName& result)
 {
 	// The argument may execute PSQL that changes attachment state. Validate the
 	// state used by the lookup, and keep guards ahead of the NULL result check.
@@ -5549,7 +5549,7 @@ dsc* evlPgRelationId(thread_db* tdbb, const SysFunction*, const NestValueArray& 
 	attachment->pgRelationPath(tdbb, path);
 
 	if (!value)
-		return nullptr;
+		return false;
 
 	const string name = MOV_make_string2(tdbb, value, ttype_metadata);
 	const auto charset = INTL_charset_lookup(tdbb, CS_METADATA);
@@ -5558,20 +5558,81 @@ dsc* evlPgRelationId(thread_db* tdbb, const SysFunction*, const NestValueArray& 
 		!charset->wellFormed(name.length(), (const UCHAR*) name.c_str(), nullptr) ||
 		charset->length(name.length(), (const UCHAR*) name.c_str(), false) > METADATA_IDENTIFIER_CHAR_LEN)
 	{
+		string message;
+		message.printf("%s expects an exact metadata name (1..63 characters, no NUL or trailing space)",
+			function->name);
 		(Arg::Gds(isc_invalid_name) <<
-			"RDB$PG_RELATION_ID expects an exact metadata name (1..63 characters, no NUL or trailing space)" <<
+			message <<
 			Arg::SqlState("22023")).raise();
 	}
 
 	// No SQL parsing, folding or trimming: dots and quotes are name characters.
-	QualifiedName relName(MetaName(name.c_str(), name.length()));
-	attachment->qualifyPgRelationName(tdbb, relName, {obj_relation});
+	result = QualifiedName(MetaName(name.c_str(), name.length()));
+	// PG tables, views and indexes occupy one relation namespace. A table in
+	// an earlier schema can hide an index, and the reverse is equally relevant.
+	attachment->qualifyPgRelationName(tdbb, result, {obj_relation, obj_index});
+	return true;
+}
+
+
+void checkPgObjectCollision(bool relation, bool index)
+{
+	// Native schemas permit this collision, while PostgreSQL does not. There
+	// is no faithful shared-namespace answer; reject rather than choose a kind.
+	if (relation && index)
+		(Arg::Gds(isc_wish_list) << Arg::Gds(isc_random) <<
+			"PG relation visibility does not support a table and index with the same schema/name" <<
+			Arg::SqlState("0A000")).raise();
+}
+
+
+dsc* evlPgRelationId(thread_db* tdbb, const SysFunction* function, const NestValueArray& args,
+	impure_value* impure)
+{
+	QualifiedName relName;
+	if (!getPgObjectName(tdbb, function, args, relName))
+		return nullptr;
 	const auto relation = MetadataCache::getVersioned<Cached::Relation>(tdbb, relName, CacheFlag::AUTOCREATE);
+	IndexStatus status;
+	const auto indexId = MetadataCache::lookup_index_name(tdbb, relName, nullptr, &status);
+	checkPgObjectCollision(relation != nullptr, indexId >= 0);
 	if (!relation)
 		return nullptr;
 
 	impure->vlu_misc.vlu_long = relation->getId();
 	impure->vlu_desc.makeLong(0, &impure->vlu_misc.vlu_long);
+	return &impure->vlu_desc;
+}
+
+
+void makePgIndexId(DataTypeUtilBase*, const SysFunction*, dsc* result, int, const dsc**)
+{
+	result->makeInt64(0);
+	result->setNullable(true);
+}
+
+
+dsc* evlPgIndexId(thread_db* tdbb, const SysFunction* function, const NestValueArray& args,
+	impure_value* impure)
+{
+	QualifiedName name;
+	if (!getPgObjectName(tdbb, function, args, name))
+		return nullptr;
+	MetaId relationId = 0;
+	IndexStatus status;
+	const auto indexId = MetadataCache::lookup_index_name(tdbb, name, &relationId, &status);
+	const auto relation = MetadataCache::getVersioned<Cached::Relation>(tdbb, name, CacheFlag::AUTOCREATE);
+	checkPgObjectCollision(relation != nullptr, indexId >= 0);
+	if (indexId < 0 || relation)
+		return nullptr;
+	const auto indexedRelation = MetadataCache::getVersioned<Cached::Relation>(tdbb, relationId, CacheFlag::AUTOCREATE);
+	if (!indexedRelation || indexedRelation->getPermanent()->isTemporary())
+		return nullptr; // Temporary indexes still shadow persistent ones above.
+
+	// Native index IDs are per relation and zero-based; RDB$INDEX_ID is one-based.
+	// Return the native pair only. The SQL catalog owns its public BIGINT offset.
+	impure->vlu_misc.vlu_int64 = SINT64(relationId) * 65536 + indexId + 1;
+	impure->vlu_desc.makeInt64(0, &impure->vlu_misc.vlu_int64);
 	return &impure->vlu_desc;
 }
 
@@ -7169,6 +7230,7 @@ const SysFunction SysFunction::functions[] =
 		{"RDB$PG_FASTTRUNCATE", 1, 1, 0, setParamsPgFastTruncate, makeLongResult, evlPgFastTruncate, NULL},
 		{"RDB$PG_ADVISORY_LOCK", 2, 2, 0, setParamsInt64, makeLongResult, evlPgAdvisoryLock, NULL},
 		{"RDB$PG_RELATION_ID", 1, 1, 0, setParamsPgRelationId, makePgRelationId, evlPgRelationId, NULL},
+		{"RDB$PG_INDEX_ID", 1, 1, 0, setParamsPgRelationId, makePgIndexId, evlPgIndexId, NULL},
 		{"RDB$ROLE_IN_USE", 1, 1, DETERMINISTIC, setParamsAsciiVal, makeBooleanResult, evlRoleInUse, NULL},
 		{RDB_RESET_CONTEXT, 1, 1, 0, setParamsResetContext, makeLongResult, evlResetContext, NULL},
 		{RDB_SET_CONTEXT, 3, 3, 0, setParamsGetSetContext, makeGetSetContext, evlSetContext, NULL},

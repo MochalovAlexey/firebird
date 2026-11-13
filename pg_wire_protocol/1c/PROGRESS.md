@@ -22,8 +22,10 @@ NULL-семантика unique сохранена native partial indexes. Ост
 expression indexes и три циклических sequence defaults; запуск разрешён с явно
 зафиксированным неполным schema profile. Реальный ibsrv уже выполняет запросы
 в Firebird; fulleq, datediff2 и vassn уже приняты его bootstrap-проверками.
-format_number и pg_tables/pg_attribute реализованы и проверены. 1С прочитал
-Config/version и перешёл к v8users; следующий блокер — pg_index и видимость индексов.
+format_number, pg_tables/pg_attribute и pg_index реализованы и проверены.
+Реальный ibsrv прочитал Config/version, конфигурацию и v8users, прошёл проверку
+индексов и сообщил ready. При последующих служебных UPDATE выявлен следующий
+блокер: text timestamp Bind вида `20261113 120430` пока отвергается TemporalCodec.
 Успешное открытие клиентского интерфейса ещё не достигнуто.
 
 Срез на 12 ноября 2026 года: P2 APP-14 в `11dee63d2a` прошёл code review без замечаний;

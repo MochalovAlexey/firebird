@@ -28,6 +28,7 @@ SCRIPTS = (
     "sql/install_number_format.sql",
     "sql/install_tables_catalog.sql",
     "sql/install_attribute_catalog.sql",
+    "sql/install_index_catalog.sql",
 )
 
 

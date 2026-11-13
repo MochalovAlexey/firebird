@@ -1020,7 +1020,27 @@ void Attachment::qualifyPgRelationName(thread_db* tdbb, QualifiedName& name,
 	{
 		ObjectsArray<MetaString> path(*tdbb->getDefaultPool());
 		pgRelationPath(tdbb, path, explicitPath);
-		if (!MET_qualify_existing_name(tdbb, name, objTypes, &path) && path.hasData())
+		// PostgreSQL tables/views/indexes share a namespace. Stop at the first
+		// matching kind even when the caller requires another kind; its native
+		// lookup will reject the object instead of silently using a later schema.
+		const bool otherKinds = std::any_of(objTypes.begin(), objTypes.end(), [](ObjectType type)
+		{
+			return type != obj_relation && type != obj_view && type != obj_index;
+		});
+		ObjectsArray<MetaString> candidate(*tdbb->getDefaultPool());
+		bool found = false;
+		for (const auto& schema : path)
+		{
+			candidate.clear();
+			candidate.add(schema);
+			if (MET_qualify_existing_name(tdbb, name, {obj_relation, obj_index}, &candidate) ||
+				(otherKinds && MET_qualify_existing_name(tdbb, name, objTypes, &candidate)))
+			{
+				found = true;
+				break;
+			}
+		}
+		if (!found && path.hasData())
 			name.schema = path[0];
 	}
 	if (name.schema == "PGWIRE_TEMP")

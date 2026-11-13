@@ -139,6 +139,15 @@ visibility и temporary schemas остаются APP-01/04. Эти ограни�
 Будущие indexes/sequences внутри PG_CLASS требуют непересекающихся с native
 relation mapping ключей; их native ID сам по себе может не быть глобально уникальным.
 
+13 ноября 2026: persistent index profile добавляет живые `relkind='i'` и
+`pg_index(indexrelid,indrelid)` с BIGINT ID `2^32 + relationId*65536 + indexId`.
+Общий PG поиск tables/views/indexes согласован с visibility, включая temp shadow.
+Открыты temporary index rows, остальные index columns/opclasses/definitions,
+oid32 контракт и native ALTER INDEX RENAME. Native same-schema table/index
+collision отвергается visibility helper; новый DDL constraint не добавлен.
+Переиспользование native ID после DROP и native security-cache lifetime сохраняются.
+Точные границы: [INDEX_CATALOG](1c/INDEX_CATALOG.md); будущая изоляция — EXT-25.
+
 После APP-13 остаются полная PG search_path semantics (implicit pg_catalog priority,
 $user, filtering по USAGE, transactional SET), regnamespace/type semantics и
 полная visibility/temp namespace. APP-14 покрывает только явно ограниченный профиль. Native MAKE_DBKEY не фильтрует schemas по USAGE;

@@ -5034,3 +5034,99 @@ python3 -B pg_wire_protocol/tools/pgwire_tables_checks.py \
 Оба SQL файла включены в общий `install_compat.py` после application functions.
 Будущее расширение temporary columns записано в существующей точке EXT-20;
 новая metadata API ради этого каталога не добавлялась.
+
+
+## APP-17: independent index review and final APP-16 regression — 13 ноября 2026
+
+Независимый review SQL каталога индексов и native helper завершён без
+блокирующих замечаний. Обнаруженное расхождение ordinary PG lookup с
+`pg_table_is_visible` исправлено в `Attachment::qualifyPgRelationName`:
+таблицы/views/индексы проверяются вместе внутри каждой схемы search path.
+Native dialects 1/2/3 продолжают использовать прежний resolver.
+
+- `/tmp/app17-index-visibility-oracle/summary.json`: **26 PASS** на отдельной
+  синтетической базе Postgres Pro 18.6, normal stop 0. Подтверждены mixed-kind
+  shadowing, implicit/explicit pg_temp, USAGE, exact quoted names и видимость
+  invalid индекса.
+- `/tmp/app17-index-challenge-03/summary.json`: **46 PASS** через настоящий libpq
+  на копии build11. SELECT/DROP не переходят к поздней схеме после объекта
+  неверного типа; временный индекс скрывает постоянную таблицу, даже когда
+  сам не входит в persistent-only index catalog. Проверены read-only transaction,
+  unknown identity, quoted names, отсутствие index rows в pg_tables/pg_attribute
+  и отказ при native same-schema table/index collision. Exit 0, forced kill false.
+- Отличия SQLSTATE сохранены: wrong-kind SELECT/DROP дают native
+  `42P01`/`42S02`/`42000` вместо PG `42809`; collision даёт `0A000` напрямую
+  из helper и `39000` через native PSQL wrapper. Предыдущие challenge-01/02
+  остановились на неподдержанном `SET search_path =` в тесте и ожидании
+  unwrapped `0A000`; production correction для этих двух ожиданий не делалась.
+
+Финальная полная APP-16 регрессия build11: **PASS, 583 записи матрицы и
+10054 OO API assertions**, с сохранёнными PostgreSQL oracle. Fresh install,
+injected rollback, collision/repeat refusal, IDs preservation, APP-15 ODS
+upgrade, native dialects 1/2/3, typed indexes/value typmod и restart — PASS.
+Оба временных сервера завершились exit 0 без forced kill.
+
+Артефакты: `/tmp/app17-index-app16-regression-final/summary.json`,
+`types-progress.json`, `types_api.log`.
+
+```sh
+python3 -B pg_wire_protocol/tools/pgwire_1c_smoke.py \
+  --firebird-dir /tmp/gen/Debug/firebird \
+  --work-dir /tmp/app17-index-app16-regression-final --types \
+  --previous-firebird-dir /tmp/app16-review-78e193be68/previous-runtime \
+  --types-oracle /tmp/app17-fulleq-types-oracle/summary.json \
+  --types-oracle-details /tmp/app17-fulleq-expressions-oracle/summary.json \
+  --capture-dir /home/aleksey/dev/1c/captures/20261109T105635Z --timeout 240
+```
+
+Source revision `31a49e10124934e9e8822e5e50af36c56c5f8446`, tracked source diff
+SHA256 `4cf8695ab705a139a3ed79e4d51d397ee7366d5824923a21c0b415313760a8f6`.
+Engine14 SHA256 `9f64567ea7b4678acc56e426363b10e62f7c5864474dc18078ac71516f8ce3de`;
+PgWire `1b4c78d6197fae266a6561fb57babcd4ea9ec1e1bc5dd90235859261cbfeb9b5`.
+Shared build, основной runtime и рабочие базы 1С этой проверкой не менялись.
+
+
+## APP-17: persistent index catalog and shared namespace — 13 ноября 2026
+
+PASS: `/tmp/app17-index-03/summary.json`, **109** записанных SQL результатов
+плюс native OO controls. Неизменённый фактический запрос 1С
+`v8users/byemail_v8users` выполняется через новые pg_index/pg_class rows и обе
+проверки visibility, в двух libpq сессиях.
+
+Проверены непересекающиеся BIGINT domains и native packed identity, отсутствие
+index rows в pg_tables/pg_attribute, INACTIVE/ACTIVE без потери ID, DROP/ROLLBACK,
+DROP/recreate, явный отказ unsupported ALTER INDEX RENAME, search_path порядок,
+schema USAGE, exact quoted names, NULL/invalid names и BIGINT Bind. Grant/revoke
+проверены с новыми attachments в соответствии с native security-cache lifetime.
+
+Mixed-kind tests подтверждают обе стороны shadowing: ранний index прерывает
+ordinary PG SELECT lookup; ранняя table прерывает index DDL lookup. Нельзя
+проскочить к объекту нужного типа в более поздней схеме. Implicit/explicit temp
+index и temp-table shadowing корректно скрывают persistent index; чужая сессия
+не наследует temporary shadow. Same-schema native table/index collision
+отвергается, а не возвращает произвольную visibility.
+
+Native OO контролирует **dialects1/2/3**: прежний native SELECT возвращает строку
+77 из таблицы за индексом, PG4 на том же поисковом пути отвергает имя. Native
+поведение не изменено. Сервер остановлен штатно с exit0, forced_kill=false.
+
+Независимый review/probe: `/tmp/app17-index-challenge-03/summary.json`, 42 проверки,
+exit0. Приватный PostgreSQL oracle: `/tmp/app17-index-visibility-oracle/summary.json`,
+26 cases, штатная остановка0; приложение/исходная база не затрагивались. Native
+wrong-kind SQLSTATE отличается от PG42809, PSQL collision может оборачиваться
+39000 вместо direct0A000 — обе границы описаны в контракте.
+
+Existing relation-visibility regression тоже PASS:
+`/tmp/app17-index-visibility-regression-02/summary.json`, **178 libpq результатов
+и82 native OO assertions**, same-prepared-handle/guard-before-NULL и native1/2/3,
+installer/upgrade и штатная остановка0. Первый запуск остановился только на
+историческом DatabaseAccess path в скопированном previous runtime; исправлен путь
+к новой disposable базе в этой приватной копии, production config не менялся.
+Старый suite по-прежнему помечает свой original selected04 как SKIP; этот статус
+не переименован в PASS.
+
+Engine14 SHA256 `9f64567ea7b4678acc56e426363b10e62f7c5864474dc18078ac71516f8ce3de`,
+PgWire `1b4c78d6197fae266a6561fb57babcd4ea9ec1e1bc5dd90235859261cbfeb9b5`.
+No registry/ODS/public API/dependency additions. Общий installer включает18 SQL
+файлов. Ограничения persistent-only/BIGINT/native ID reuse/security lifetime и
+дальнейшая изоляция EXT-25: [INDEX_CATALOG](1c/INDEX_CATALOG.md).

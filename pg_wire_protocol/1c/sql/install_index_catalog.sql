@@ -1,0 +1,51 @@
+-- Persistent index identities and visibility for the recorded 1C bootstrap.
+-- BIGINT identities occupy a range above every existing uint32 relation/temp ID.
+-- Native index IDs are per relation and one-based in RDB$INDICES.
+SET BAIL ON;
+SET AUTODDL OFF;
+
+CREATE VIEW PGWIRE_COMPAT.INDICES(OID, RELNAME, RELNAMESPACE, NATIVE_ID, RELATION_OID) AS
+    SELECT DISTINCT
+        CAST(4294967296 + CAST(R.RDB$RELATION_ID AS BIGINT) * 65536 + I.RDB$INDEX_ID AS BIGINT),
+        CAST(TRIM(TRAILING FROM I.RDB$INDEX_NAME) AS VARCHAR(63) CHARACTER SET SYSTEM.UTF8),
+        N."oid",
+        CAST(CAST(R.RDB$RELATION_ID AS BIGINT) * 65536 + I.RDB$INDEX_ID AS BIGINT),
+        CAST(R.RDB$RELATION_ID + 1 AS BIGINT)
+      FROM SYSTEM.RDB$INDICES I
+      JOIN SYSTEM.RDB$RELATIONS R ON R.RDB$SCHEMA_NAME=I.RDB$SCHEMA_NAME
+           AND R.RDB$RELATION_NAME=I.RDB$RELATION_NAME AND R.RDB$PACKAGE_NAME IS NULL
+      JOIN "pg_catalog"."pg_namespace" N ON N."nspname"=TRIM(TRAILING FROM I.RDB$SCHEMA_NAME)
+     WHERE I.RDB$PACKAGE_NAME IS NULL AND COALESCE(R.RDB$RELATION_TYPE,0)=0
+       AND I.RDB$INDEX_ID IS NOT NULL AND I.RDB$INDEX_ID>0;
+
+ALTER VIEW "pg_catalog"."pg_class"("oid", "relname", "relnamespace", "relkind") AS
+    SELECT DISTINCT OID, RELNAME, RELNAMESPACE, RELKIND FROM PGWIRE_COMPAT.RELATIONS
+    UNION ALL
+    SELECT OID, RELNAME, RELNAMESPACE, CAST('i' AS VARCHAR(1) CHARACTER SET SYSTEM.UTF8)
+      FROM PGWIRE_COMPAT.INDICES;
+
+CREATE VIEW "pg_catalog"."pg_index"("indexrelid", "indrelid") AS
+    SELECT DISTINCT OID, RELATION_OID FROM PGWIRE_COMPAT.INDICES;
+
+SET TERM ^;
+ALTER FUNCTION "pg_catalog"."pg_table_is_visible"("relation_oid" BIGINT)
+RETURNS BOOLEAN
+SQL SECURITY INVOKER
+AS
+DECLARE "exact_name" VARCHAR(63) CHARACTER SET SYSTEM.UTF8;
+DECLARE "kind" VARCHAR(1) CHARACTER SET SYSTEM.UTF8;
+DECLARE "native_id" INTEGER;
+BEGIN
+    SELECT C."relname", C."relkind" FROM "pg_catalog"."pg_class" C
+      WHERE C."oid"=:"relation_oid" INTO :"exact_name", :"kind";
+    IF ("exact_name" IS NULL) THEN RETURN NULL;
+    IF ("kind"='i') THEN
+        RETURN COALESCE(RDB$PG_INDEX_ID("exact_name")="relation_oid"-4294967296,FALSE);
+    SELECT NATIVE_ID FROM PGWIRE_COMPAT.RELATIONS WHERE OID=:"relation_oid" INTO :"native_id";
+    RETURN COALESCE(RDB$PG_RELATION_ID("exact_name")="native_id",FALSE);
+END^
+SET TERM ;^
+GRANT SELECT ON PGWIRE_COMPAT.INDICES TO PUBLIC;
+GRANT SELECT ON "pg_catalog"."pg_index" TO PUBLIC;
+-- ALTER preserves the existing class/function grants and relation identities.
+COMMIT;
