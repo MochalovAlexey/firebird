@@ -156,6 +156,28 @@ void timestamps()
 	parseTemporal(" 2000-01-02T12:34:56.123400\n", SQL_TIMESTAMP, false, &value);
 	require(value.timestamp_date == 51545 && value.timestamp_time == 452961234,
 		"ISO T separator or fractional timestamp rejected");
+	for (const auto text : {"20261113 120430", " 20261113 120430.000000\n"})
+	{
+		parseTemporal(text, SQL_TIMESTAMP, false, &value);
+		require(formatTemporal(&value, SQL_TIMESTAMP, false) == "2026-11-13 12:04:30",
+			"1C compact timestamp changed calendar date or time");
+	}
+	for (const auto text : {"20000102 123456.1234", "20000102 123456.12340",
+		"20000102 123456.123400"})
+	{
+		parseTemporal(text, SQL_TIMESTAMP, false, &value);
+		require(value.timestamp_date == 51545 && value.timestamp_time == 452961234,
+			"Compact timestamp fraction was rounded or scaled incorrectly");
+	}
+	parseTemporal("00010101 000000", SQL_TIMESTAMP, false, &value);
+	require(value.timestamp_date == -678575 && value.timestamp_time == 0,
+		"Compact timestamp lower bound rejected");
+	parseTemporal("99991231 235959.9999", SQL_TIMESTAMP, false, &value);
+	require(value.timestamp_date == 2973483 && value.timestamp_time == 863999999,
+		"Compact timestamp upper bound rejected");
+	parseTemporal("20000229 000000.0001", SQL_TIMESTAMP, false, &value);
+	require(value.timestamp_date == 51603 && value.timestamp_time == 1,
+		"Compact leap-day timestamp rejected");
 }
 
 void reject(std::string_view value, unsigned type, bool binary, const char* state)
@@ -170,7 +192,8 @@ void reject(std::string_view value, unsigned type, bool binary, const char* stat
 void invalidText()
 {
 	for (const auto value : {"", "2000-1-01", "2000-01-1", "01/01/2000", "2000/01/01",
-		"2000-01-01 BC", "2000-01-01Z", "+2000-01-01", "10000-01-01", "200x-01-01"})
+		"2000-01-01 BC", "2000-01-01Z", "+2000-01-01", "10000-01-01", "200x-01-01",
+		"20261113"})
 	{
 		reject(value, SQL_TYPE_DATE, false, "22007");
 	}
@@ -180,7 +203,7 @@ void invalidText()
 		reject(value, SQL_TYPE_DATE, false, "22008");
 	}
 	for (const auto value : {"00:00", "0:00:00", "00:00:00.", "00:00:00.0000000",
-		"00:00:00Z", "00:00:00+00:00", "00:00:00 UTC", "00:00:00.1234x"})
+		"00:00:00Z", "00:00:00+00:00", "00:00:00 UTC", "00:00:00.1234x", "120430"})
 	{
 		reject(value, SQL_TYPE_TIME, false, "22007");
 	}
@@ -195,6 +218,19 @@ void invalidText()
 		reject(value, SQL_TIMESTAMP, false, "22007");
 	}
 	reject("2000-01-01 00:00:00.000001", SQL_TIMESTAMP, false, "22008");
+	for (const auto value : {"20261113 12043", "20261113 1204300", "20261113 120430.",
+		"20261113 120430.1234567", "20261113 120430Z", "20261113 120430+03:00",
+		"20261113T120430", "20261113  120430", "20261113\t120430",
+		"2026111x 120430", "20261113 12043x", "20261113 120430.1234x"})
+	{
+		reject(value, SQL_TIMESTAMP, false, "22007");
+	}
+	for (const auto value : {"00000101 000000", "20261301 000000", "19000229 000000",
+		"20260230 000000", "20261113 240000", "20261113 126000", "20261113 120460",
+		"20261113 120430.000001", "20261113 120430.00001", "20261113 120430.123450"})
+	{
+		reject(value, SQL_TIMESTAMP, false, "22008");
+	}
 	for (auto type : {SQL_TYPE_DATE, SQL_TYPE_TIME, SQL_TIMESTAMP})
 	{
 		for (const auto value : {"infinity", "-infinity", "+INFINITY"})

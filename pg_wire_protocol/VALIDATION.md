@@ -1,5 +1,35 @@
 # Проверки реализации
 
+## 13 ноября 2026: компактный timestamp реального клиента 1С
+
+При UPDATE `public.params` настоящий клиент передал timestamp-параметр
+`20261113 120430` (тип выведен движком, текстовый формат Bind). PgWire ранее
+отклонял его с `22007`. Теперь только timestamp text дополнительно принимает
+`YYYYMMDD HHMMSS[.fraction]`; прежние функции проверки календаря/времени и
+native точность 100 µs переиспользованы. Изменений движка и новых зависимостей нет.
+
+- Root build12 и unit `pgwire_temporal_test` — **369 checks PASS**;
+  input/result codec regressions также прошли. Добавлены точный формат 1С,
+  leap day, годы 0001/9999, дроби и отказ повреждённых/непредставимых значений
+  без изменения native output buffer.
+- Независимый readonly PostgreSQL oracle: 45 наблюдений в
+  `/tmp/app17-compact-timestamp-oracle.json`; компактный timestamp и дроби
+  подтверждены. Нормализация `240000`/переполненного времени, которую допускает
+  PG, намеренно не расширяет текущий строгий native профиль.
+- Focused existing `CodecHarness.temporal` и
+  `invalid_before_effects` — PASS, `/tmp/app17-compact-codecs-03/summary.json`.
+  Проверены семь compact fixtures, исходные ISO/binary epochs, результат
+  через настоящий PQexecParams в text/binary и OID 1114, 100 µs и отказ до
+  необратимого sequence effect. Native probe PASS, сервер завершён штатно.
+- Historical `simple_null_and_visibility` старого P8 harness отдельно
+  обнаружил несогласованные unquoted F4/F8/TM/I после PG identifier folding
+  (`42703`); этот устаревший тест не относится к temporal fix и не исправлялся.
+  Полный старый C-driver suite не запускался: libpq headers отсутствуют;
+  текущая проверка переиспользовала установленный libpq через ctypes.
+
+Границы формата записаны в COMPATIBILITY; canonical output и отдельные DATE/
+TIME codecs сохранены. Независимый code/test review и `git diff --check` — PASS.
+
 ## 13 ноября 2026: native функции 1С datediff2 и vassn
 
 `1c/sql/install_1c_functions.sql` устанавливает реальные PSQL-функции без
@@ -5110,7 +5140,7 @@ Native OO контролирует **dialects1/2/3**: прежний native SELE
 77 из таблицы за индексом, PG4 на том же поисковом пути отвергает имя. Native
 поведение не изменено. Сервер остановлен штатно с exit0, forced_kill=false.
 
-Независимый review/probe: `/tmp/app17-index-challenge-03/summary.json`, 42 проверки,
+Независимый review/probe: `/tmp/app17-index-challenge-03/summary.json`, 46 проверок,
 exit0. Приватный PostgreSQL oracle: `/tmp/app17-index-visibility-oracle/summary.json`,
 26 cases, штатная остановка0; приложение/исходная база не затрагивались. Native
 wrong-kind SQLSTATE отличается от PG42809, PSQL collision может оборачиваться

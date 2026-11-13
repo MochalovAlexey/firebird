@@ -119,13 +119,14 @@ unsigned digits(std::string_view text)
 	return value;
 }
 
-ISC_DATE dateFromText(std::string_view text)
+ISC_DATE dateFromText(std::string_view text, bool compact = false)
 {
-	if (text.size() != 10 || text[4] != '-' || text[7] != '-')
+	if (text.size() != (compact ? 8 : 10) ||
+		(!compact && (text[4] != '-' || text[7] != '-')))
 		syntax();
 	const auto year = digits(text.substr(0, 4));
-	const auto month = digits(text.substr(5, 2));
-	const auto day = digits(text.substr(8, 2));
+	const auto month = digits(text.substr(compact ? 4 : 5, 2));
+	const auto day = digits(text.substr(compact ? 6 : 8, 2));
 	if (!year || !month || month > 12 || !day || day > monthDays(year, month))
 		range();
 	unsigned days = daysBeforeYear(year) + day - 1;
@@ -134,20 +135,22 @@ ISC_DATE dateFromText(std::string_view text)
 	return static_cast<ISC_DATE>(MIN_DATE + days);
 }
 
-ISC_TIME timeFromText(std::string_view text)
+ISC_TIME timeFromText(std::string_view text, bool compact = false)
 {
-	if (text.size() < 8 || text[2] != ':' || text[5] != ':')
+	const unsigned clockLength = compact ? 6 : 8;
+	if (text.size() < clockLength || (!compact && (text[2] != ':' || text[5] != ':')))
 		syntax();
 	const auto hour = digits(text.substr(0, 2));
-	const auto minute = digits(text.substr(3, 2));
-	const auto second = digits(text.substr(6, 2));
+	const auto minute = digits(text.substr(compact ? 2 : 3, 2));
+	const auto second = digits(text.substr(compact ? 4 : 6, 2));
 	unsigned micros = 0;
-	if (text.size() != 8)
+	if (text.size() != clockLength)
 	{
-		if (text[8] != '.' || text.size() < 10 || text.size() > 15)
+		if (text[clockLength] != '.' || text.size() < clockLength + 2 ||
+			text.size() > clockLength + 7)
 			syntax();
-		micros = digits(text.substr(9));
-		for (auto i = text.size() - 9; i < 6; ++i)
+		micros = digits(text.substr(clockLength + 1));
+		for (auto i = text.size() - clockLength - 1; i < 6; ++i)
 			micros *= 10;
 	}
 	if (hour > 23 || minute > 59 || second > 59 || micros % MICROS_PER_TICK)
@@ -321,6 +324,13 @@ void parseTemporal(std::string_view value, unsigned type, bool binary, void* nat
 			date = dateFromText(value);
 		else if (type == SQL_TYPE_TIME)
 			time = timeFromText(value);
+		else if (value.size() >= 15 && value[8] == ' ')
+		{
+			// 1C binds timestamps as compact ISO YYYYMMDD HHMMSS[.fraction].
+			// Share the ISO calendar, time-of-day and exact-precision checks.
+			date = dateFromText(value.substr(0, 8), true);
+			time = timeFromText(value.substr(9), true);
+		}
 		else
 		{
 			if (value.size() < 19 || (value[10] != ' ' && value[10] != 'T'))

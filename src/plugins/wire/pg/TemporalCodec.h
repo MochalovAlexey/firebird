@@ -22,7 +22,8 @@ namespace Firebird::PgWire
 
 // SQL_TYPE_DATE/TIME and SQL_TIMESTAMP without timezone; native may be unaligned.
 // Text uses ISO dates and HH:MM:SS with optional fractional seconds, up to six
-// input digits. Values must fit years 0001..9999 and exact native 100us ticks.
+// input digits. Timestamps also accept compact YYYYMMDD HHMMSS[.fraction].
+// Values must fit years 0001..9999 and exact native 100us ticks.
 // Binary uses PostgreSQL network-order days/microseconds from 2000-01-01.
 // NULL is handled by the caller. Failed parsing leaves native unchanged.
 std::string formatTemporal(const void* native, unsigned type, bool binary);

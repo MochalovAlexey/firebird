@@ -557,6 +557,13 @@ Numeric не проходит через float и не округляется: o
 
 Temporal text принимает строгий ISO `YYYY-MM-DD`, `HH:MM:SS[.ffffff]`, `YYYY-MM-DD HH:MM:SS[.ffffff]` либо разделитель `T`. Дробь содержит до шести цифр; пятая/шестая должны быть нулевыми для точного 100 µs native значения. Binary µs также должны делиться на 100 без остатка. Invalid text format — 22007; календарные/временные границы, непредставимая точность и infinity — 22008; неверная binary length — 22P03. Текстовые BC/TZ suffix не входят в ISO grammar и дают 22007; binary даты до 0001 года, 24:00 и leap second дают 22008. `integer_datetimes=on` отражает binary layout; TimeZone не публикуется. Binary BLOB output добавлен в APP-07, bounded input — в APP-08; большие input/прочие BLOB subtype, ARRAY/OCTETS/DECFLOAT/TZ остаются отдельной работой.
 
+Для фактических timestamp-параметров 1С дополнительно поддержан компактный
+`YYYYMMDD HHMMSS[.ffffff]` с одним пробелом, например `20261113 120430`.
+Результат остаётся обычным ISO; проверка календаря, времени суток и точности
+100 µs общая с прежним форматом. Отдельные DATE/TIME compact input, компактный
+разделитель `T`, зоны и нормализация переполненного времени (`240000` и т.п.)
+не добавлены; PostgreSQL принимает некоторые из этих форм шире текущего профиля.
+
 ## P9: клиентский профиль и подтверждённые ограничения
 
 Зафиксированы C libpq 14.24 (headers/runtime) и Psycopg 3.3.6 с binary implementation/libpq 18.6 на Python 3.10.12. В Linux/Super IPv4 loopback профиль Psycopg 3 прошёл пять групп с четырьмя подтверждёнными ограничениями. Использованы настоящие Cursor/AsyncCursor, SQL без параметров и без rewriting; pipeline не проверялся. Полная целевая P9 приёмка прошла 17 групп; M2 принят для совместимого SQL и реализованных codecs.

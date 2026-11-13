@@ -16,6 +16,7 @@ import subprocess
 from pgwire_extended_query_smoke import (
     ExtendedHarness, ExtendedClient, bind, columns, describe, execute, parse, row)
 from pgwire_startup_smoke import StartupHarness, packet
+from pgwire_1c_smoke import Libpq
 from wire_host_smoke import require, reserve_ports
 
 
@@ -117,7 +118,32 @@ QUIT;
                     f'{datatype}: binary round trip differs')
             actual = self.value(c, datatype, wire, oid, True).decode()
             require(iso_value(datatype, actual) == iso_value(datatype, text), f'{datatype}: ISO text value differs: {actual!r}')
+        for compact, canonical in (
+            ('20261113 120430', datetime(2026,11,13,12,4,30)),
+            ('20261113 120430.1', datetime(2026,11,13,12,4,30,100000)),
+            ('20261113 120430.12', datetime(2026,11,13,12,4,30,120000)),
+            ('20261113 120430.123', datetime(2026,11,13,12,4,30,123000)),
+            ('20000102 123456.123400', datetime(2000,1,2,12,34,56,123400)),
+            ('00010101 000000', datetime(1,1,1)),
+            ('99991231 235959.9999', datetime(9999,12,31,23,59,59,999900))):
+            delta = canonical - datetime(2000,1,1)
+            wire = struct.pack('!q', (delta.days*86400+delta.seconds)*1000000+delta.microseconds)
+            require(self.value(c,'TIMESTAMP',compact,1114,output_binary=True) == wire,
+                    'Compact timestamp changed its date, time or fractional precision')
+            actual = self.value(c,'TIMESTAMP',compact,1114).decode()
+            require(iso_value('TIMESTAMP',actual) == canonical,
+                    'Compact timestamp did not produce canonical ISO output')
         self.finish(c)
+        client = Libpq({'port':self.pg_port, 'password':self.password})
+        try:
+            for binary, expected in ((0,'2026-11-13 12:04:30'), (1,'00030325ffc66f80')):
+                result = client.params('SELECT CAST(? AS TIMESTAMP) FROM "SYSTEM"."RDB$DATABASE"',
+                                       ['20261113 120430'], result_format=binary)
+                require(not result['sqlstate'] and result['rows'] == [[expected]] and
+                        result['columns'][0]['oid'] == 1114,
+                        'Real libpq compact timestamp text/binary output differs')
+        finally:
+            client.close()
 
     def exact_numeric(self):
         c = ExtendedClient(self).login()
@@ -200,6 +226,9 @@ QUIT;
             ('TIME',struct.pack('!q',86400000000),True,'22008'),
             ('TIMESTAMP',struct.pack('!q',-1),True,'22008'),
             ('TIMESTAMP','2000-01-01T00:00:00Z',False,'22007'),
+            ('TIMESTAMP','20261113 120430.',False,'22007'),
+            ('TIMESTAMP','20260230 120430',False,'22008'),
+            ('TIMESTAMP','20261113 120430.000001',False,'22008'),
             ('TIMESTAMP',b'\0'*7,True,'22P03'),
             ('INT128','170141183460469231731687303715884105728',False,'22003'),
             ('NUMERIC(38,2)','1.001',False,'22003'),
